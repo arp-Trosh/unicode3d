@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .texture import build_mipmaps
+
 
 @dataclass
 class Mesh:
@@ -10,7 +12,7 @@ class Mesh:
     faces: np.ndarray                    # (F, 3) int, counter-clockwise when seen from outside
     uvs: np.ndarray | None = None        # (F, 3, 2) per-corner texture coordinates
     materials: np.ndarray | None = None  # (F,) index into `textures`
-    textures: list = field(default_factory=list)  # (H, W) float arrays, 0..1 brightness multipliers
+    textures: list = field(default_factory=list)  # (H, W) brightness multipliers or (H, W, 3) colours, 0..1 sRGB
 
     def vertex_normals(self):
         """Area-weighted average of the normals of the faces around each vertex.
@@ -29,6 +31,15 @@ class Mesh:
         normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
         self._normals = (self.vertices, normals)
         return normals
+
+    def mipmaps(self, material):
+        """Mipmap chain of textures[material], built on first use and rebuilt if the texture is replaced."""
+        cache = self.__dict__.setdefault("_mipmaps", {})
+        tex = self.textures[material]
+        cached = cache.get(material)
+        if cached is None or cached[0] is not tex:
+            cached = cache[material] = (tex, build_mipmaps(tex))
+        return cached[1]
 
     def normalized(self, size=2.0):
         """Copy centred on the origin with its largest extent equal to `size`."""

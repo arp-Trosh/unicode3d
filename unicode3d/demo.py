@@ -1,12 +1,13 @@
 """Dice rolling demo: python -m unicode3d.demo [-n DICE] [--seed N]"""
 import argparse
-import curses
 
 import numpy as np
 
 from .dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from .scene import Camera, Light, Object3D, Renderer
-from .terminal import Color, init_locale, run_loop
+from .color import Color
+from .keys import Key
+from .terminal import add_display_args, display_options, run
 from .transforms import normalize
 
 DIE_COLORS = (Color.GREEN, Color.YELLOW, Color.RED)
@@ -55,7 +56,7 @@ class DiceDemo:
         for k in keys:
             if k in (ord("q"), ord("Q"), 27):
                 return False
-            if k in (ord(" "), ord("\n"), curses.KEY_ENTER):
+            if k in (ord(" "), ord("\n"), Key.ENTER):
                 self.roll()
             elif k in (ord("+"), ord("=")):
                 self.set_count(min(len(self.dice) + 1, MAX_DICE))
@@ -72,7 +73,7 @@ class DiceDemo:
 
         rows, cols = screen.size()
         view_rows = max(rows - HUD_ROWS, 1)
-        self.renderer.resize(cols, view_rows)
+        self.renderer.resize(cols, view_rows, screen.cell_pixels)
         self.fit_camera(cols, view_rows)
         fb = self.renderer.render(self.dice, self.camera, self.light)
 
@@ -93,12 +94,11 @@ def main():
     parser.add_argument("-n", "--dice", type=int, default=3, help=f"number of dice (1-{MAX_DICE})")
     parser.add_argument("--seed", type=int, help="random seed")
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--ascii", action="store_true", help="draw with ASCII characters instead of Unicode blocks")
+    add_display_args(parser)
     args = parser.parse_args()
-    init_locale()
     demo = DiceDemo(min(max(args.dice, 1), MAX_DICE), args.seed)
     try:
-        curses.wrapper(run_loop, demo.frame, args.fps, "ascii" if args.ascii else None)
+        run(demo.frame, args.fps, **display_options(args))
     except KeyboardInterrupt:
         pass
 

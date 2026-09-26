@@ -4,14 +4,15 @@ WASD moves the camera, arrow keys look around, q/e slow down / speed up the
 spin, Esc or Ctrl-C quits.
 """
 import argparse
-import curses
 
 import numpy as np
 
 from .dice import make_die
 from .mesh import load_obj
 from .scene import Camera, Light, Object3D, Renderer
-from .terminal import Color, init_locale, run_loop
+from .color import Color
+from .keys import Key
+from .terminal import add_display_args, display_options, run
 from .transforms import UP, quat_axis_angle, quat_mul
 
 
@@ -36,13 +37,13 @@ class Viewer:
             moves = {ord("w"): fwd * step, ord("s"): -fwd * step, ord("d"): right * step, ord("a"): -right * step}
             if k in moves:
                 self.camera.position = self.camera.position + moves[k]
-            elif k == curses.KEY_UP:
+            elif k == Key.UP:
                 self.pitch = min(self.pitch + turn, 1.5)
-            elif k == curses.KEY_DOWN:
+            elif k == Key.DOWN:
                 self.pitch = max(self.pitch - turn, -1.5)
-            elif k == curses.KEY_LEFT:
+            elif k == Key.LEFT:
                 self.yaw -= turn
-            elif k == curses.KEY_RIGHT:
+            elif k == Key.RIGHT:
                 self.yaw += turn
             elif k == ord("q"):
                 self.spin /= 2
@@ -52,7 +53,7 @@ class Viewer:
         self.obj.rotation = quat_mul(quat_axis_angle(self.axis, self.spin * dt), self.obj.rotation)
 
         rows, cols = screen.size()
-        self.renderer.resize(cols, max(rows - 1, 1))
+        self.renderer.resize(cols, max(rows - 1, 1), screen.cell_pixels)
         fb = self.renderer.render([self.obj], self.camera, self.light)
         screen.erase()
         screen.draw_frame(fb)
@@ -67,12 +68,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("model", nargs="?", help="Wavefront .obj file (default: a die)")
     parser.add_argument("--double-sided", action="store_true", help="draw back faces (for meshes with bad winding)")
-    parser.add_argument("--ascii", action="store_true", help="draw with ASCII characters instead of Unicode blocks")
+    add_display_args(parser)
     args = parser.parse_args()
-    init_locale()
     mesh = load_obj(args.model).normalized() if args.model else make_die(1.5)
     try:
-        curses.wrapper(run_loop, Viewer(mesh, args.double_sided).frame, 30, "ascii" if args.ascii else None)
+        run(Viewer(mesh, args.double_sided).frame, 30, **display_options(args))
     except KeyboardInterrupt:
         pass
 

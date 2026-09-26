@@ -1,9 +1,12 @@
-"""3D renderer for the terminal (curses + numpy).
+"""3D renderer for the terminal (numpy only, no curses).
 
-Draws with Unicode half blocks in 256 colours where the terminal allows, with an
-ASCII fallback. Ported in spirit from https://github.com/ShakedAp/ASCII-renderer.
+Draws with Unicode block characters in 24-bit, 256 or 16 colours, whatever the
+terminal supports, with an ASCII fallback; runs in Windows Terminal and Unix
+terminals alike. Ported in spirit from https://github.com/ShakedAp/ASCII-renderer.
 """
+from .color import Color
+from .keys import Key, MouseEvent
 from .mesh import Mesh, load_obj, make_box
 from .raster import FrameBuffer
 from .scene import Camera, Light, Object3D, Renderer
-from .terminal import Color, Screen, frame_to_text, init_locale, run_loop
+from .terminal import Screen, add_display_args, display_options, frame_to_text, run

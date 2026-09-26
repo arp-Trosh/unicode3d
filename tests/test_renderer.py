@@ -6,10 +6,15 @@ import numpy as np
 
 from unicode3d.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
+from unicode3d.color import Color, linear_to_srgb, luminance, quantize, sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb
+from unicode3d.console import WindowsConsole, detect_color_mode, detect_glyphs
+from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
+from unicode3d.keys import InputDecoder, Key, MouseEvent
 from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Object3D, Renderer
-from unicode3d.terminal import PALETTE, Color, cell_shade, frame_to_text
-from unicode3d.transforms import quat_between, quat_to_matrix
+from unicode3d.terminal import Screen
+from unicode3d.texture import build_mipmaps
+from unicode3d.transforms import quat_axis_angle, quat_between, quat_to_matrix
 
 
 class TransformTests(unittest.TestCase):
@@ -46,6 +51,11 @@ class DiceTests(unittest.TestCase):
             self.assertGreater(start_pos[1], rest[1] + 4.0)
 
 
+def lum(fb):
+    """Luminance of each pixel's own colour."""
+    return luminance(fb.colour())
+
+
 class RenderTests(unittest.TestCase):
     def render(self, objects, w=80, h=30, camera=None, **kwargs):
         camera = camera or Camera(position=np.array([0.0, 0.0, 5.0]))
@@ -54,38 +64,72 @@ class RenderTests(unittest.TestCase):
     def test_die_is_drawn_centred(self):
         fb = self.render([Object3D(make_die())])
         self.assertEqual((fb.width, fb.height), (80, 60))  # two pixels per cell, stacked
-        drawn = fb.shade >= 0
+        drawn = fb.alpha > 0.5
         self.assertTrue(drawn[30, 40])
-        self.assertFalse(drawn[0, 0] or drawn[-1, -1])
+        self.assertFalse(fb.drawn[0, 0] or fb.drawn[-1, -1])
         rows, cols = np.nonzero(drawn)
         self.assertAlmostEqual(rows.mean(), 30, delta=1.5)
         self.assertAlmostEqual(cols.mean(), 40, delta=1.5)
         # The centre pip is darker than the lit face around it.
-        self.assertLess(fb.shade[30, 40], fb.shade[30, 44] - 0.2)
+        self.assertLess(lum(fb)[30, 40], 0.5 * lum(fb)[30, 44])
         self.assertTrue(set(frame_to_text(fb)) & set(".:-"))
         self.assertEqual(len(frame_to_text(fb).splitlines()), 30)
 
     def test_die_is_round_not_stretched(self):
         # Pixels are about square, so a cube seen face-on covers a square of pixels.
-        fb = self.render([Object3D(make_box())], supersample=1, fog=0, outline=0)
-        rows, cols = np.nonzero(fb.shade >= 0)
+        fb = self.render([Object3D(make_box())], samples=1, fog=0, outline=0)
+        rows, cols = np.nonzero(fb.drawn)
         self.assertAlmostEqual(np.ptp(rows) / np.ptp(cols), 1.0, delta=0.1)
 
+    def test_finer_cells_keep_proportions(self):
+        # 2x3 pixels per cell: pixels are then narrower, and a cube must still come out square on screen.
+        fb = self.render([Object3D(make_box())], cell_pixels=(2, 3), samples=1, fog=0, outline=0)
+        self.assertEqual((fb.width, fb.height), (160, 90))
+        rows, cols = np.nonzero(fb.drawn)
+        cell_h, cell_w = np.ptp(rows) / 3, np.ptp(cols) / 2
+        self.assertAlmostEqual(cell_h / (cell_w * 0.5), 1.0, delta=0.1)  # a cell is half as wide as tall
+
     def test_nearer_object_wins_depth_test(self):
-        near = Object3D(make_box(), position=np.array([0.0, 0.0, 1.0]), color=2)
-        far = Object3D(make_box(2.0), position=np.array([0.0, 0.0, -2.0]), color=3)
-        for order in ([near, far], [far, near]):
+        near = Object3D(make_box(), position=np.array([0.0, 0.0, 1.0]))
+        far = Object3D(make_box(2.0), position=np.array([0.0, 0.0, -2.0]))
+        for order, near_id in (([near, far], 1), ([far, near], 2)):
             fb = self.render(order)
-            self.assertEqual(fb.color[30, 40], 2)
+            self.assertEqual(fb.ids[30, 40], near_id)
 
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
-        self.assertFalse((fb.shade >= 0).any())
+        self.assertFalse(fb.drawn.any())
 
     def test_supersampling_matches_plain_render(self):
-        plain = self.render([Object3D(make_box())], supersample=1, fog=0, outline=0)
-        smooth = self.render([Object3D(make_box())], supersample=3, fog=0, outline=0)
-        self.assertLess(np.abs((plain.shade >= 0).sum() - (smooth.shade >= 0).sum()), 0.1 * (plain.shade >= 0).sum())
+        plain = self.render([Object3D(make_box())], samples=1, fog=0, outline=0)
+        smooth = self.render([Object3D(make_box())], samples=16, fog=0, outline=0)
+        self.assertAlmostEqual(smooth.alpha.sum(), plain.alpha.sum(), delta=0.05 * plain.alpha.sum())
+
+    def test_edges_get_extra_samples(self):
+        # A slanted edge: with 4 samples, edge pixels have coverage in quarters; the extra
+        # samples there give finer steps, while fully covered pixels stay solid.
+        box = Object3D(make_box(), rotation=quat_axis_angle((0, 0, 1), 0.3))
+        base = self.render([box], samples=4, edge_samples=0, fog=0, outline=0)
+        fine = self.render([box], samples=4, edge_samples=8, fog=0, outline=0)
+        levels = lambda fb: set(np.round(fb.alpha[(fb.alpha > 0) & (fb.alpha < 1)] * 12).astype(int))
+        self.assertTrue(levels(base) <= {3, 6, 9})
+        self.assertGreater(len(levels(fine) - {3, 6, 9}), 3)
+        self.assertEqual(fine.alpha[30, 40], 1.0)
+
+    def test_edge_pixels_blend_by_coverage(self):
+        # A pixel half covered by a flat face carries half its light (linear, premultiplied by coverage).
+        box = Object3D(make_box(), rotation=quat_axis_angle((0, 0, 1), 0.3))
+        fb = self.render([box], samples=16, edge_samples=0, fog=0, outline=0)
+        partial = (fb.alpha > 0.3) & (fb.alpha < 0.7)
+        self.assertTrue(partial.any())
+        face = np.median(fb.rgb[fb.alpha == 1], axis=0)
+        np.testing.assert_allclose(fb.rgb[partial], fb.alpha[partial, None] * face, rtol=0.15)
+
+    def test_rgb_object_colour(self):
+        fb = self.render([Object3D(make_box(), color=(255, 0, 0))], fog=0, outline=0)
+        r, g, b = fb.colour()[30, 40]
+        self.assertGreater(r, 0.2)
+        self.assertLess(max(g, b), 0.2 * r + 0.05)  # the white highlight may add a little of each
 
     def test_smooth_shading_on_shared_vertices(self):
         # An octahedron shades smoothly: neighbouring pixels differ gently, not in flat steps.
@@ -93,8 +137,8 @@ class RenderTests(unittest.TestCase):
         f = np.array([(4, 0, 2), (4, 2, 1), (4, 1, 3), (4, 3, 0), (5, 2, 0), (5, 1, 2), (5, 3, 1), (5, 0, 3)])
         mesh = Mesh(v, f)
         np.testing.assert_allclose(np.linalg.norm(mesh.vertex_normals(), axis=1), 1.0)
-        fb = self.render([Object3D(mesh)], supersample=1, fog=0, outline=0)
-        row = fb.shade[30][fb.shade[30] >= 0]
+        fb = self.render([Object3D(mesh)], samples=1, fog=0, outline=0)
+        row = lum(fb)[30][fb.drawn[30]]
         self.assertGreater(len(np.unique(np.round(row, 3))), 10)
 
     def test_camera_inside_scene_clips_instead_of_dropping(self):
@@ -102,26 +146,37 @@ class RenderTests(unittest.TestCase):
         floor = Mesh(np.array([(-5, 0, 5), (5, 0, 5), (5, 0, -50), (-5, 0, -50)], float), np.array([(0, 1, 2), (0, 2, 3)]))
         camera = Camera(position=np.array([0.0, 1.0, 0.0]), target=np.array([0.0, 0.0, -3.0]))
         fb = self.render([Object3D(floor)], camera=camera)
-        self.assertTrue((fb.shade[-1] >= 0).all())  # the bottom row is floor right up to the camera
+        self.assertTrue(fb.drawn[-1].all())  # the bottom row is floor right up to the camera
 
     def test_outline_darkens_far_side_of_overlap(self):
         near = Object3D(make_box(), position=np.array([0.0, 0.0, 1.5]))
         far = Object3D(make_box(4.0), position=np.array([0.0, 0.0, -3.0]))
         plain = self.render([near, far], fog=0, outline=0)
         lined = self.render([near, far], fog=0, outline=0.6)
-        darker = lined.shade < plain.shade - 1e-6
+        darker = luminance(lined.rgb) < luminance(plain.rgb) - 1e-6
         self.assertTrue(darker.any())
-        self.assertEqual(lined.color[darker].tolist(), [0] * int(darker.sum()))
-        self.assertFalse((lined.shade[30, 35:46] < plain.shade[30, 35:46] - 1e-6).any())  # the near box is untouched
+        self.assertEqual(set(lined.ids[darker].tolist()), {2})
+        self.assertFalse(darker[30, 35:46].any())  # the near box is untouched
 
     def test_fog_dims_distant_surfaces(self):
         near = Object3D(make_box(), position=np.array([-1.0, 0.0, 0.0]))
         far = Object3D(make_box(), position=np.array([1.5, 0.0, -6.0]))
         clear = self.render([near, far], fog=0, outline=0)
         foggy = self.render([near, far], fog=0.5, outline=0)
-        far_px = (clear.color == 0) & (clear.shade >= 0) & (np.arange(80) > 44)
+        far_px = (clear.ids == 2) & (clear.alpha == 1)
         self.assertTrue(far_px.any())
-        self.assertLess(foggy.shade[far_px].mean(), 0.75 * clear.shade[far_px].mean())
+        self.assertLess(luminance(foggy.rgb)[far_px].mean(), 0.75 * luminance(clear.rgb)[far_px].mean())
+
+    def test_textures_are_mipmapped(self):
+        # A fine checkerboard seen small averages to grey instead of aliasing into random black and white.
+        checks = (np.indices((64, 64)).sum(axis=0) % 2).astype(float)
+        levels = build_mipmaps(checks)
+        self.assertEqual([lv.shape[0] for lv in levels], [64, 32, 16, 8, 4, 2, 1])
+        np.testing.assert_allclose(levels[-1], srgb_to_linear(np.array(1.0)) / 2)
+        box = make_box(1.0, [checks] * 6)
+        fb = self.render([Object3D(box, color=Color.WHITE)], w=16, h=6, samples=1, fog=0, outline=0)
+        face = lum(fb)[fb.alpha == 1]
+        self.assertLess(face.std(), 0.1 * face.mean())
 
     def test_load_obj_triangulates_quads(self):
         src = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nf 1/1 2/1 3/1 4/1\nf -4 -3 -2\n"
@@ -135,23 +190,165 @@ class RenderTests(unittest.TestCase):
         np.testing.assert_array_equal(mesh.faces, [[0, 1, 2], [0, 2, 3], [0, 1, 2]])
 
 
-class TerminalTests(unittest.TestCase):
-    def test_palette_gets_brighter(self):
-        from unicode3d.terminal import xterm_rgb
-        rgb = xterm_rgb()
-        for hue in Color:
-            lum = rgb[PALETTE[hue] - 16] @ [0.30, 0.59, 0.11]
-            self.assertTrue((np.diff(lum) >= 0).all(), hue)
-            self.assertLess(lum[0], lum[-1])
+class ColorTests(unittest.TestCase):
+    def test_srgb_round_trip(self):
+        c = np.linspace(0, 1, 11)
+        np.testing.assert_allclose(linear_to_srgb(srgb_to_linear(c)), c, atol=1e-9)
 
-    def test_cell_shade_merges_pixel_pairs(self):
-        fb = FrameBuffer(2, 4)
-        fb.shade[:] = [[0.2, -1], [0.6, -1], [-1, -1], [-1, 0.5]]
-        fb.depth[:] = [[0.1, 0], [0.2, 0], [0, 0], [0, 0.3]]
-        fb.color[:] = [[1, 0], [2, 0], [0, 0], [0, 3]]
-        shade, color = cell_shade(fb)
-        np.testing.assert_allclose(shade, [[0.4, -1], [-1, 0.5]])
-        self.assertEqual(color.tolist(), [[2, 0], [0, 3]])  # the nearer pixel's colour
+    def test_truecolor_is_exact(self):
+        packed = quantize(srgb_to_linear(np.array([[10, 200, 30]]) / 255), "truecolor")
+        self.assertEqual(sgr_color(packed[0]), "38;2;10;200;30")
+        self.assertEqual(sgr_color(packed[0], background=True), "48;2;10;200;30")
+
+    def test_palettes_keep_the_hue(self):
+        rgb = xterm_rgb()
+        for mode in ("256", "16"):
+            for hue in (Color.RED, Color.GREEN, Color.BLUE):
+                packed = int(quantize(to_linear_rgb(hue) * 0.5, mode))
+                r, g, b = rgb[packed & 255]
+                channel = {Color.RED: r, Color.GREEN: g, Color.BLUE: b}[hue]
+                self.assertEqual(channel, max(r, g, b), (mode, hue.name))
+                self.assertGreater(channel, min(r, g, b))
+
+    def test_dither_mixes_neighbouring_colours(self):
+        # A flat colour between two palette entries comes out as a pattern of both.
+        c = np.full((8, 8, 3), srgb_to_linear(115 / 255))
+        ys, xs = np.mgrid[0:8, 0:8]
+        self.assertGreater(len(np.unique(quantize(c, "256", ys, xs))), 1)
+        self.assertEqual(len(np.unique(quantize(c, "256", ys, xs, dither=False))), 1)
+
+
+def fb_from(alpha, rgb=(1.0, 1.0, 1.0), cell_pixels=(2, 2)):
+    alpha = np.asarray(alpha, float)
+    fb = FrameBuffer(alpha.shape[1], alpha.shape[0], cell_pixels)
+    fb.alpha[:] = alpha
+    fb.rgb[:] = alpha[..., None] * np.asarray(rgb, float)
+    return fb
+
+
+class GlyphTests(unittest.TestCase):
+    def test_glyph_tables(self):
+        for g in GLYPH_SETS.values():
+            if g.chars:
+                self.assertEqual(len(g.chars), 2 ** g.pixel_count, g.name)
+                self.assertEqual(len(set(g.chars)), len(g.chars), g.name)
+                self.assertEqual((g.chars[0], g.chars[-1]), (" ", "█"))
+        sextant = GLYPH_SETS["sextant"].chars
+        self.assertEqual(sextant[1], "\U0001FB00")  # top-left sixth
+        self.assertEqual(sextant[62], "\U0001FB3B")  # all but the top-left
+        self.assertEqual(sextant[21], "▌")
+
+    def test_quad_picks_the_covered_quarters(self):
+        cells = match_cells(fb_from([[1, 0], [1, 1]]), GLYPH_SETS["quad"])
+        self.assertEqual(cells.chars[0, 0], "▙")
+        self.assertTrue(cells.fg_on[0, 0])
+        self.assertFalse(cells.bg_on[0, 0])  # the empty quarter shows the terminal background
+
+    def test_background_side_becomes_foreground(self):
+        # Only the bottom-right is drawn: that has to be the foreground of ▗, not the background of ▛.
+        cells = match_cells(fb_from([[0, 0], [0, 1]]), GLYPH_SETS["quad"])
+        self.assertEqual(cells.chars[0, 0], "▗")
+        self.assertTrue(cells.fg_on[0, 0] and not cells.bg_on[0, 0])
+
+    def test_two_colours_split_along_their_edge(self):
+        fb = FrameBuffer(2, 3, (2, 3))
+        fb.alpha[:] = 1.0
+        fb.rgb[:] = (0.9, 0.1, 0.1)
+        fb.rgb[:, 1] = (0.1, 0.1, 0.9)  # right column blue
+        cells = match_cells(fb, GLYPH_SETS["sextant"])
+        self.assertIn(cells.chars[0, 0], "▌▐")
+        self.assertTrue(cells.fg_on[0, 0] and cells.bg_on[0, 0])
+        colours = {tuple(np.round(cells.fg[0, 0], 2)), tuple(np.round(cells.bg[0, 0], 2))}
+        self.assertEqual(colours, {(0.9, 0.1, 0.1), (0.1, 0.1, 0.9)})
+
+    def test_empty_and_faint_cells_stay_blank(self):
+        cells = match_cells(fb_from([[0.1, 0], [0, 0.1]]), GLYPH_SETS["quad"])
+        self.assertEqual(cells.chars[0, 0], " ")
+        self.assertFalse(cells.fg_on[0, 0])
+
+    def test_half_blocks(self):
+        cells = match_cells(fb_from([[1, 0], [0, 1]], cell_pixels=(1, 2)), GLYPH_SETS["half"])
+        self.assertEqual(cells.chars[0].tolist(), ["▀", "▄"])
+
+
+class InputTests(unittest.TestCase):
+    def test_keys_and_sequences(self):
+        d = InputDecoder()
+        self.assertEqual(d.feed("a\r\x1b[A\x1b[B\x1bOC\x1b[3~\x1b[1;5D\x7f", 0.0),
+                         [ord("a"), 13, Key.UP, Key.DOWN, Key.RIGHT, Key.DELETE, Key.LEFT, 127])
+
+    def test_split_sequence_waits_for_the_rest(self):
+        d = InputDecoder()
+        self.assertEqual(d.feed("\x1b[", 0.0), [])
+        self.assertEqual(d.flush(0.01), [])
+        self.assertEqual(d.feed("A", 0.02), [Key.UP])
+
+    def test_lone_escape_after_timeout(self):
+        d = InputDecoder()
+        self.assertEqual(d.feed("\x1b", 0.0), [])
+        self.assertEqual(d.flush(0.1), [Key.ESC])
+        self.assertEqual(d.feed("\x1bq", 0.2), [Key.ESC, ord("q")])
+
+    def test_sgr_mouse(self):
+        d = InputDecoder()
+        events = d.feed("\x1b[<0;10;5M\x1b[<0;10;5m\x1b[<65;1;1M\x1b[<32;3;3M", 0.0)
+        self.assertEqual(events, [MouseEvent(9, 4, 0, True), MouseEvent(9, 4, 0, False), MouseEvent(0, 0, 65, True)])
+
+    def test_windows_records_translate_to_vt(self):
+        from types import SimpleNamespace as NS
+        con = WindowsConsole.__new__(WindowsConsole)
+        con._buttons = 0
+        key = lambda down, ch, vk=0: NS(bKeyDown=down, wRepeatCount=1, uChar=ch, wVirtualKeyCode=vk)
+        self.assertEqual(con._key(key(True, ord("x"))), "x")
+        self.assertEqual(con._key(key(True, 0, 0x26)), "\x1b[A")
+        self.assertEqual(con._key(key(False, ord("x"))), "")
+        mouse = lambda x, y, state, flags=0: NS(dwMousePosition=NS(X=x, Y=y), dwButtonState=state, dwEventFlags=flags)
+        text = con._mouse(mouse(4, 2, 1)) + con._mouse(mouse(4, 2, 0))
+        self.assertEqual(InputDecoder().feed(text, 0.0), [MouseEvent(4, 2, 0, True), MouseEvent(4, 2, 0, False)])
+
+
+class ScreenTests(unittest.TestCase):
+    def test_detection(self):
+        self.assertEqual(detect_color_mode({"WT_SESSION": "x", "TERM": "xterm-256color"}, windows=False), "truecolor")
+        self.assertEqual(detect_color_mode({}, windows=True), "truecolor")
+        self.assertEqual(detect_color_mode({"TERM": "xterm-256color"}, windows=False), "256")
+        self.assertEqual(detect_color_mode({"TERM": "xterm-256color", "COLORTERM": "truecolor"}, windows=False), "truecolor")
+        self.assertEqual(detect_color_mode({"TERM": "xterm", "UNICODE3D_COLOR": "16"}, windows=False), "16")
+        self.assertEqual(detect_glyphs({}, unicode_ok=True), "quad")
+        self.assertEqual(detect_glyphs({}, unicode_ok=False), "ascii")
+        self.assertEqual(detect_glyphs({"UNICODE3D_GLYPHS": "sextant"}), "sextant")
+
+    def test_refresh_sends_only_changes(self):
+        screen = Screen(glyphs="quad", color="truecolor", size=(5, 20))
+        screen.text(1, 2, "hello", Color.GREEN, bold=True)
+        first = screen.render_updates()
+        self.assertIn("\x1b[2J", first)  # the first refresh redraws everything
+        self.assertIn("\x1b[0;1;32;49mhello", first)
+        self.assertEqual(screen.render_updates(), "")  # nothing changed
+        screen.text(1, 3, "a")
+        second = screen.render_updates()
+        self.assertIn("\x1b[2;4H", second)
+        self.assertNotIn("\x1b[2J", second)
+        self.assertNotIn("hello", second)
+
+    def test_frame_needs_matching_cell_pixels(self):
+        screen = Screen(glyphs="sextant", color="truecolor", size=(10, 20))
+        renderer = Renderer(10, 5)
+        fb = renderer.render([Object3D(make_box())], Camera(), Light())
+        with self.assertRaises(ValueError):
+            screen.draw_frame(fb)
+        renderer.resize(10, 5, screen.cell_pixels)
+        screen.draw_frame(renderer.render([Object3D(make_box())], Camera(), Light()), 2, 3)
+        drawn = screen.chars[2:7, 3:13] != " "
+        self.assertTrue(drawn.any())
+        self.assertTrue((screen.fg[2:7, 3:13][drawn] > 0).all())  # truecolor, not the default colour
+        out = screen.render_updates()
+        self.assertIn("38;2;", out)
+
+    def test_wide_characters_are_replaced(self):
+        screen = Screen(color="mono", size=(2, 10))
+        screen.text(0, 0, "a\u4e2db\u0301")
+        self.assertEqual("".join(screen.chars[0, :4]), "a?b?")
 
 
 if __name__ == "__main__":

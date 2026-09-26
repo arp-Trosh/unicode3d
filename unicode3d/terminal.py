@@ -1,315 +1,237 @@
-"""Turning framebuffers into terminal cells and drawing them with curses.
+"""The screen: a grid of terminal cells that text and rendered frames are drawn into.
 
-Two drawing modes:
+Screen keeps what should be on screen and what is on screen, and refresh()
+sends only the cells that changed, as VT escape sequences. It needs no curses,
+so the same code runs in Windows Terminal, the Windows console and Unix terminals.
 
-  half   Unicode half blocks: each cell shows two pixels, the top one in the
-         foreground colour of "▀" and the bottom one in its background colour.
-         Brightness comes from a 256-colour palette of shades for each hue.
-  ascii  One character per cell from a brightness ramp, for terminals without
-         Unicode or 256 colours. Where 256 colours exist the characters are also
-         tinted by brightness; otherwise dim/bold attributes add two more tones.
+How frames look is set by two independent choices (see glyphs.py and color.py):
+
+  glyphs  half, quad, sextant or ascii: how many sub-pixels a cell shows
+  color   truecolor, 256, 16 or mono: how many colours the terminal has
+
+Both are detected, and can be forced with arguments, the UNICODE3D_GLYPHS and
+UNICODE3D_COLOR environment variables, or the command-line flags that
+add_display_args() adds.
 """
-import curses
-import locale
 import time
-from enum import IntEnum
+import unicodedata
 
 import numpy as np
 
-from .raster import PIXELS_PER_CELL
+from .color import COLOR_MODES, DEFAULT, Color, ansi_color, quantize, sgr_color, to_linear_rgb
+from .console import detect_color_mode, detect_glyphs, open_console
+from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
+from .keys import InputDecoder, Key, MouseEvent
 
-RAMP = " .:-=+*#%@"  # dark -> bright; the first character is the empty background
-MODES = ("half", "ascii")
-SHADE_LEVELS = 24
+__all__ = ["Color", "Key", "MouseEvent", "Screen", "run", "add_display_args", "display_options", "frame_to_text"]
 
-
-class Color(IntEnum):
-    DEFAULT = 0
-    WHITE = 1
-    RED = 2
-    GREEN = 3
-    YELLOW = 4
-    BLUE = 5
-    MAGENTA = 6
-    CYAN = 7
+BOLD, DIM, REVERSE = 1, 2, 4
+_ATTR_SGR = {BOLD: "1", DIM: "2", REVERSE: "7"}
+MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
 
 
-_CURSES_COLORS = {
-    Color.WHITE: curses.COLOR_WHITE,
-    Color.RED: curses.COLOR_RED,
-    Color.GREEN: curses.COLOR_GREEN,
-    Color.YELLOW: curses.COLOR_YELLOW,
-    Color.BLUE: curses.COLOR_BLUE,
-    Color.MAGENTA: curses.COLOR_MAGENTA,
-    Color.CYAN: curses.COLOR_CYAN,
-}
-
-# Fully lit surface colour of each hue; darker shades scale toward black.
-HUE_RGB = {
-    Color.DEFAULT: (235, 235, 235),
-    Color.WHITE: (235, 235, 235),
-    Color.RED: (240, 70, 55),
-    Color.GREEN: (90, 230, 90),
-    Color.YELLOW: (245, 215, 70),
-    Color.BLUE: (90, 130, 245),
-    Color.MAGENTA: (220, 90, 220),
-    Color.CYAN: (80, 215, 225),
-}
-
-
-def xterm_rgb():
-    """RGB of xterm-256 colours 16..255 (the 6x6x6 cube and the grey ramp)."""
-    steps = np.array([0, 95, 135, 175, 215, 255])
-    cube = np.array([(steps[r], steps[g], steps[b]) for r in range(6) for g in range(6) for b in range(6)])
-    grey = np.array([(8 + 10 * i,) * 3 for i in range(24)])
-    return np.concatenate([cube, grey]).astype(float)
-
-
-LUMA = np.array([0.30, 0.59, 0.11])
-
-
-def hue_sat(rgb):
-    """Hue in degrees and HSV saturation of RGB rows."""
-    rgb = np.atleast_2d(rgb).astype(float)
-    hi, lo = rgb.max(axis=1), rgb.min(axis=1)
-    c = np.maximum(hi - lo, 1e-9)
-    r, g, b = rgb.T
-    h = np.where(hi == r, ((g - b) / c) % 6, np.where(hi == g, (b - r) / c + 2, (r - g) / c + 4)) * 60
-    return h, np.where(hi > 0, (hi - lo) / np.maximum(hi, 1e-9), 0)
-
-
-def build_palette(levels=SHADE_LEVELS):
-    """palette[hue, level] -> xterm colour index, never getting darker from one level to the next.
-
-    Shadows keep more of their hue than a plain scale toward black would give them:
-    xterm's 256 colours have few dark saturated entries, and without this a green
-    die's shaded faces would turn grey.
-    """
-    rgb = xterm_rgb()
-    luma = rgb @ LUMA
-    cand_hue, cand_sat = hue_sat(rgb)
-    table = np.zeros((len(Color), levels), dtype=np.int16)
-    for hue, base in HUE_RGB.items():
-        base = np.array(base, dtype=float)
-        grey = base @ LUMA
-        (h,), (sat,) = hue_sat(base)
-        off_hue = np.abs((cand_hue - h + 180) % 360 - 180) > 20
-        banned = off_hue & (cand_sat > 0.25) if sat > 0.25 else cand_sat > 0.25  # greys are always allowed
-        prev = -1.0
-        for lvl in range(levels):
-            f = 0.08 + 0.92 * lvl / (levels - 1)
-            want = grey * f + (base - grey) * np.sqrt(f)
-            dist = ((rgb - np.clip(want, 0, 255)) ** 2).sum(axis=1)
-            dist[(luma < prev) | banned] = np.inf
-            best = int(np.argmin(dist))
-            table[hue, lvl], prev = 16 + best, luma[best]
-    return table
-
-
-PALETTE = build_palette()
-
-
-def shade_levels(shade, levels=SHADE_LEVELS):
-    return np.clip(np.rint(shade * (levels - 1)), 0, levels - 1).astype(int)
-
-
-def cell_shade(fb):
-    """Collapse a pixel framebuffer to one (shade, colour) per cell, for character modes.
-
-    Shade is the mean of a cell's drawn pixels (-1 if none); colour is the nearer pixel's.
-    """
-    h = fb.height // PIXELS_PER_CELL
-    shade = fb.shade[:h * PIXELS_PER_CELL].reshape(h, PIXELS_PER_CELL, fb.width)
-    depth = fb.depth[:h * PIXELS_PER_CELL].reshape(h, PIXELS_PER_CELL, fb.width)
-    color = fb.color[:h * PIXELS_PER_CELL].reshape(h, PIXELS_PER_CELL, fb.width)
-    drawn = shade >= 0
-    n = drawn.sum(axis=1)
-    mean = np.where(n > 0, np.where(drawn, shade, 0).sum(axis=1) / np.maximum(n, 1), -1.0)
-    nearest = depth.argmax(axis=1)[:, None]
-    return mean, np.take_along_axis(color, nearest, axis=1)[:, 0]
-
-
-def shade_to_chars(shade, ramp=RAMP):
-    """Map a per-cell shade array to ASCII codes (H, W) uint8.
-
-    Drawn cells never use the background character, so even unlit surfaces
-    keep their silhouette.
-    """
-    codes = np.frombuffer(ramp.encode("ascii"), dtype=np.uint8)
-    n = len(codes)
-    idx = 1 + np.clip(np.rint(shade * (n - 2)), 0, n - 2).astype(int)
-    idx[shade < 0] = 0
-    return codes[idx]
-
-
-def frame_to_text(fb, ramp=RAMP):
-    """Plain-text rendering of a framebuffer, one character per cell, for tests and debugging."""
-    shade, _ = cell_shade(fb)
-    return "\n".join(row.tobytes().decode("ascii") for row in shade_to_chars(shade, ramp))
-
-
-def init_locale():
-    """Let curses use the terminal's encoding (UTF-8 for half blocks). Call before curses starts."""
-    try:
-        locale.setlocale(locale.LC_ALL, "")
-    except locale.Error:
-        pass
-
-
-def pick_mode(stdscr):
-    """The richest mode this terminal supports."""
-    encoding = (getattr(stdscr, "encoding", None) or locale.getpreferredencoding(False) or "").lower()
-    unicode_ok = encoding.replace("-", "").replace("_", "") in ("utf8",)
-    try:
-        colors_ok = curses.has_colors() and curses.COLORS >= 256 and curses.COLOR_PAIRS >= 1024
-    except AttributeError:  # COLORS is only defined once colours have been started
-        colors_ok = False
-    return "half" if unicode_ok and colors_ok else "ascii"
-
-
-HALF_GLYPHS = np.array([" ", "▀", "▄", "█"])
+def _printable(ch):
+    """ch if it takes exactly one cell, otherwise '?' (the grid has no room for wide or zero-width characters)."""
+    if ch.isprintable() and unicodedata.east_asian_width(ch) not in "WF" and not unicodedata.combining(ch):
+        return ch
+    return "?"
 
 
 class Screen:
-    """Thin wrapper over a curses window."""
+    """What is drawn on the terminal: text, and frames from a Renderer.
 
-    def __init__(self, stdscr, ramp=RAMP, mode=None):
-        self.stdscr = stdscr
-        self.ramp = ramp
-        stdscr.nodelay(True)
-        stdscr.keypad(True)
-        curses.set_escdelay(25)  # make a bare Esc key register promptly
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        self.has_color = curses.has_colors()
-        self.background = -1
-        if self.has_color:
-            curses.start_color()
-            try:
-                curses.use_default_colors()
-            except curses.error:
-                self.background = curses.COLOR_BLACK
-            for color, curses_color in _CURSES_COLORS.items():
-                curses.init_pair(int(color), curses_color, self.background)
-        self.shaded = self.has_color and curses.COLORS >= 256
-        self.mode = mode if mode in MODES else pick_mode(stdscr)
-        if self.mode == "half" and not self.shaded:
-            self.mode = "ascii"
-        self._pairs = {}
-        self._next_pair = len(Color)
-        self._max_pairs = curses.COLOR_PAIRS if self.has_color else 0
+    console: the Console to draw on (None for an off-screen grid, e.g. in tests).
+    glyphs, color: force a glyph set / colour mode instead of detecting one.
+    background: (r, g, b) to fill the screen with, or None for the terminal's own
+    background. Knowing the background lets anti-aliased edges blend into it exactly.
+    """
+
+    def __init__(self, console=None, glyphs=None, color=None, background=None, size=(24, 80)):
+        self.console = console
+        unicode_ok = console.unicode if console is not None else True
+        color = color or detect_color_mode()
+        if color not in COLOR_MODES:
+            raise ValueError(f"color must be one of {COLOR_MODES}, not {color!r}")
+        if glyphs is None:
+            # Without colour, blocks would only show silhouettes; the ASCII ramp still shows shading.
+            glyphs = "ascii" if color == "mono" else detect_glyphs(unicode_ok=unicode_ok)
+        if glyphs not in GLYPH_SETS:
+            raise ValueError(f"glyphs must be one of {GLYPH_MODES}, not {glyphs!r}")
+        if glyphs != "ascii" and not unicode_ok:
+            glyphs = "ascii"
+        self.glyphs = GLYPH_SETS[glyphs]
+        self.color_mode = color
+        self.background = None if background is None else to_linear_rgb(background)
+        self._bg_cell = DEFAULT if background is None else int(quantize(self.background, color))
+        self._decoder = InputDecoder()
+        self._sgr = {}
+        self._rows = self._cols = 0
+        self._resize(*(size if console is None else console.size()[::-1]))
+
+    @property
+    def cell_pixels(self):
+        """(columns, rows) of pixels in a cell; pass it to Renderer.resize."""
+        return self.glyphs.cell_pixels
+
+    @property
+    def mode(self):
+        """Name of the glyph set in use."""
+        return self.glyphs.name
 
     def size(self):
-        """(rows, cols) of the terminal."""
-        return self.stdscr.getmaxyx()
+        """(rows, cols) of the terminal, as of the start of this frame."""
+        return self._rows, self._cols
+
+    def _resize(self, rows, cols):
+        self._rows, self._cols = rows, cols
+        self.chars = np.full((rows, cols), " ", dtype="<U1")
+        self.fg = np.full((rows, cols), DEFAULT, dtype=np.int64)
+        self.bg = np.full((rows, cols), self._bg_cell, dtype=np.int64)
+        self.attrs = np.zeros((rows, cols), dtype=np.uint8)
+        self._shown = None  # unknown: the next refresh redraws everything
+
+    def poll_size(self):
+        """Pick up a change in terminal size (run() calls this before every frame)."""
+        if self.console is not None:
+            cols, rows = self.console.size()
+            if (rows, cols) != (self._rows, self._cols):
+                self._resize(rows, cols)
+
+    # ----- input ---------------------------------------------------------------------------
 
     def keys(self):
-        """All keys pressed since the last call."""
-        keys = []
-        while (k := self.stdscr.getch()) != -1:
-            keys.append(k)
-        return keys
+        """Keys pressed and mouse clicks since the last call: ints (see keys.Key) and MouseEvents."""
+        if self.console is None:
+            return []
+        now = time.monotonic()
+        text = self.console.read()
+        events = self._decoder.feed(text, now) if text else []
+        return events + self._decoder.flush(now)
+
+    # ----- drawing -------------------------------------------------------------------------
 
     def erase(self):
-        self.stdscr.erase()
-
-    def pair(self, fg, bg=-1):
-        """Colour pair number for xterm colours fg on bg (-1: the terminal's background)."""
-        key = (int(fg), int(bg))
-        pair = self._pairs.get(key)
-        if pair is None:
-            if self._next_pair >= self._max_pairs:
-                return self._pairs.get((key[0], -1), 0)  # out of pairs: drop the background
-            pair = self._next_pair
-            self._next_pair += 1
-            curses.init_pair(pair, key[0], self.background if key[1] < 0 else key[1])
-            self._pairs[key] = pair
-        return pair
-
-    def draw_frame(self, fb, top=0, left=0):
-        if self.mode == "half":
-            self._draw_half(fb, top, left)
-        else:
-            self._draw_ascii(fb, top, left)
-
-    def _draw_half(self, fb, top, left):
-        rows = fb.height // PIXELS_PER_CELL
-        lit = np.where(fb.shade >= 0, PALETTE[fb.color, shade_levels(fb.shade)], -1)
-        for y in range(rows):
-            upper, lower = lit[2 * y], lit[2 * y + 1]
-            has_up, has_low = upper >= 0, lower >= 0
-            glyph = has_up * 1 + has_low * 2          # 0 empty, 1 ▀, 2 ▄, 3 both
-            same = has_up & has_low & (upper == lower)
-            glyph[same] = 3                           # █ needs no background colour
-            fg = np.where(has_up, upper, lower)
-            bg = np.where(has_up & has_low & ~same, lower, -1)
-            fg[glyph == 0] = -1
-            text = "".join(HALF_GLYPHS[glyph])
-            key = fg * 512 + bg
-            breaks = (np.flatnonzero(np.diff(key)) + 1).tolist()
-            for s, e in zip([0] + breaks, breaks + [fb.width]):
-                pair = 0 if fg[s] < 0 else self.pair(fg[s], bg[s])
-                self._put(top + y, left + s, text[s:e], curses.color_pair(pair))
-
-    def _draw_ascii(self, fb, top, left):
-        shade, color = cell_shade(fb)
-        chars = shade_to_chars(shade, self.ramp)
-        if self.shaded:
-            tone = np.where(shade >= 0, PALETTE[color, shade_levels(np.maximum(shade, 0))], -1)
-        else:  # 8 colours: the hue from the object, two extra tones from attributes
-            tone = np.where(shade < 0, 0, np.where(shade < 0.3, 1, np.where(shade > 0.7, 2, 0)))
-        for y in range(chars.shape[0]):
-            row = chars[y].tobytes().decode("ascii")
-            if not self.has_color:
-                self._put(top + y, left, row, 0)
-                continue
-            key = color[y].astype(np.int64) * 1024 + tone[y]
-            breaks = (np.flatnonzero(np.diff(key)) + 1).tolist()
-            for s, e in zip([0] + breaks, breaks + [fb.width]):
-                if self.shaded:
-                    attr = curses.color_pair(0 if tone[y, s] < 0 else self.pair(tone[y, s]))
-                else:
-                    attr = curses.color_pair(int(color[y, s])) | (0, curses.A_DIM, curses.A_BOLD)[tone[y, s]]
-                self._put(top + y, left + s, row[s:e], attr)
+        self.chars.fill(" ")
+        self.fg.fill(DEFAULT)
+        self.bg.fill(self._bg_cell)
+        self.attrs.fill(0)
 
     def text(self, y, x, s, color=Color.DEFAULT, bold=False, reverse=False, dim=False):
-        attr = curses.color_pair(int(color)) if self.has_color else 0
-        if bold:
-            attr |= curses.A_BOLD
-        if reverse:
-            attr |= curses.A_REVERSE
-        if dim:
-            attr |= curses.A_DIM
-        self._put(y, x, s, attr)
-
-    def refresh(self):
-        self.stdscr.noutrefresh()
-        curses.doupdate()
-
-    def _put(self, y, x, s, attr):
-        rows, cols = self.size()
-        if y < 0 or y >= rows or x >= cols:
+        """Write a string at row y, column x in a named colour (the terminal's ANSI palette), clipped to the screen."""
+        if not 0 <= y < self._rows or x >= self._cols:
             return
         if x < 0:
             s, x = s[-x:], 0
-        try:
-            self.stdscr.addstr(y, x, s[:cols - x], attr)
-        except curses.error:
-            pass  # writing the bottom-right cell raises after the text is drawn
-
-
-def run_loop(stdscr, frame_fn, fps=30, mode=None):
-    """Call frame_fn(screen, dt, keys) at up to `fps` until it returns False."""
-    screen = Screen(stdscr, mode=mode)
-    period = 1.0 / fps
-    last = time.perf_counter()
-    while True:
-        start = time.perf_counter()
-        dt, last = start - last, start
-        if frame_fn(screen, dt, screen.keys()) is False:
+        s = s[:self._cols - x]
+        if not s:
             return
-        remaining = period - (time.perf_counter() - start)
-        if remaining > 0:
-            time.sleep(remaining)
+        n = len(s)
+        self.chars[y, x:x + n] = [_printable(c) for c in s]
+        self.fg[y, x:x + n] = DEFAULT if self.color_mode == "mono" else ansi_color(color)
+        self.bg[y, x:x + n] = self._bg_cell
+        self.attrs[y, x:x + n] = BOLD * bold | DIM * dim | REVERSE * reverse
+
+    def draw_frame(self, fb, top=0, left=0):
+        """Draw a Renderer's framebuffer with its top-left cell at (top, left)."""
+        if fb.cell_pixels != self.cell_pixels:
+            raise ValueError(f"framebuffer has {fb.cell_pixels} pixels per cell but the screen's glyphs need "
+                             f"{self.cell_pixels}: pass screen.cell_pixels to Renderer.resize")
+        cells = match_cells(fb, self.glyphs, self.background)
+        h, w = cells.chars.shape
+        y0, x0 = max(top, 0), max(left, 0)
+        y1, x1 = min(top + h, self._rows), min(left + w, self._cols)
+        if y0 >= y1 or x0 >= x1:
+            return
+        sub = (slice(y0 - top, y1 - top), slice(x0 - left, x1 - left))
+        ys, xs = np.mgrid[y0:y1, x0:x1]
+        fg = quantize(cells.fg[sub], self.color_mode, ys, 2 * xs)
+        bg = quantize(cells.bg[sub], self.color_mode, ys, 2 * xs + 1)  # a different dither threshold from fg
+        region = (slice(y0, y1), slice(x0, x1))
+        self.chars[region] = cells.chars[sub]
+        self.fg[region] = np.where(cells.fg_on[sub], fg, DEFAULT)
+        self.bg[region] = np.where(cells.bg_on[sub], bg, self._bg_cell)
+        self.attrs[region] = 0
+
+    # ----- output --------------------------------------------------------------------------
+
+    def _style(self, fg, bg, attrs):
+        key = (fg, bg, attrs)
+        seq = self._sgr.get(key)
+        if seq is None:
+            params = ["0"] + [code for bit, code in _ATTR_SGR.items() if attrs & bit]
+            if self.color_mode != "mono":
+                params += [sgr_color(fg), sgr_color(bg, background=True)]
+            seq = self._sgr[key] = "\x1b[" + ";".join(params) + "m"
+        return seq
+
+    def render_updates(self):
+        """The escape sequences that bring the terminal up to date with the grid, and mark it as shown."""
+        full = self._shown is None
+        if full:
+            changed = np.ones(self.chars.shape, bool)
+        else:
+            chars, fg, bg, attrs = self._shown
+            changed = (self.chars != chars) | (self.fg != fg) | (self.bg != bg) | (self.attrs != attrs)
+        out = ["\x1b[0m\x1b[2J"] if full else []
+        style = None
+        for y in np.flatnonzero(changed.any(axis=1)):
+            xs = np.flatnonzero(changed[y])
+            splits = np.flatnonzero(np.diff(xs) > MERGE_GAP) + 1
+            for run in np.split(xs, splits):
+                s, e = int(run[0]), int(run[-1]) + 1
+                out.append(f"\x1b[{y + 1};{s + 1}H")
+                fg, bg, at = self.fg[y, s:e], self.bg[y, s:e], self.attrs[y, s:e]
+                breaks = np.flatnonzero((fg[1:] != fg[:-1]) | (bg[1:] != bg[:-1]) | (at[1:] != at[:-1])) + 1
+                row = self.chars[y, s:e]
+                for a, b in zip([0, *breaks.tolist()], [*breaks.tolist(), e - s]):
+                    key = (int(fg[a]), int(bg[a]), int(at[a]))
+                    if key != style:
+                        out.append(self._style(*key))
+                        style = key
+                    out.append("".join(row[a:b]))
+        self._shown = (self.chars.copy(), self.fg.copy(), self.bg.copy(), self.attrs.copy())
+        if not out:
+            return ""
+        # Synchronized output: terminals that support it show the whole update at once, others ignore it.
+        return "\x1b[?2026h" + "".join(out) + "\x1b[0m\x1b[?2026l"
+
+    def refresh(self):
+        text = self.render_updates()
+        if text and self.console is not None:
+            self.console.write(text)
+
+
+# ----- running an app ------------------------------------------------------------------------
+
+def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None):
+    """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
+
+    The terminal is restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
+    """
+    with open_console(mouse=mouse) as console:
+        screen = Screen(console, glyphs=glyphs, color=color, background=background)
+        period = 1.0 / fps
+        last = time.perf_counter()
+        while True:
+            start = time.perf_counter()
+            dt, last = start - last, start
+            screen.poll_size()
+            if frame_fn(screen, dt, screen.keys()) is False:
+                return
+            remaining = period - (time.perf_counter() - start)
+            if remaining > 0:
+                time.sleep(remaining)
+
+
+def add_display_args(parser):
+    """Add --glyphs, --color and --ascii to an argparse parser; pass the result to display_options()."""
+    group = parser.add_argument_group("display")
+    group.add_argument("--glyphs", choices=GLYPH_MODES, help="characters to draw with (default: detected; "
+                       "sextant gives the most detail but needs a font with Unicode 13 block symbols)")
+    group.add_argument("--color", choices=COLOR_MODES, help="colour depth (default: detected)")
+    group.add_argument("--ascii", action="store_true", help="same as --glyphs ascii")
+
+
+def display_options(args):
+    """Keyword arguments for run() from parsed add_display_args() flags."""
+    return {"glyphs": "ascii" if args.ascii else args.glyphs, "color": args.color}
