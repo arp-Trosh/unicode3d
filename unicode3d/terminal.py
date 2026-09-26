@@ -203,12 +203,13 @@ class Screen:
 
 # ----- running an app ------------------------------------------------------------------------
 
-def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None):
+def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
 
-    The terminal is restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
+    title sets the terminal window's title while the app runs. The terminal is
+    restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
     """
-    with open_console(mouse=mouse) as console:
+    with open_console(mouse=mouse, title=title) as console:
         screen = Screen(console, glyphs=glyphs, color=color, background=background)
         period = 1.0 / fps
         last = time.perf_counter()

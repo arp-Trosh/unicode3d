@@ -16,6 +16,7 @@ ENTER_SEQ = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"  # alternate screen, hide curs
 EXIT_SEQ = "\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"
 MOUSE_ON = "\x1b[?1000h\x1b[?1006h"   # report clicks, in SGR encoding
 MOUSE_OFF = "\x1b[?1000l\x1b[?1006l"
+TITLE_PUSH, TITLE_POP = "\x1b[22;0t", "\x1b[23;0t"  # save and restore the window title, where supported
 
 TRUECOLOR_TERMS = ("kitty", "ghostty", "alacritty", "foot", "wezterm", "contour", "iterm", "rio")
 TRUECOLOR_PROGRAMS = ("iTerm.app", "WezTerm", "vscode", "Hyper", "ghostty", "Tabby", "rio")
@@ -68,17 +69,19 @@ class Console:
 
     unicode = True
 
-    def __init__(self, mouse=False):
+    def __init__(self, mouse=False, title=None):
         self.mouse = mouse
+        self.title = title
 
     def __enter__(self):
         self._setup()
-        self.write(ENTER_SEQ + (MOUSE_ON if self.mouse else ""))
+        title = f"{TITLE_PUSH}\x1b]0;{self.title}\x07" if self.title else ""
+        self.write(title + ENTER_SEQ + (MOUSE_ON if self.mouse else ""))
         return self
 
     def __exit__(self, *exc):
         try:
-            self.write((MOUSE_OFF if self.mouse else "") + EXIT_SEQ)
+            self.write((MOUSE_OFF if self.mouse else "") + EXIT_SEQ + (TITLE_POP if self.title else ""))
         finally:
             self._restore()
 
@@ -95,8 +98,8 @@ class Console:
 
 
 class PosixConsole(Console):
-    def __init__(self, mouse=False):
-        super().__init__(mouse)
+    def __init__(self, mouse=False, title=None):
+        super().__init__(mouse, title)
         import termios
         self._termios = termios
         self.fd_in = sys.stdin.fileno()
@@ -179,8 +182,8 @@ class WindowsConsole(Console):
               0x76: "\x1b[18~", 0x77: "\x1b[19~", 0x78: "\x1b[20~", 0x79: "\x1b[21~", 0x7A: "\x1b[23~",
               0x7B: "\x1b[24~"}
 
-    def __init__(self, mouse=False):
-        super().__init__(mouse)
+    def __init__(self, mouse=False, title=None):
+        super().__init__(mouse, title)
         import ctypes
         from ctypes import wintypes as wt
 
@@ -288,6 +291,6 @@ class WindowsConsole(Console):
             self._k32.WriteConsoleW(self.h_out, chunk, units, ct.byref(written), None)
 
 
-def open_console(mouse=False):
-    """The console for this platform."""
-    return WindowsConsole(mouse) if os.name == "nt" else PosixConsole(mouse)
+def open_console(mouse=False, title=None):
+    """The console for this platform; `title` names the terminal window while it is open."""
+    return WindowsConsole(mouse, title) if os.name == "nt" else PosixConsole(mouse, title)
