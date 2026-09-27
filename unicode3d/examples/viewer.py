@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Model viewer, after the original C renderer: python -m unicode3d.examples.viewer [model.obj]
 
 WASD moves the camera, arrow keys look around, q/e slow down / speed up the

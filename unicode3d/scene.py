@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Camera, lights, scene objects and the render pipeline."""
 from dataclasses import dataclass, field
 

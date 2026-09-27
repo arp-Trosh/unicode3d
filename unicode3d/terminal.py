@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """The screen: a grid of terminal cells that text and rendered frames are drawn into.
 
 Screen keeps what should be on screen and what is on screen, and refresh()

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Z-buffered, vectorized triangle rasterizer, and the framebuffer it renders into.
 
 Pixels are finer than terminal cells: each cell covers a small grid of them

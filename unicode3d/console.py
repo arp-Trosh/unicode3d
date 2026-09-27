@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Talking to the terminal directly, on Linux/macOS and on Windows.
 
 Output is plain VT escape sequences, which Windows Terminal, the Windows 10+

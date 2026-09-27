@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Mesh builders: extruded bitmaps and text, ellipsoids, boxes, puffed-up 2D shapes."""
 import numpy as np
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Colour: linear light <-> sRGB, the named hues, and quantizing to what a terminal can show.
 
 The renderer works in linear light (so averaging samples and blending edges is

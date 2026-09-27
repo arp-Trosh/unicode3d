@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Texture mipmaps and filtered sampling.
 
 A die face drawn from a 48x48 texture often covers only a few pixels on

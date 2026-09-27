@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Turning a pixel framebuffer into terminal cells: a character plus two colours each.
 
 A cell can show exactly two colours, but the character decides how the cell is

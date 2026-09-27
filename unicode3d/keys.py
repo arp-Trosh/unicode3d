@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Keyboard and mouse input, decoded from the VT escape sequences terminals send.
 
 Every supported terminal (and the Windows console, see console.py) delivers

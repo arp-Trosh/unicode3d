@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unicode3d"
+dynamic = ["version"]
+description = "3D renderer for the terminal: Unicode block characters in 24-bit colour, numpy only, no curses"
+readme = "README.md"
+license = "LGPL-3.0-or-later"
+license-files = ["COPYING", "COPYING.LESSER"]
+authors = [{ name = "arp-Trosh" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26"]
+keywords = ["terminal", "3d", "renderer", "unicode", "ascii-art", "game-engine"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+    "Topic :: Games/Entertainment",
+]
+
+[project.urls]
+Homepage = "https://github.com/arp-Trosh/unicode3d"
+
+[tool.setuptools.dynamic]
+version = { attr = "unicode3d.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["unicode3d*"]

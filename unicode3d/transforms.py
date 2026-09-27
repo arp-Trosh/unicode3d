@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Matrix and quaternion helpers.
 
 Conventions: right-handed world, +Y is up, the camera looks down -Z in view

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
 """Dice rolling demo: python -m unicode3d.examples.demo [-n DICE] [--seed N]"""
 import argparse
 
