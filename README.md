@@ -12,7 +12,7 @@ Used by [Zombie Dice](https://github.com/arp-Trosh/zombieDice).
 Python 3.10 or later. In a game, pin a released version (a git tag) in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.1.0
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.2.0
 ```
 
 To work on the engine and a game together, install your local copy in the game's virtual
