@@ -96,6 +96,27 @@ class RenderTests(unittest.TestCase):
             fb = self.render(order)
             self.assertEqual(fb.ids[30, 40], near_id)
 
+    def test_unchanged_scene_is_not_redrawn(self):
+        renderer, camera, light = Renderer(40, 15), Camera(position=np.array([0.0, 0.0, 5.0])), Light()
+        box = Object3D(make_box())
+        first = renderer.render([box], camera, light).copy()
+        drawn = []
+        renderer._draw = lambda *args: drawn.append(args) or renderer.framebuffer
+        renderer.render([box], Camera(position=np.array([0.0, 0.0, 5.0])), Light())  # equal, not the same objects
+        self.assertEqual(drawn, [])
+        np.testing.assert_array_equal(renderer.framebuffer.rgb, first.rgb)
+        for change in (lambda: setattr(box, "position", np.array([0.1, 0.0, 0.0])),
+                       lambda: setattr(camera, "fov", 40.0),
+                       lambda: setattr(light, "ambient", 0.5),
+                       lambda: setattr(box.mesh, "vertices", box.mesh.vertices * 1.1),  # replaced, as Mesh's caches expect
+                       lambda: renderer.resize(41, 15),
+                       renderer.invalidate):
+            change()
+            renderer.render([box], camera, light)
+            renderer.render([box], camera, light)
+            self.assertEqual(len(drawn), 1)
+            drawn.clear()
+
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
         self.assertFalse(fb.drawn.any())
@@ -266,6 +287,19 @@ class GlyphTests(unittest.TestCase):
         self.assertEqual(cells.chars[0, 0], " ")
         self.assertFalse(cells.fg_on[0, 0])
 
+    def test_nearly_flat_cells_stay_solid_beside_split_ones(self):
+        # One frame, three cells: flat, nearly flat (below MIN_SPLIT), and a real edge.
+        fb = FrameBuffer(6, 2, (2, 2))
+        fb.alpha[:] = 1.0
+        fb.rgb[:] = 0.5
+        fb.rgb[0, 2] = 0.51
+        fb.rgb[:, 5] = 0.0
+        cells = match_cells(fb, GLYPH_SETS["quad"])
+        self.assertEqual(cells.chars[0].tolist(), ["█", "█", "▐"])
+        np.testing.assert_allclose(cells.fg[0, 1], 0.5025)  # the mean of the nearly flat cell
+        np.testing.assert_allclose(cells.fg[0, 2], 0.0)
+        np.testing.assert_allclose(cells.bg[0, 2], 0.5)
+
     def test_half_blocks(self):
         cells = match_cells(fb_from([[1, 0], [0, 1]], cell_pixels=(1, 2)), GLYPH_SETS["half"])
         self.assertEqual(cells.chars[0].tolist(), ["▀", "▄"])
@@ -317,6 +351,15 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual(detect_glyphs({}, unicode_ok=True), "quad")
         self.assertEqual(detect_glyphs({}, unicode_ok=False), "ascii")
         self.assertEqual(detect_glyphs({"UNICODE3D_GLYPHS": "sextant"}), "sextant")
+        self.assertEqual(detect_glyphs({"TERM": "xterm-256color"}), "quad")
+        self.assertEqual(detect_glyphs({"TERM": "linux"}), "half")
+        for env in ({"TERM": "xterm-kitty"}, {"TERM": "foot"}, {"TERM": "xterm-ghostty"},
+                    {"TERM": "xterm-256color", "TERM_PROGRAM": "WezTerm"},
+                    {"TERM": "tmux-256color", "KITTY_WINDOW_ID": "1"},  # tmux inside kitty
+                    {"TERM": "xterm-256color", "WT_SESSION": "x"}):     # Windows Terminal, or WSL inside it
+            self.assertEqual(detect_glyphs(env), "sextant", env)
+        self.assertEqual(detect_glyphs({"TERM": "xterm-kitty", "UNICODE3D_GLYPHS": "quad"}), "quad")
+        self.assertEqual(detect_glyphs({"TERM": "xterm-kitty"}, unicode_ok=False), "ascii")
 
     def test_refresh_sends_only_changes(self):
         screen = Screen(glyphs="quad", color="truecolor", size=(5, 20))
@@ -344,6 +387,26 @@ class ScreenTests(unittest.TestCase):
         self.assertTrue((screen.fg[2:7, 3:13][drawn] > 0).all())  # truecolor, not the default colour
         out = screen.render_updates()
         self.assertIn("38;2;", out)
+
+    def test_display_settings_change_at_run_time(self):
+        screen = Screen(glyphs="quad", color="truecolor", size=(4, 10), background=(10, 20, 30))
+        screen.text(0, 0, "hi", Color.GREEN)
+        screen.render_updates()
+        screen.set_glyphs("sextant")
+        self.assertEqual(screen.cell_pixels, (2, 3))
+        screen.set_color("256")
+        screen.erase()
+        screen.text(0, 0, "hi", Color.GREEN)
+        update = screen.render_updates()
+        self.assertIn("\x1b[2J", update)  # a new colour mode resends the whole screen
+        self.assertIn(";48;5;", update)    # with the background in the palette
+        self.assertNotIn(";48;2;", update)
+        with self.assertRaises(ValueError):
+            screen.set_color("8")
+        screen.unicode = False
+        self.assertEqual(screen.glyph_modes, ("ascii",))
+        with self.assertRaises(ValueError):
+            screen.set_glyphs("quad")
 
     def test_wide_characters_are_replaced(self):
         screen = Screen(color="mono", size=(2, 10))

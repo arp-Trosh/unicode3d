@@ -28,6 +28,7 @@ __all__ = ["Color", "Key", "MouseEvent", "Screen", "run", "add_display_args", "d
 BOLD, DIM, REVERSE = 1, 2, 4
 _ATTR_SGR = {BOLD: "1", DIM: "2", REVERSE: "7"}
 MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
+MAX_STYLES = 1 << 16  # cached SGR sequences; shaded truecolor frames bring thousands of new ones a second
 
 
 def _printable(ch):
@@ -48,25 +49,44 @@ class Screen:
 
     def __init__(self, console=None, glyphs=None, color=None, background=None, size=(24, 80)):
         self.console = console
-        unicode_ok = console.unicode if console is not None else True
+        self.unicode = console.unicode if console is not None else True
         color = color or detect_color_mode()
-        if color not in COLOR_MODES:
-            raise ValueError(f"color must be one of {COLOR_MODES}, not {color!r}")
         if glyphs is None:
             # Without colour, blocks would only show silhouettes; the ASCII ramp still shows shading.
-            glyphs = "ascii" if color == "mono" else detect_glyphs(unicode_ok=unicode_ok)
-        if glyphs not in GLYPH_SETS:
-            raise ValueError(f"glyphs must be one of {GLYPH_MODES}, not {glyphs!r}")
-        if glyphs != "ascii" and not unicode_ok:
+            glyphs = "ascii" if color == "mono" else detect_glyphs(unicode_ok=self.unicode)
+        if glyphs in GLYPH_SETS and not self.unicode:
             glyphs = "ascii"
-        self.glyphs = GLYPH_SETS[glyphs]
-        self.color_mode = color
         self.background = None if background is None else to_linear_rgb(background)
-        self._bg_cell = DEFAULT if background is None else int(quantize(self.background, color))
+        self.fps = 30               # frames a second run() aims for; change it any time
+        self.measured_fps = None    # frames run() actually drew in the last second
         self._decoder = InputDecoder()
         self._sgr = {}
         self._rows = self._cols = 0
+        self.set_glyphs(glyphs)
+        self.set_color(color)
         self._resize(*(size if console is None else console.size()[::-1]))
+
+    @property
+    def glyph_modes(self):
+        """The glyph sets this terminal can take: all of them, or only ascii without Unicode."""
+        return GLYPH_MODES if self.unicode else ("ascii",)
+
+    def set_glyphs(self, glyphs):
+        """Switch glyph set; renderers pick it up through cell_pixels on their next resize()."""
+        if glyphs not in GLYPH_SETS:
+            raise ValueError(f"glyphs must be one of {GLYPH_MODES}, not {glyphs!r}")
+        if glyphs not in self.glyph_modes:
+            raise ValueError(f"{glyphs} glyphs need Unicode, which this terminal lacks")
+        self.glyphs = GLYPH_SETS[glyphs]
+
+    def set_color(self, color):
+        """Switch colour mode. Cells already in the grid keep their colours until drawn again."""
+        if color not in COLOR_MODES:
+            raise ValueError(f"color must be one of {COLOR_MODES}, not {color!r}")
+        self.color_mode = color
+        self._bg_cell = DEFAULT if self.background is None else int(quantize(self.background, color))
+        self._sgr.clear()
+        self._shown = None  # resend everything, in the new colours
 
     @property
     def cell_pixels(self):
@@ -158,6 +178,8 @@ class Screen:
         key = (fg, bg, attrs)
         seq = self._sgr.get(key)
         if seq is None:
+            if len(self._sgr) >= MAX_STYLES:
+                self._sgr.clear()
             params = ["0"] + [code for bit, code in _ATTR_SGR.items() if attrs & bit]
             if self.color_mode != "mono":
                 params += [sgr_color(fg), sgr_color(bg, background=True)]
@@ -206,20 +228,26 @@ class Screen:
 def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
 
+    frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved.
+
     title sets the terminal window's title while the app runs. The terminal is
     restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
     """
     with open_console(mouse=mouse, title=title) as console:
         screen = Screen(console, glyphs=glyphs, color=color, background=background)
-        period = 1.0 / fps
+        screen.fps = fps
         last = time.perf_counter()
+        second, frames = last, 0
         while True:
             start = time.perf_counter()
             dt, last = start - last, start
+            if start - second >= 1.0:
+                screen.measured_fps, second, frames = frames / (start - second), start, 0
+            frames += 1
             screen.poll_size()
             if frame_fn(screen, dt, screen.keys()) is False:
                 return
-            remaining = period - (time.perf_counter() - start)
+            remaining = 1.0 / screen.fps - (time.perf_counter() - start)
             if remaining > 0:
                 time.sleep(remaining)
 

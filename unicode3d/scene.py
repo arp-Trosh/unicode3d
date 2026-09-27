@@ -113,6 +113,7 @@ class Renderer:
         self.cell_pixels = tuple(cell_pixels)
         self.framebuffer = FrameBuffer(0, 0, cell_pixels)
         self.view_proj = None
+        self._last = None  # what the framebuffer shows, as _scene_state() gives it
         self.resize(width, height)
 
     def resize(self, width, height, cell_pixels=None):
@@ -133,8 +134,47 @@ class Renderer:
             return None
         return (clip[0] / clip[3] + 1.0) * 0.5 * self.width, (1.0 - clip[1] / clip[3]) * 0.5 * self.height
 
+    def invalidate(self):
+        """Make the next render draw afresh, e.g. after editing a mesh's arrays in place."""
+        self._last = None
+
+    def _scene_state(self, objects, camera, light):
+        """Everything a render depends on: (values compared by equality, objects compared by identity).
+
+        Meshes, their arrays and textures count as changed when replaced, as in Mesh's own caches;
+        edits made inside them are not seen (call invalidate() after those).
+        """
+        values = [self.width, self.height, self.cell_pixels, self.cell_aspect, self.samples, self.edge_samples,
+                  self.fog, self.outline, self.lod_bias,
+                  np.asarray(camera.position, float).tobytes(), np.asarray(camera.target, float).tobytes(),
+                  np.asarray(camera.up, float).tobytes(), camera.fov, camera.near, camera.far,
+                  np.asarray(light.direction, float).tobytes(), light.ambient, light.diffuse, light.specular,
+                  light.shininess]
+        refs = []
+        for obj in objects:
+            m = obj.mesh
+            values += [obj.visible, obj.double_sided, float(obj.scale), to_linear_rgb(obj.color).tobytes(),
+                       np.asarray(obj.position, float).tobytes(), np.asarray(obj.rotation, float).tobytes()]
+            refs += [m, m.vertices, m.faces, m.uvs, m.materials, *m.textures] if m is not None else [None]
+        return values, refs
+
     def render(self, objects, camera, light):
-        """Draw the objects; returns the framebuffer (reused by the next render: copy it to keep it)."""
+        """Draw the objects; returns the framebuffer (reused by the next render: copy it to keep it).
+
+        When nothing has changed since the last render (see _scene_state), the
+        framebuffer is returned as it is, so a still scene costs almost nothing.
+        """
+        state = self._scene_state(objects, camera, light)
+        last = self._last
+        if (last is not None and last[0] == state[0] and len(last[1]) == len(state[1])
+                and all(a is b for a, b in zip(last[1], state[1]))):
+            return self.framebuffer
+        self._last = None
+        fb = self._draw(objects, camera, light)
+        self._last = state
+        return fb
+
+    def _draw(self, objects, camera, light):
         fb = self.framebuffer
         fb.clear()
         if self.width < 1 or self.height < 1:

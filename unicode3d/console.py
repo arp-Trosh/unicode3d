@@ -20,6 +20,9 @@ TITLE_PUSH, TITLE_POP = "\x1b[22;0t", "\x1b[23;0t"  # save and restore the windo
 
 TRUECOLOR_TERMS = ("kitty", "ghostty", "alacritty", "foot", "wezterm", "contour", "iterm", "rio")
 TRUECOLOR_PROGRAMS = ("iTerm.app", "WezTerm", "vscode", "Hyper", "ghostty", "Tabby", "rio")
+SEXTANT_TERMS = ("kitty", "ghostty", "foot", "wezterm")  # TERM values of terminals that draw sextants themselves
+SEXTANT_PROGRAMS = ("WezTerm", "ghostty")
+SEXTANT_VARS = ("KITTY_WINDOW_ID", "WEZTERM_PANE", "GHOSTTY_RESOURCES_DIR", "WT_SESSION")
 
 
 def detect_color_mode(env=None, windows=None):
@@ -47,11 +50,27 @@ def detect_color_mode(env=None, windows=None):
     return "16"
 
 
-def detect_glyphs(env=None, unicode_ok=True):
-    """Best guess at the richest glyph set the terminal's font can show: quad, half or ascii.
+def shows_sextants(env=None):
+    """Whether the terminal is one known to show sextants whatever font is set.
 
-    UNICODE3D_GLYPHS overrides it. Sextants are never picked automatically, because
-    older fonts lack them; ask for them explicitly.
+    A program can't ask a terminal which characters its font has (a missing one
+    still takes a cell, drawn as a box), so this goes by the terminal: kitty,
+    WezTerm, foot and Ghostty draw block symbols themselves, and Windows
+    Terminal's own font, Cascadia, has them. Their variables survive tmux and
+    WSL, and over ssh TERM still names the terminal, which draws the characters
+    either way.
+    """
+    env = os.environ if env is None else env
+    term = env.get("TERM", "").lower()
+    return (any(t in term for t in SEXTANT_TERMS) or env.get("TERM_PROGRAM", "") in SEXTANT_PROGRAMS
+            or any(v in env for v in SEXTANT_VARS))
+
+
+def detect_glyphs(env=None, unicode_ok=True):
+    """Best guess at the richest glyph set the terminal can show: sextant, quad, half or ascii.
+
+    UNICODE3D_GLYPHS overrides it. Sextants are picked only where shows_sextants()
+    vouches for them; elsewhere quadrants, which every font with half blocks has.
     """
     env = os.environ if env is None else env
     forced = env.get("UNICODE3D_GLYPHS", "").lower()
@@ -61,6 +80,8 @@ def detect_glyphs(env=None, unicode_ok=True):
         return "ascii"
     if env.get("TERM", "") == "linux":  # the Linux text console's fonts have half blocks but not quadrants
         return "half"
+    if shows_sextants(env):
+        return "sextant"
     return "quad"
 
 

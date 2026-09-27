@@ -110,22 +110,35 @@ def match_cells(fb, glyphs, background=None):
     p = glyphs.pixel_count
     masks, bits = _masks(p)
     feat = np.concatenate([rgb, ALPHA_WEIGHT * alpha[..., None]], axis=-1)  # (H, W, P, 4)
+    total = feat.sum(axis=2)
+    n1 = bits.sum(axis=1)
+    n0 = p - n1
 
     # Splitting a cell into sides with means m1, m0 leaves an error of
     # sum|c|^2 - n1|m1|^2 - n0|m0|^2, so the best split maximizes |S1|^2/n1 + |S0|^2/n0.
-    s1 = np.einsum("kp,hwpc->hwkc", bits, feat)
-    s0 = feat.sum(axis=2)[:, :, None, :] - s1
-    n1 = bits.sum(axis=1)
-    n0 = p - n1
-    score = (s1 ** 2).sum(-1) / n1 + (s0 ** 2).sum(-1) / np.maximum(n0, 1)
-    best = score.argmax(axis=-1)
     # Nearly flat cells stay solid (the unsplit mask is first): splitting them into two almost equal
-    # colours costs output and, in small palettes, shows up as noise.
-    gain = np.take_along_axis(score, best[..., None], axis=-1)[..., 0] - score[..., 0]
-    best = np.where(gain < p * MIN_SPLIT ** 2, 0, best)
-    pick = best[..., None, None]
-    side1 = np.take_along_axis(s1, pick, axis=2)[:, :, 0] / n1[best][..., None]
-    side0 = np.take_along_axis(s0, pick, axis=2)[:, :, 0] / np.maximum(n0[best], 1)[..., None]
+    # colours costs output and, in small palettes, shows up as noise. No split can gain more than
+    # the error of the unsplit cell, so cells where that is already too small are settled without
+    # scoring any split: in most frames that is nearly every cell (empty or flat surface).
+    min_gain = p * MIN_SPLIT ** 2
+    busy = (feat ** 2).sum(axis=(2, 3)) - (total ** 2).sum(axis=-1) / p >= min_gain
+    best = np.zeros(busy.shape, dtype=int)
+    s1 = total.copy()  # sums over the chosen split's side 1 (the unsplit cell's side 1 is everything)
+    if busy.any():
+        f = feat[busy]  # (N, P, 4)
+        n, k = len(f), len(masks)
+        # Every split's side-1 sums at once, as one float32 matrix product (plenty for colours).
+        sums = f.astype(np.float32).transpose(0, 2, 1).reshape(n * 4, p) @ bits.T.astype(np.float32)
+        sums = sums.reshape(n, 4, k)
+        rest = total[busy].astype(np.float32)[:, :, None] - sums
+        score = (sums ** 2).sum(axis=1) / n1 + (rest ** 2).sum(axis=1) / np.maximum(n0, 1)
+        pick = score.argmax(axis=-1)
+        gain = score[np.arange(n), pick] - score[:, 0]
+        pick = np.where(gain < min_gain, 0, pick)
+        best[busy] = pick
+        s1[busy] = np.einsum("np,npc->nc", bits[pick], f)  # the chosen sides again, in full precision
+    side1 = s1 / n1[best][..., None]
+    side0 = (total - s1) / np.maximum(n0[best], 1)[..., None]
     mask = masks[best]
 
     full = (1 << p) - 1
