@@ -4,14 +4,15 @@ import unittest
 
 import numpy as np
 
-from unicode3d.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
+from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
 from unicode3d.color import Color, linear_to_srgb, luminance, quantize, sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb
-from unicode3d.console import WindowsConsole, detect_color_mode, detect_glyphs
+from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
 from unicode3d.keys import InputDecoder, Key, MouseEvent
 from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Object3D, Renderer
+from unicode3d.shapes import block_mesh, merge_meshes, text_mesh
 from unicode3d.terminal import Screen
 from unicode3d.texture import build_mipmaps
 from unicode3d.transforms import quat_axis_angle, quat_between, quat_to_matrix
@@ -49,6 +50,26 @@ class DiceTests(unittest.TestCase):
             self.assertEqual(top_face(rot), face)
             start_pos, _ = anim.pose(0.0)
             self.assertGreater(start_pos[1], rest[1] + 4.0)
+
+
+def volume(mesh):
+    v = mesh.vertices[mesh.faces]
+    return np.einsum("ij,ij->i", v[:, 0], np.cross(v[:, 1], v[:, 2])).sum() / 6
+
+
+class ShapeTests(unittest.TestCase):
+    def test_text_mesh_is_closed(self):
+        # Every edge of a closed, consistently wound mesh is shared by exactly two triangles in opposite directions
+        # -- except where merged runs create T-junctions, so just check the volume is right instead.
+        font = {"I": ["###", ".#.", ".#.", ".#.", ".#.", ".#.", "###"]}
+        mesh, width = text_mesh("II", font, depth=1.0)
+        self.assertAlmostEqual(volume(mesh), 22.0)  # "I" has 11 pixels
+        self.assertEqual(width, 7)
+
+    def test_merged_meshes_keep_their_volume(self):
+        mesh = merge_meshes([block_mesh((0.0, 0.0, 0.0), (1.0, 2.0, 3.0)), block_mesh((5.0, 0.0, 0.0), (1.0, 1.0, 1.0))])
+        self.assertAlmostEqual(volume(mesh), 7.0)
+        self.assertEqual(len(mesh.faces), 24)
 
 
 def lum(fb):
@@ -100,10 +121,9 @@ class RenderTests(unittest.TestCase):
         renderer, camera, light = Renderer(40, 15), Camera(position=np.array([0.0, 0.0, 5.0])), Light()
         box = Object3D(make_box())
         first = renderer.render([box], camera, light).copy()
-        drawn = []
-        renderer._draw = lambda *args: drawn.append(args) or renderer.framebuffer
+        draws = renderer.draws
         renderer.render([box], Camera(position=np.array([0.0, 0.0, 5.0])), Light())  # equal, not the same objects
-        self.assertEqual(drawn, [])
+        self.assertEqual(renderer.draws, draws)
         np.testing.assert_array_equal(renderer.framebuffer.rgb, first.rgb)
         for change in (lambda: setattr(box, "position", np.array([0.1, 0.0, 0.0])),
                        lambda: setattr(camera, "fov", 40.0),
@@ -114,8 +134,8 @@ class RenderTests(unittest.TestCase):
             change()
             renderer.render([box], camera, light)
             renderer.render([box], camera, light)
-            self.assertEqual(len(drawn), 1)
-            drawn.clear()
+            self.assertEqual(renderer.draws, draws + 1)
+            draws = renderer.draws
 
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
@@ -330,14 +350,13 @@ class InputTests(unittest.TestCase):
 
     def test_windows_records_translate_to_vt(self):
         from types import SimpleNamespace as NS
-        con = WindowsConsole.__new__(WindowsConsole)
-        con._buttons = 0
+        con = WindowsInput()
         key = lambda down, ch, vk=0: NS(bKeyDown=down, wRepeatCount=1, uChar=ch, wVirtualKeyCode=vk)
-        self.assertEqual(con._key(key(True, ord("x"))), "x")
-        self.assertEqual(con._key(key(True, 0, 0x26)), "\x1b[A")
-        self.assertEqual(con._key(key(False, ord("x"))), "")
+        self.assertEqual(con.key(key(True, ord("x"))), "x")
+        self.assertEqual(con.key(key(True, 0, 0x26)), "\x1b[A")
+        self.assertEqual(con.key(key(False, ord("x"))), "")
         mouse = lambda x, y, state, flags=0: NS(dwMousePosition=NS(X=x, Y=y), dwButtonState=state, dwEventFlags=flags)
-        text = con._mouse(mouse(4, 2, 1)) + con._mouse(mouse(4, 2, 0))
+        text = con.mouse(mouse(4, 2, 1)) + con.mouse(mouse(4, 2, 0))
         self.assertEqual(InputDecoder().feed(text, 0.0), [MouseEvent(4, 2, 0, True), MouseEvent(4, 2, 0, False)])
 
 

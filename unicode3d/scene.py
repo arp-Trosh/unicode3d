@@ -113,6 +113,7 @@ class Renderer:
         self.cell_pixels = tuple(cell_pixels)
         self.framebuffer = FrameBuffer(0, 0, cell_pixels)
         self.view_proj = None
+        self.draws = 0     # renders that rasterized the scene, rather than reusing an unchanged frame
         self._last = None  # what the framebuffer shows, as _scene_state() gives it
         self.resize(width, height)
 
@@ -171,6 +172,7 @@ class Renderer:
             return self.framebuffer
         self._last = None
         fb = self._draw(objects, camera, light)
+        self.draws += 1
         self._last = state
         return fb
 

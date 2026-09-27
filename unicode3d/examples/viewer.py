@@ -1,4 +1,4 @@
-"""Model viewer, after the original C renderer: python -m unicode3d.viewer [model.obj]
+"""Model viewer, after the original C renderer: python -m unicode3d.examples.viewer [model.obj]
 
 WASD moves the camera, arrow keys look around, q/e slow down / speed up the
 spin, Esc or Ctrl-C quits.
@@ -8,12 +8,12 @@ import argparse
 import numpy as np
 
 from .dice import make_die
-from .mesh import load_obj
-from .scene import Camera, Light, Object3D, Renderer
-from .color import Color
-from .keys import Key
-from .terminal import add_display_args, display_options, run
-from .transforms import UP, quat_axis_angle, quat_mul
+from ..mesh import load_obj
+from ..scene import Camera, Light, Object3D, Renderer
+from ..color import Color
+from ..keys import Key
+from ..terminal import add_display_args, display_options, run
+from ..transforms import UP, quat_axis_angle, quat_mul
 
 
 class Viewer:

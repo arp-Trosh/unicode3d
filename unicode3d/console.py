@@ -176,6 +176,48 @@ class PosixConsole(Console):
         return self.fd_out
 
 
+class WindowsInput:
+    """Turns Windows console key and mouse records into the sequences a VT terminal sends.
+
+    Pure Python, so it runs (and is tested) on any platform; the records only need the
+    fields ctypes gives KEY_EVENT_RECORD and MOUSE_EVENT_RECORD.
+    """
+
+    MOUSE_WHEELED = 0x4
+
+    # Virtual-key codes of keys with no character, and the sequence a VT terminal sends for each.
+    VK_SEQ = {0x26: "\x1b[A", 0x28: "\x1b[B", 0x27: "\x1b[C", 0x25: "\x1b[D", 0x24: "\x1b[H", 0x23: "\x1b[F",
+              0x21: "\x1b[5~", 0x22: "\x1b[6~", 0x2D: "\x1b[2~", 0x2E: "\x1b[3~",
+              0x70: "\x1bOP", 0x71: "\x1bOQ", 0x72: "\x1bOR", 0x73: "\x1bOS", 0x74: "\x1b[15~", 0x75: "\x1b[17~",
+              0x76: "\x1b[18~", 0x77: "\x1b[19~", 0x78: "\x1b[20~", 0x79: "\x1b[21~", 0x7A: "\x1b[23~",
+              0x7B: "\x1b[24~"}
+
+    def __init__(self):
+        self.buttons = 0  # mouse buttons held, as dwButtonState bits: presses and releases are the changes
+
+    def key(self, ev):
+        if not ev.bKeyDown:
+            return ""
+        repeat = max(ev.wRepeatCount, 1)
+        if ev.uChar:
+            return chr(ev.uChar) * repeat  # a UTF-16 unit: surrogate halves are paired up in read()
+        return self.VK_SEQ.get(ev.wVirtualKeyCode, "") * repeat
+
+    def mouse(self, ev):
+        x, y = ev.dwMousePosition.X + 1, ev.dwMousePosition.Y + 1
+        if ev.dwEventFlags & self.MOUSE_WHEELED:
+            up = ev.dwButtonState >> 16 < 0x8000  # the high word is the signed wheel delta
+            return f"\x1b[<{64 if up else 65};{x};{y}M"
+        if ev.dwEventFlags:  # movement, double clicks, horizontal wheel
+            return ""
+        state, out = ev.dwButtonState & 0x7, []
+        for bit, button in ((1, 0), (4, 1), (2, 2)):  # left, middle, right
+            if (state ^ self.buttons) & bit:
+                out.append(f"\x1b[<{button};{x};{y}{'M' if state & bit else 'm'}")
+        self.buttons = state
+        return "".join(out)
+
+
 class WindowsConsole(Console):
     """The Windows console (Windows Terminal, or conhost on Windows 10 and later).
 
@@ -194,14 +236,6 @@ class WindowsConsole(Console):
     ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x4
     DISABLE_NEWLINE_AUTO_RETURN = 0x8
     KEY_EVENT, MOUSE_EVENT = 0x1, 0x2
-    MOUSE_WHEELED = 0x4
-
-    # Virtual-key codes of keys with no character, and the sequence a VT terminal sends for each.
-    VK_SEQ = {0x26: "\x1b[A", 0x28: "\x1b[B", 0x27: "\x1b[C", 0x25: "\x1b[D", 0x24: "\x1b[H", 0x23: "\x1b[F",
-              0x21: "\x1b[5~", 0x22: "\x1b[6~", 0x2D: "\x1b[2~", 0x2E: "\x1b[3~",
-              0x70: "\x1bOP", 0x71: "\x1bOQ", 0x72: "\x1bOR", 0x73: "\x1bOS", 0x74: "\x1b[15~", 0x75: "\x1b[17~",
-              0x76: "\x1b[18~", 0x77: "\x1b[19~", 0x78: "\x1b[20~", 0x79: "\x1b[21~", 0x7A: "\x1b[23~",
-              0x7B: "\x1b[24~"}
 
     def __init__(self, mouse=False, title=None):
         super().__init__(mouse, title)
@@ -240,7 +274,7 @@ class WindowsConsole(Console):
         self.h_in = k.GetStdHandle(self.STD_INPUT_HANDLE & 0xFFFFFFFF)
         self.h_out = k.GetStdHandle(self.STD_OUTPUT_HANDLE & 0xFFFFFFFF)
         self._saved = None
-        self._buttons = 0
+        self._input = WindowsInput()
 
     def _mode(self, handle):
         mode = self._wt.DWORD()
@@ -275,33 +309,11 @@ class WindowsConsole(Console):
                 break
             for rec in records[:got.value]:
                 if rec.EventType == self.KEY_EVENT:
-                    parts.append(self._key(rec.Event.KeyEvent))
+                    parts.append(self._input.key(rec.Event.KeyEvent))
                 elif rec.EventType == self.MOUSE_EVENT:
-                    parts.append(self._mouse(rec.Event.MouseEvent))
+                    parts.append(self._input.mouse(rec.Event.MouseEvent))
         # Characters outside the BMP arrive as two records, one surrogate each: pair them up.
         return "".join(parts).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
-
-    def _key(self, ev):
-        if not ev.bKeyDown:
-            return ""
-        repeat = max(ev.wRepeatCount, 1)
-        if ev.uChar:
-            return chr(ev.uChar) * repeat  # a UTF-16 unit: surrogate halves are paired up in read()
-        return self.VK_SEQ.get(ev.wVirtualKeyCode, "") * repeat
-
-    def _mouse(self, ev):
-        x, y = ev.dwMousePosition.X + 1, ev.dwMousePosition.Y + 1
-        if ev.dwEventFlags & self.MOUSE_WHEELED:
-            up = ev.dwButtonState >> 16 < 0x8000  # the high word is the signed wheel delta
-            return f"\x1b[<{64 if up else 65};{x};{y}M"
-        if ev.dwEventFlags:  # movement, double clicks, horizontal wheel
-            return ""
-        state, out = ev.dwButtonState & 0x7, []
-        for bit, button in ((1, 0), (4, 1), (2, 2)):  # left, middle, right
-            if (state ^ self._buttons) & bit:
-                out.append(f"\x1b[<{button};{x};{y}{'M' if state & bit else 'm'}")
-        self._buttons = state
-        return "".join(out)
 
     def write(self, text):
         ct, wt = self._ctypes, self._wt

@@ -1,14 +1,14 @@
-"""Dice rolling demo: python -m unicode3d.demo [-n DICE] [--seed N]"""
+"""Dice rolling demo: python -m unicode3d.examples.demo [-n DICE] [--seed N]"""
 import argparse
 
 import numpy as np
 
 from .dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
-from .scene import Camera, Light, Object3D, Renderer
-from .color import Color
-from .keys import Key
-from .terminal import add_display_args, display_options, run
-from .transforms import normalize
+from ..scene import Camera, Light, Object3D, Renderer
+from ..color import Color
+from ..keys import Key
+from ..terminal import add_display_args, display_options, run
+from ..transforms import normalize
 
 DIE_COLORS = (Color.GREEN, Color.YELLOW, Color.RED)
 SPACING = 1.8

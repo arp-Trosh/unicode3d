@@ -1,8 +1,8 @@
 """Dice meshes and roll animation."""
 import numpy as np
 
-from .mesh import BOX_FACE_NORMALS, make_box
-from .transforms import UP, normalize, quat_axis_angle, quat_between, quat_mul, quat_to_matrix
+from ..mesh import BOX_FACE_NORMALS, make_box
+from ..transforms import UP, normalize, quat_axis_angle, quat_between, quat_mul, quat_to_matrix
 
 # Pip value on each box face, in BOX_FACES order (+X, -X, +Y, -Y, +Z, -Z); opposite faces sum to 7.
 DIE_VALUES = (3, 4, 2, 5, 1, 6)

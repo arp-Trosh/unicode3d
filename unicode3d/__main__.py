@@ -1,3 +1,3 @@
-from .demo import main
+from .examples.demo import main
 
 main()
