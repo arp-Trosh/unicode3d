@@ -742,10 +742,10 @@ class DemoTests(unittest.TestCase):
         self.run_demo(demo, [ord("t"), ord("m"), ord("r"), ord("n"), ord("l")], ord("q"))
         demo.speed.value = 5.0
         screen = Screen(glyphs="quad", color="256", size=(30, 100))
-        mazes = id(demo.walls)
+        first = demo.walls  # held, so a new maze can't reuse its memory (and id)
         for _ in range(600):  # walks to the exit and starts a new maze
             demo.frame(screen, 0.1, [])
-        self.assertNotEqual(id(demo.walls), mazes)
+        self.assertIsNot(demo.walls, first)
 
     def test_room(self):
         from unicode3d.examples.room import Walk
