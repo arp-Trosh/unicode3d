@@ -165,7 +165,8 @@ class PosixConsole(Console):
         return "".join(chunks)
 
     def write(self, text):
-        data = text.encode("utf-8" if self.unicode else "ascii", "replace")
+        """Write text, or bytes already encoded for this terminal (UTF-8, or ASCII without Unicode)."""
+        data = text if isinstance(text, bytes) else text.encode("utf-8" if self.unicode else "ascii", "replace")
         while data:
             try:
                 n = os.write(self.fd_out, data)
@@ -318,6 +319,9 @@ class WindowsConsole(Console):
         return "".join(parts).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
 
     def write(self, text):
+        """Write text, or UTF-8 bytes."""
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", "replace")
         ct, wt = self._ctypes, self._wt
         written = wt.DWORD()
         for s in range(0, len(text), 8192):

@@ -4,17 +4,19 @@ import os
 import tempfile
 import unittest
 
+import numba
 import numpy as np
 
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
-from unicode3d.color import Color, linear_to_srgb, luminance, quantize, sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb
+from unicode3d.color import (Color, encode_index, encode_rgb, linear_to_srgb, luminance, put_sgr_color, quantize,
+                             sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb)
 from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
 from unicode3d.keys import InputDecoder, Key, MouseEvent
 from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Object3D, Renderer
-from unicode3d.shapes import block_mesh, merge_meshes, text_mesh
+from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
 from unicode3d.terminal import Screen
 from unicode3d.texture import build_mipmaps
 from unicode3d.transforms import quat_axis_angle, quat_between, quat_to_matrix
@@ -138,6 +140,59 @@ class RenderTests(unittest.TestCase):
             renderer.render([box], camera, light)
             self.assertEqual(renderer.draws, draws + 1)
             draws = renderer.draws
+
+    def test_scenes_of_any_size_render_alike(self):
+        # The renderer reuses its working arrays from frame to frame: a scene must come out the same
+        # whatever was drawn before it, bigger or smaller.
+        renderer, light = Renderer(40, 30), Light()
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        small = [Object3D(make_die())]
+        big = [Object3D(blob_mesh((1.0, 1.0, 1.0), rings=24, segments=32), color=Color.RED),
+               Object3D(make_die(), position=np.array([1.0, 0.5, 1.0]))]
+        first = renderer.render(small, camera, light).copy()
+        mixed = renderer.render(big, camera, light).copy()
+        again = renderer.render(small, Camera(position=np.array([0.0, 0.0, 5.0 + 1e-9])), light)
+        np.testing.assert_allclose(again.rgb, first.rgb, atol=1e-6)
+        np.testing.assert_array_equal(again.ids, first.ids)
+        # Textured and plain objects share one render: each keeps its own colour and texture.
+        self.assertEqual(set(np.unique(mixed.ids)), {0, 1, 2})
+        red = mixed.colour()[mixed.ids == 1]
+        self.assertGreater(np.median(red[:, 0]), 2 * np.median(red[:, 1]))
+        self.assertLess(lum(mixed)[mixed.ids == 2].min(), 0.05)  # the die's pips
+
+    def test_same_frame_on_any_number_of_threads(self):
+        # Kernels run on several threads, each writing only its own pixels (the one-writer rule in
+        # CLAUDE.md). A kernel that breaks it gives frames that change with the thread count, or
+        # from run to run. This compares every stage of a frame drawn on one thread with the same
+        # frame drawn several times on all of them. Races show up by chance, so the scenes are
+        # crowded: many small triangles, overlapping, for threads to collide on.
+        most = numba.config.NUMBA_NUM_THREADS
+        if most < 2:
+            self.skipTest("needs a machine with more than one core")
+        spheres = [Object3D(blob_mesh((1.0, 1.0, 1.0), rings=48, segments=64), color=Color.GREEN,
+                            position=np.array([0.4 * i - 0.6, 0.1 * i, -0.3 * i])) for i in range(4)]
+        scenes = [[Object3D(make_die(), rotation=quat_axis_angle((1, 2, 0), 0.7)), *spheres],
+                  [Object3D(make_box(), position=np.array([0.0, 0.0, 4.6]))]]  # the camera in front of its near face
+
+        def draw(threads):
+            numba.set_num_threads(threads)
+            screen = Screen(glyphs="sextant", color="256", size=(30, 60), background=(20, 20, 30))
+            renderer = Renderer(60, 30, screen.cell_pixels)
+            frame = []
+            for objects in scenes:
+                fb = renderer.render(objects, Camera(position=np.array([0.0, 0.5, 5.0])), Light())
+                screen.draw_frame(fb)
+                frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy(), screen.chars.copy(),
+                          screen.fg.copy(), screen.bg.copy(), screen.render_updates()]
+            return frame
+
+        try:
+            one = draw(1)
+            for _ in range(5):
+                for a, b in zip(one, draw(most)):
+                    np.testing.assert_array_equal(a, b)
+        finally:
+            numba.set_num_threads(most)
 
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
@@ -394,6 +449,19 @@ class ScreenTests(unittest.TestCase):
         self.assertIn("\x1b[2;4H", second)
         self.assertNotIn("\x1b[2J", second)
         self.assertNotIn("hello", second)
+
+    def test_colour_codes_written_as_bytes(self):
+        buf = np.zeros(64, np.uint8)
+        for packed in [-1, *encode_index(np.arange(256)), *encode_rgb([(0, 0, 0), (255, 255, 255), (7, 80, 200)])]:
+            for background in (False, True):
+                n = put_sgr_color(buf, 0, int(packed), background)
+                self.assertEqual(buf[:n].tobytes().decode(), sgr_color(packed, background))
+
+    def test_ascii_terminal_gets_only_ascii(self):
+        screen = Screen(glyphs="ascii", color="16", size=(2, 10))
+        screen.unicode = False
+        screen.text(0, 0, "h\u00e9 \u2713!")
+        self.assertIn("h? ?!", screen.render_updates())
 
     def test_frame_needs_matching_cell_pixels(self):
         screen = Screen(glyphs="sextant", color="truecolor", size=(10, 20))

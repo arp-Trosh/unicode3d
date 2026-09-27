@@ -19,6 +19,7 @@ uses), so edges land on the right sub-pixel while flat areas stay solid.
 from dataclasses import dataclass
 
 import numpy as np
+from numba import njit, prange
 
 from .color import linear_to_srgb, luminance
 
@@ -100,6 +101,78 @@ def _masks(p):
     return masks, bits.astype(float)
 
 
+@njit(cache=True, parallel=True)
+def _match(rgb, alpha, pw, ph, background, masks, bits, min_alpha, min_gain, mask_out, fg, bg, fg_on, bg_on):
+    """match_cells() for a framebuffer's rgb (premultiplied) and alpha, with pw x ph pixels to a cell.
+
+    background: linear RGB composited under partly covered pixels (black for the
+    terminal's own). masks, bits: _masks(). Writes each cell's glyph mask, colours
+    and whether each colour is drawn.
+
+    Each cell's pixels are features (r, g, b, ALPHA_WEIGHT * alpha). Splitting
+    them into sides with means m1, m0 leaves an error of sum|c|^2 - n1|m1|^2 -
+    n0|m0|^2, so the best split maximizes |S1|^2/n1 + |S0|^2/n0. Nearly flat cells
+    stay solid (the unsplit mask is first): splitting them into two almost equal
+    colours costs output and, in small palettes, shows up as noise. No split can
+    gain more than the error of the unsplit cell, so cells where that is already
+    too small are settled without scoring any split: in most frames that is
+    nearly every cell (empty or flat surface).
+    """
+    h, w = mask_out.shape
+    p = pw * ph
+    full = (1 << p) - 1
+    for y in prange(h):
+        feat, total, s1 = np.empty((p, 4)), np.empty(4), np.empty(4)  # scratch space for this row's cells
+        for x in range(w):
+            total[:] = 0.0
+            energy = 0.0
+            for i in range(p):
+                py, px = y * ph + i // pw, x * pw + i % pw
+                a = alpha[py, px]
+                for k in range(3):
+                    feat[i, k] = rgb[py, px, k] + (1.0 - a) * background[k]
+                feat[i, 3] = ALPHA_WEIGHT * a
+                for k in range(4):
+                    total[k] += feat[i, k]
+                    energy += feat[i, k] * feat[i, k]
+            unsplit = (total[0] ** 2 + total[1] ** 2 + total[2] ** 2 + total[3] ** 2) / p
+            best = 0
+            s1[:] = total
+            if energy - unsplit >= min_gain:
+                best_score = unsplit
+                for m in range(1, masks.shape[0]):
+                    a0 = a1 = a2 = a3 = 0.0
+                    n1 = 0.0
+                    for i in range(p):
+                        if bits[m, i]:
+                            a0, a1, a2, a3 = a0 + feat[i, 0], a1 + feat[i, 1], a2 + feat[i, 2], a3 + feat[i, 3]
+                            n1 += 1.0
+                    r0, r1, r2, r3 = total[0] - a0, total[1] - a1, total[2] - a2, total[3] - a3
+                    score = (a0 * a0 + a1 * a1 + a2 * a2 + a3 * a3) / n1 + (r0 * r0 + r1 * r1 + r2 * r2 + r3 * r3) / (p - n1)
+                    if score > best_score:
+                        best, best_score = m, score
+                if best_score - unsplit < min_gain:
+                    best = 0
+                if best:
+                    s1[:] = 0.0
+                    for i in range(p):
+                        if bits[best, i]:
+                            s1 += feat[i]
+            mask = masks[best]
+            n1 = 0
+            for i in range(p):
+                n1 += (mask >> i) & 1
+            n0 = max(p - n1, 1)
+            on1 = s1[3] / n1 >= min_alpha
+            on0 = (total[3] - s1[3]) / n0 >= min_alpha and mask != full
+            swap = not on1 and on0  # only the background side is drawn: show it as the foreground of the mirrored glyph
+            for k in range(3):
+                side1, side0 = s1[k] / n1, (total[k] - s1[k]) / n0
+                fg[y, x, k], bg[y, x, k] = (side0, side1) if swap else (side1, side0)
+            fg_on[y, x], bg_on[y, x] = on1 or on0, on1 and on0
+            mask_out[y, x] = (full ^ mask if swap else mask) if on1 or on0 else 0
+
+
 def match_cells(fb, glyphs, background=None):
     """Pick each cell's character and colours from the framebuffer's sub-pixels.
 
@@ -108,52 +181,15 @@ def match_cells(fb, glyphs, background=None):
     """
     if glyphs.name == "ascii":
         return _match_ascii(fb, glyphs, background)
-    rgb, alpha = _cell_pixels(fb, glyphs, background)
-    p = glyphs.pixel_count
-    masks, bits = _masks(p)
-    feat = np.concatenate([rgb, ALPHA_WEIGHT * alpha[..., None]], axis=-1)  # (H, W, P, 4)
-    total = feat.sum(axis=2)
-    n1 = bits.sum(axis=1)
-    n0 = p - n1
-
-    # Splitting a cell into sides with means m1, m0 leaves an error of
-    # sum|c|^2 - n1|m1|^2 - n0|m0|^2, so the best split maximizes |S1|^2/n1 + |S0|^2/n0.
-    # Nearly flat cells stay solid (the unsplit mask is first): splitting them into two almost equal
-    # colours costs output and, in small palettes, shows up as noise. No split can gain more than
-    # the error of the unsplit cell, so cells where that is already too small are settled without
-    # scoring any split: in most frames that is nearly every cell (empty or flat surface).
-    min_gain = p * MIN_SPLIT ** 2
-    busy = (feat ** 2).sum(axis=(2, 3)) - (total ** 2).sum(axis=-1) / p >= min_gain
-    best = np.zeros(busy.shape, dtype=int)
-    s1 = total.copy()  # sums over the chosen split's side 1 (the unsplit cell's side 1 is everything)
-    if busy.any():
-        f = feat[busy]  # (N, P, 4)
-        n, k = len(f), len(masks)
-        # Every split's side-1 sums at once, as one float32 matrix product (plenty for colours).
-        sums = f.astype(np.float32).transpose(0, 2, 1).reshape(n * 4, p) @ bits.T.astype(np.float32)
-        sums = sums.reshape(n, 4, k)
-        rest = total[busy].astype(np.float32)[:, :, None] - sums
-        score = (sums ** 2).sum(axis=1) / n1 + (rest ** 2).sum(axis=1) / np.maximum(n0, 1)
-        pick = score.argmax(axis=-1)
-        gain = score[np.arange(n), pick] - score[:, 0]
-        pick = np.where(gain < min_gain, 0, pick)
-        best[busy] = pick
-        s1[busy] = np.einsum("np,npc->nc", bits[pick], f)  # the chosen sides again, in full precision
-    side1 = s1 / n1[best][..., None]
-    side0 = (total - s1) / np.maximum(n0[best], 1)[..., None]
-    mask = masks[best]
-
-    full = (1 << p) - 1
+    pw, ph = glyphs.cell_pixels
+    h, w = fb.height // ph, fb.width // pw
+    masks, bits = _masks(glyphs.pixel_count)
+    mask = np.empty((h, w), np.int64)
+    fg, bg = np.empty((h, w, 3)), np.empty((h, w, 3))
+    fg_on, bg_on = np.empty((h, w), bool), np.empty((h, w), bool)
     min_alpha = MIN_ALPHA * ALPHA_WEIGHT if background is None else -1.0  # a filled background is always opaque
-    on1 = side1[..., 3] >= min_alpha
-    on0 = (side0[..., 3] >= min_alpha) & (mask != full)
-    swap = ~on1 & on0  # only the background side is drawn: show it as the foreground of the mirrored glyph
-    mask = np.where(swap, full ^ mask, mask)
-    fg = np.where(swap[..., None], side0[..., :3], side1[..., :3])
-    bg = np.where(swap[..., None], side1[..., :3], side0[..., :3])
-    fg_on = on1 | on0
-    bg_on = on1 & on0
-    mask = np.where(fg_on, mask, 0)
+    _match(fb.rgb, fb.alpha, pw, ph, np.zeros(3) if background is None else np.asarray(background, dtype=float),
+           masks, bits, min_alpha, glyphs.pixel_count * MIN_SPLIT ** 2, mask, fg, bg, fg_on, bg_on)
     return Cells(np.array(glyphs.chars)[mask], fg, bg, fg_on, bg_on)
 
 

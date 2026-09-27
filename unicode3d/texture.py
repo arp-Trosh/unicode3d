@@ -8,6 +8,7 @@ as the die turns; sampling a copy pre-shrunk to about the on-screen size
 (a mipmap level), blended between the two nearest levels, keeps it steady.
 """
 import numpy as np
+from numba import njit
 
 from .color import srgb_to_linear
 
@@ -30,30 +31,51 @@ def build_mipmaps(texture):
     return levels
 
 
-def _bilinear(tex, u, v):
-    h, w = tex.shape[:2]
+def pack(chains):
+    """Mipmap chains (as build_mipmaps gives them) in flat arrays, for sample().
+
+    Returns texels (N, 3): every level's texels, row by row, as colours (brightness
+    textures repeat their one channel); levels (L, 3): each level's [first texel,
+    height, width]; first (K + 1,): chain k's levels are levels[first[k]:first[k + 1]].
+    """
+    texels, levels, first, offset = [np.zeros((0, 3))], [], [0], 0
+    for chain in chains:
+        for level in chain:
+            h, w, c = level.shape
+            texels.append(np.broadcast_to(level, (h, w, 3)).reshape(-1, 3))
+            levels.append((offset, h, w))
+            offset += h * w
+        first.append(len(levels))
+    return (np.ascontiguousarray(np.concatenate(texels)), np.array(levels, dtype=np.int64).reshape(-1, 3),
+            np.array(first, dtype=np.int64))
+
+
+@njit(cache=True)
+def _bilinear(texels, levels, level, u, v):
+    offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
     x = u * w - 0.5
     y = (1.0 - v) * h - 0.5  # texture row 0 is the top (v = 1)
-    x0, y0 = np.floor(x), np.floor(y)
-    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
-    x0 = np.clip(x0.astype(int), 0, w - 1)
-    y0 = np.clip(y0.astype(int), 0, h - 1)
-    x1, y1 = np.minimum(x0 + 1, w - 1), np.minimum(y0 + 1, h - 1)
-    top = tex[y0, x0] * (1 - fx) + tex[y0, x1] * fx
-    bottom = tex[y1, x0] * (1 - fx) + tex[y1, x1] * fx
-    return top * (1 - fy) + bottom * fy
+    fx, fy = x - np.floor(x), y - np.floor(y)
+    x0 = min(max(int(np.floor(x)), 0), w - 1)
+    y0 = min(max(int(np.floor(y)), 0), h - 1)
+    x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
+    a, b = texels[offset + y0 * w + x0], texels[offset + y0 * w + x1]
+    c, d = texels[offset + y1 * w + x0], texels[offset + y1 * w + x1]
+    r = (a[0] * (1 - fx) + b[0] * fx) * (1 - fy) + (c[0] * (1 - fx) + d[0] * fx) * fy
+    g = (a[1] * (1 - fx) + b[1] * fx) * (1 - fy) + (c[1] * (1 - fx) + d[1] * fx) * fy
+    bl = (a[2] * (1 - fx) + b[2] * fx) * (1 - fy) + (c[2] * (1 - fx) + d[2] * fx) * fy
+    return r, g, bl
 
 
-def sample(levels, u, v, lod):
-    """Trilinear sample: bilinear on the two mip levels around `lod`, blended. Returns (N, C)."""
-    lod = np.clip(lod, 0.0, len(levels) - 1)
-    lo = np.floor(lod).astype(int)
-    frac = (lod - lo)[:, None]
-    out = np.empty((len(u), levels[0].shape[2]))
-    for lvl in np.unique(lo):
-        sel = lo == lvl
-        a = _bilinear(levels[lvl], u[sel], v[sel])
-        if lvl + 1 < len(levels):
-            a = a * (1 - frac[sel]) + _bilinear(levels[lvl + 1], u[sel], v[sel]) * frac[sel]
-        out[sel] = a
-    return out
+@njit(cache=True)
+def sample(texels, levels, first, chain, u, v, lod):
+    """Trilinear sample of chain `chain` of pack()'s arrays: bilinear on the two mip levels around `lod`, blended."""
+    n = first[chain + 1] - first[chain]
+    lod = min(max(lod, 0.0), n - 1.0)
+    lo = int(np.floor(lod))
+    frac = lod - lo
+    r, g, b = _bilinear(texels, levels, first[chain] + lo, u, v)
+    if lo + 1 < n:
+        r2, g2, b2 = _bilinear(texels, levels, first[chain] + lo + 1, u, v)
+        r, g, b = r * (1 - frac) + r2 * frac, g * (1 - frac) + g2 * frac, b * (1 - frac) + b2 * frac
+    return r, g, b

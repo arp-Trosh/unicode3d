@@ -1,6 +1,6 @@
 # unicode3d
 
-A 3D renderer for the terminal, written in Python with only numpy. It draws with Unicode block
+A 3D renderer for the terminal, written in Python with numpy and [Numba](https://numba.pydata.org). It draws with Unicode block
 characters in 24-bit colour, falls back to 256 or 16 colours and to ASCII on terminals that need
 it, and runs in Windows Terminal and in Linux/macOS terminals (no curses). It started as a Python
 port, in spirit, of [ShakedAp/ASCII-renderer](https://github.com/ShakedAp/ASCII-renderer).
@@ -78,13 +78,16 @@ a large terminal give the best detail.
   VT escape sequences, wrapped in synchronized-output markers where the terminal supports them. There
   is no curses: on Windows the console is put in VT mode, and keys and mouse clicks are read as
   console input records.
-- **Speed:** each object's triangles are rasterized together, for all sample positions at once,
-  with numpy rather than one at a time. Triangles crossing the camera's near plane are clipped
-  rather than dropped.
+- **Speed:** the per-pixel work (projecting and clipping triangles, rasterizing, shading, fog and
+  outlines, matching glyphs, encoding the output) is plain Python loops that Numba compiles to
+  machine code, split across CPU cores where it pays. The renderer keeps its working arrays from
+  frame to frame rather than allocating new ones. Triangles crossing the camera's near plane are
+  clipped rather than dropped.
 
 ## Layout
 
-The tests, in `tests/test_renderer.py`, use only the public API. The `examples/` programs show the
+The tests, in `tests/test_renderer.py`, use only the public API. The conventions for engine code (Numba
+kernels, and the one-writer rule that keeps multithreaded rendering deterministic) are in `CLAUDE.md`. The `examples/` programs show the
 engine in use; games may build on them, as [Zombie Dice](https://github.com/arp-Trosh/zombieDice)
 does with `examples/dice.py`.
 
@@ -93,7 +96,7 @@ does with `examples/dice.py`.
 | `transforms.py` | projection/view matrices, quaternions |
 | `mesh.py`       | `Mesh` with vertex normals and cached mipmaps, OBJ loader, textured `make_box` |
 | `texture.py`    | mipmap chains and trilinear sampling |
-| `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), vectorized multi-sample z-buffered rasterizer, perspective-correct interpolation, near-plane clipping |
+| `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), projection with culling and near-plane clipping, multi-sample z-buffered rasterizer |
 | `scene.py`      | `Camera`, `Light`, `Object3D`, `Renderer` (transform, cull, lighting, multisampling with extra edge samples, fog, outlines) |
 | `color.py`      | sRGB/linear conversion, named `Color`s, OKLab palette matching, dithering, SGR colour codes |
 | `glyphs.py`     | glyph sets (half, quad, sextant, ascii) and matching pixels to cells |
@@ -194,14 +197,27 @@ exactly; by default, edges blend toward black over the terminal's own background
 terminal can take), and `screen.fps` is the target frame rate, which `run()` re-reads every frame;
 `screen.measured_fps` is the rate it achieved over the last second.
 
-**Performance.** Rendering a frame and building its screen update takes about 6-7 ms for a
-60x15-cell view of three rolling dice and 10-12 ms for an 80x16 view of extruded voxel text, from half blocks to
-sextants. Cost grows with the pixel count, so large views in `sextant` mode are the most expensive:
-a 150x45 view of three rolling dice takes about 26 ms, against 20 ms in `quad` and 13 ms in `half`. A scene that hasn't changed since the last `render()` (same objects,
-poses, camera, light and size) isn't drawn again, so still frames cost a few milliseconds; after
-editing a mesh's arrays in place, call `renderer.invalidate()`. Use `quad` if frames drop.
+**Performance.** Rendering a frame and building its screen update takes about 1.5 ms for a
+60x15-cell view of three rolling dice, and about 3 ms for a 150x45 view in `sextant` mode (2.4 ms in
+`quad`, 2 ms in `half`). Cost grows with the pixel count and, more slowly, the triangle count: a
+27,000-triangle sphere filling a 180x50 view takes about 6 ms. A scene that hasn't changed since the
+last `render()` (same objects, poses, camera, light and size) isn't drawn again, so still frames
+cost almost nothing; after editing a mesh's arrays in place, call `renderer.invalidate()`. The
+terminal showing the frame usually takes longer than drawing it. `python benchmarks/bench.py`
+times each stage of a frame.
 
-**Windows.** Needs Windows 10 or later (for VT sequences in the console) and only numpy. Windows
+**First run.** Numba compiles the renderer the first time it is used, which takes about 10 seconds;
+the result is cached (in `__pycache__` beside the code, or a user cache folder if that can't be
+written), so later runs start in a fraction of a second. Upgrading unicode3d or Numba, or moving to
+another CPU, compiles it again. `run()` compiles before the first frame and shows "First run
+compile, please wait..." while it does; programs that drive a `Screen` themselves can call
+`compile_kernels()` at a moment of their choosing.
+
+**Threads.** The renderer uses every CPU core Numba finds, about twice as fast as one core at
+typical sizes. Set `NUMBA_NUM_THREADS`, or call `numba.set_num_threads()`, to leave cores for other
+work. Frames come out identical whatever the thread count.
+
+**Windows.** Needs Windows 10 or later (for VT sequences in the console), numpy and Numba. Windows
 Terminal is recommended, and gets sextants by default; the classic console works too, with quadrants
 (its default fonts may lack sextants).
 

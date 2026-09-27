@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "unicode3d"
 dynamic = ["version"]
-description = "3D renderer for the terminal: Unicode block characters in 24-bit colour, numpy only, no curses"
+description = "3D renderer for the terminal: Unicode block characters in 24-bit colour, numpy and Numba, no curses"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
 license-files = ["COPYING", "COPYING.LESSER"]
 authors = [{ name = "arp-Trosh" }]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.26"]
+dependencies = ["numpy>=1.26", "numba>=0.61"]
 keywords = ["terminal", "3d", "renderer", "unicode", "ascii-art", "game-engine"]
 classifiers = [
     "Programming Language :: Python :: 3",

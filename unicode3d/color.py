@@ -17,6 +17,7 @@ Colours on their way to the terminal are packed into one int per cell (see
 from enum import IntEnum
 
 import numpy as np
+from numba import njit, prange
 
 COLOR_MODES = ("truecolor", "256", "16", "mono")
 
@@ -59,10 +60,19 @@ def srgb_to_linear(c):
     return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
 
 
+@njit(cache=True, parallel=True)
+def _encode_srgb(linear, out):
+    for i in prange(linear.shape[0]):
+        c = min(max(linear[i], 0.0), 1.0)
+        out[i] = c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
 def linear_to_srgb(c):
     """Linear light to sRGB values 0..1 (clipped)."""
-    c = np.clip(np.asarray(c, dtype=float), 0.0, 1.0)
-    return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
+    c = np.ascontiguousarray(c, dtype=float)
+    out = np.empty_like(c)
+    _encode_srgb(c.reshape(-1), out.reshape(-1))
+    return out
 
 
 def to_linear_rgb(color):
@@ -188,6 +198,41 @@ def sgr_color(packed, background=False):
     if index < 16:
         return str((100 if background else 90) + index - 8)
     return f"{48 if background else 38};5;{index}"
+
+
+@njit(cache=True)
+def put_int(buf, k, value):
+    """Write a non-negative int in decimal into byte buffer buf at k; returns the index after it."""
+    digits = 1
+    while value >= 10 ** digits:
+        digits += 1
+    for i in range(digits - 1, -1, -1):
+        buf[k + i] = 48 + value % 10
+        value //= 10
+    return k + digits
+
+
+@njit(cache=True)
+def put_sgr_color(buf, k, packed, background):
+    """sgr_color(packed, background), written as ASCII into byte buffer buf at k; returns the index after it."""
+    if packed < 0:
+        return put_int(buf, k, 49 if background else 39)
+    if packed & _RGB:
+        k = put_int(buf, k, 48 if background else 38)
+        buf[k], buf[k + 1], buf[k + 2] = 59, 50, 59  # ";2;"
+        k = put_int(buf, k + 3, (packed >> 16) & 255)
+        buf[k] = 59
+        k = put_int(buf, k + 1, (packed >> 8) & 255)
+        buf[k] = 59
+        return put_int(buf, k + 1, packed & 255)
+    index = packed & 255
+    if index < 8:
+        return put_int(buf, k, (40 if background else 30) + index)
+    if index < 16:
+        return put_int(buf, k, (100 if background else 90) + index - 8)
+    k = put_int(buf, k, 48 if background else 38)
+    buf[k], buf[k + 1], buf[k + 2] = 59, 53, 59  # ";5;"
+    return put_int(buf, k + 3, index)
 
 
 def ansi_color(color):

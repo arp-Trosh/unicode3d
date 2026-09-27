@@ -15,22 +15,30 @@ Both are detected, and can be forced with arguments, the UNICODE3D_GLYPHS and
 UNICODE3D_COLOR environment variables, or the command-line flags that
 add_display_args() adds.
 """
+import threading
 import time
 import unicodedata
 
 import numpy as np
+from numba import njit
 
-from .color import COLOR_MODES, DEFAULT, Color, ansi_color, quantize, sgr_color, to_linear_rgb
+from .color import COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
 from .console import detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import InputDecoder, Key, MouseEvent
+from .mesh import make_box
+from .scene import Camera, Light, Object3D, Renderer
 
-__all__ = ["Color", "Key", "MouseEvent", "Screen", "run", "add_display_args", "display_options", "frame_to_text"]
+__all__ = ["Color", "Key", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
+           "frame_to_text"]
 
 BOLD, DIM, REVERSE = 1, 2, 4
-_ATTR_SGR = {BOLD: "1", DIM: "2", REVERSE: "7"}
 MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
-MAX_STYLES = 1 << 16  # cached SGR sequences; shaded truecolor frames bring thousands of new ones a second
+CELL_BYTES = 64  # the most one cell can take to send: a cursor move, a style with two RGB colours, a character
+COMPILE_MESSAGE = "First run compile, please wait..."
+COMPILE_NOTICE_DELAY = 0.5  # seconds: loading compiled kernels from Numba's cache takes less, compiling them more
+SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[0m\x1b[?2026l"  # synchronized output
+_CLEAR = np.frombuffer(b"\x1b[0m\x1b[2J", np.uint8)
 
 
 def _printable(ch):
@@ -38,6 +46,77 @@ def _printable(ch):
     if ch.isprintable() and unicodedata.east_asian_width(ch) not in "WF" and not unicodedata.combining(ch):
         return ch
     return "?"
+
+
+@njit(cache=True)
+def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown_attrs, full, mono, ascii_only, buf):
+    """Write the escape sequences that bring the terminal from the shown_* grid to the current one into
+    byte buffer buf (CELL_BYTES a cell, plus a little); returns how many bytes were written.
+
+    chars and shown_chars are code points. With `full`, everything is redrawn
+    after clearing the screen, whatever shown_* hold. ascii_only replaces
+    characters outside ASCII with '?'.
+    """
+    rows, cols = chars.shape
+    k = 0
+    if full:
+        buf[:len(_CLEAR)] = _CLEAR
+        k = len(_CLEAR)
+    styled, style_fg, style_bg, style_attrs = False, 0, 0, 0
+    for y in range(rows):
+        x = 0
+        while x < cols:
+            if not (full or chars[y, x] != shown_chars[y, x] or fg[y, x] != shown_fg[y, x]
+                    or bg[y, x] != shown_bg[y, x] or attrs[y, x] != shown_attrs[y, x]):
+                x += 1
+                continue
+            # A run of changed cells, rewriting gaps of up to MERGE_GAP unchanged ones rather than moving past them.
+            last = x
+            for j in range(x + 1, cols):
+                if full or chars[y, j] != shown_chars[y, j] or fg[y, j] != shown_fg[y, j] \
+                        or bg[y, j] != shown_bg[y, j] or attrs[y, j] != shown_attrs[y, j]:
+                    if j - last > MERGE_GAP:
+                        break
+                    last = j
+            buf[k], buf[k + 1] = 27, 91  # ESC [
+            k = put_int(buf, k + 2, y + 1)
+            buf[k] = 59  # ;
+            k = put_int(buf, k + 1, x + 1)
+            buf[k] = 72  # H
+            k += 1
+            for c in range(x, last + 1):
+                f, b, a = fg[y, c], bg[y, c], attrs[y, c]
+                if not styled or f != style_fg or b != style_bg or a != style_attrs:
+                    styled, style_fg, style_bg, style_attrs = True, f, b, a
+                    buf[k], buf[k + 1], buf[k + 2] = 27, 91, 48  # ESC [ 0
+                    k += 3
+                    for bit, code in ((BOLD, 49), (DIM, 50), (REVERSE, 55)):  # 1, 2, 7
+                        if a & bit:
+                            buf[k], buf[k + 1] = 59, code
+                            k += 2
+                    if not mono:
+                        buf[k] = 59
+                        k = put_sgr_color(buf, k + 1, f, False)
+                        buf[k] = 59
+                        k = put_sgr_color(buf, k + 1, b, True)
+                    buf[k] = 109  # m
+                    k += 1
+                cp = chars[y, c]
+                if cp < 0x80 or ascii_only:
+                    buf[k] = cp if cp < 0x80 else 63  # ?
+                    k += 1
+                elif cp < 0x800:
+                    buf[k], buf[k + 1] = 0xC0 | cp >> 6, 0x80 | cp & 0x3F
+                    k += 2
+                elif cp < 0x10000:
+                    buf[k], buf[k + 1], buf[k + 2] = 0xE0 | cp >> 12, 0x80 | cp >> 6 & 0x3F, 0x80 | cp & 0x3F
+                    k += 3
+                else:
+                    buf[k], buf[k + 1] = 0xF0 | cp >> 18, 0x80 | cp >> 12 & 0x3F
+                    buf[k + 2], buf[k + 3] = 0x80 | cp >> 6 & 0x3F, 0x80 | cp & 0x3F
+                    k += 4
+            x = last + 1
+    return k
 
 
 class Screen:
@@ -62,7 +141,6 @@ class Screen:
         self.fps = 30               # frames a second run() aims for; change it any time
         self.measured_fps = None    # frames run() actually drew in the last second
         self._decoder = InputDecoder()
-        self._sgr = {}
         self._rows = self._cols = 0
         self.set_glyphs(glyphs)
         self.set_color(color)
@@ -87,7 +165,6 @@ class Screen:
             raise ValueError(f"color must be one of {COLOR_MODES}, not {color!r}")
         self.color_mode = color
         self._bg_cell = DEFAULT if self.background is None else int(quantize(self.background, color))
-        self._sgr.clear()
         self._shown = None  # resend everything, in the new colours
 
     @property
@@ -111,6 +188,7 @@ class Screen:
         self.bg = np.full((rows, cols), self._bg_cell, dtype=np.int64)
         self.attrs = np.zeros((rows, cols), dtype=np.uint8)
         self._shown = None  # unknown: the next refresh redraws everything
+        self._out = np.empty(rows * cols * CELL_BYTES + 64, np.uint8)
 
     def poll_size(self):
         """Pick up a change in terminal size (run() calls this before every frame)."""
@@ -176,56 +254,65 @@ class Screen:
 
     # ----- output --------------------------------------------------------------------------
 
-    def _style(self, fg, bg, attrs):
-        key = (fg, bg, attrs)
-        seq = self._sgr.get(key)
-        if seq is None:
-            if len(self._sgr) >= MAX_STYLES:
-                self._sgr.clear()
-            params = ["0"] + [code for bit, code in _ATTR_SGR.items() if attrs & bit]
-            if self.color_mode != "mono":
-                params += [sgr_color(fg), sgr_color(bg, background=True)]
-            seq = self._sgr[key] = "\x1b[" + ";".join(params) + "m"
-        return seq
+    def _updates(self):
+        """render_updates() as UTF-8 (ASCII if the terminal lacks Unicode)."""
+        full = self._shown is None
+        if full:
+            self._shown = (self.chars.copy(), self.fg.copy(), self.bg.copy(), self.attrs.copy())
+        chars, fg, bg, attrs = self._shown
+        n = _encode_updates(self.chars.view(np.uint32), self.fg, self.bg, self.attrs, chars.view(np.uint32), fg, bg,
+                            attrs, full, self.color_mode == "mono", not self.unicode, self._out)
+        if not n:
+            return b""
+        for shown, now in zip(self._shown, (self.chars, self.fg, self.bg, self.attrs)):
+            np.copyto(shown, now)
+        # Synchronized output: terminals that support it show the whole update at once, others ignore it.
+        return SYNC_BEGIN + self._out[:n].tobytes() + SYNC_END
 
     def render_updates(self):
         """The escape sequences that bring the terminal up to date with the grid, and mark it as shown."""
-        full = self._shown is None
-        if full:
-            changed = np.ones(self.chars.shape, bool)
-        else:
-            chars, fg, bg, attrs = self._shown
-            changed = (self.chars != chars) | (self.fg != fg) | (self.bg != bg) | (self.attrs != attrs)
-        out = ["\x1b[0m\x1b[2J"] if full else []
-        style = None
-        for y in np.flatnonzero(changed.any(axis=1)):
-            xs = np.flatnonzero(changed[y])
-            splits = np.flatnonzero(np.diff(xs) > MERGE_GAP) + 1
-            for run in np.split(xs, splits):
-                s, e = int(run[0]), int(run[-1]) + 1
-                out.append(f"\x1b[{y + 1};{s + 1}H")
-                fg, bg, at = self.fg[y, s:e], self.bg[y, s:e], self.attrs[y, s:e]
-                breaks = np.flatnonzero((fg[1:] != fg[:-1]) | (bg[1:] != bg[:-1]) | (at[1:] != at[:-1])) + 1
-                row = self.chars[y, s:e]
-                for a, b in zip([0, *breaks.tolist()], [*breaks.tolist(), e - s]):
-                    key = (int(fg[a]), int(bg[a]), int(at[a]))
-                    if key != style:
-                        out.append(self._style(*key))
-                        style = key
-                    out.append("".join(row[a:b]))
-        self._shown = (self.chars.copy(), self.fg.copy(), self.bg.copy(), self.attrs.copy())
-        if not out:
-            return ""
-        # Synchronized output: terminals that support it show the whole update at once, others ignore it.
-        return "\x1b[?2026h" + "".join(out) + "\x1b[0m\x1b[?2026l"
+        return self._updates().decode("utf-8")
 
     def refresh(self):
-        text = self.render_updates()
-        if text and self.console is not None:
-            self.console.write(text)
+        data = self._updates()
+        if data and self.console is not None:
+            self.console.write(data)
 
 
 # ----- running an app ------------------------------------------------------------------------
+
+def compile_kernels():
+    """Compile everything drawing a frame runs (or load it from Numba's cache), by drawing a small scene off-screen.
+
+    Compiling takes about 10 seconds on the first run after installing or
+    upgrading; loading the cache, a fraction of a second. run() calls this
+    before its first frame, showing COMPILE_MESSAGE while it compiles; programs
+    that drive a Screen themselves can call it too, or the first frame waits
+    for the compiling instead.
+    """
+    screen = Screen(None, glyphs="sextant", color="truecolor", size=(8, 16))
+    renderer = Renderer(16, 8, screen.cell_pixels)
+    objects = [Object3D(make_box(textures=[np.ones((4, 4))] * 6)),                     # textured
+               Object3D(make_box(), position=np.array([1.0, 0.0, 0.0]), color=Color.RED)]  # plain
+    screen.draw_frame(renderer.render(objects, Camera(), Light()))
+    screen.render_updates()
+
+
+def _compile_with_notice(console):
+    """compile_kernels(), showing COMPILE_MESSAGE on the console if it takes long enough to be compiling."""
+    def notice():
+        cols, rows = console.size()
+        y, x = max(rows // 2, 1), max((cols - len(COMPILE_MESSAGE)) // 2 + 1, 1)
+        console.write(f"\x1b[0m\x1b[2J\x1b[{y};{x}H{COMPILE_MESSAGE}")
+
+    timer = threading.Timer(COMPILE_NOTICE_DELAY, notice)
+    timer.start()
+    try:
+        compile_kernels()
+    finally:
+        timer.cancel()
+        timer.join()  # the notice is written in full or not at all; the first frame then clears the screen
+
 
 def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
@@ -238,6 +325,7 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
     with open_console(mouse=mouse, title=title) as console:
         screen = Screen(console, glyphs=glyphs, color=color, background=background)
         screen.fps = fps
+        _compile_with_notice(console)
         last = time.perf_counter()
         second, frames = last, 0
         while True:

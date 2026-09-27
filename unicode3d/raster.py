@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Z-buffered, vectorized triangle rasterizer, and the framebuffer it renders into.
+"""Z-buffered triangle rasterizer (compiled with Numba), and the framebuffer it renders into.
 
 Pixels are finer than terminal cells: each cell covers a small grid of them
 (FrameBuffer.cell_pixels), which the glyph set later turns into characters.
 """
 import numpy as np
-
-MAX_FRAGMENTS = 1 << 21  # candidate pixels tested per batch, to bound memory
+from numba import njit, prange
 
 
 class FrameBuffer:
@@ -51,144 +50,171 @@ class FrameBuffer:
         return self.rgb / np.maximum(self.alpha, 1e-9)[..., None]
 
 
-def _bboxes(xs, ys, width, height, offsets):
-    """Per-triangle ranges of pixels that any sample position could put inside the triangle."""
-    (oxmin, oymin), (oxmax, oymax) = offsets.min(axis=0), offsets.max(axis=0)
-    x0 = np.clip(np.floor(xs.min(axis=1) - oxmax), 0, width).astype(np.int64)
-    x1 = np.clip(np.ceil(xs.max(axis=1) - oxmin), -1, width - 1).astype(np.int64)
-    y0 = np.clip(np.floor(ys.min(axis=1) - oymax), 0, height).astype(np.int64)
-    y1 = np.clip(np.ceil(ys.max(axis=1) - oymin), -1, height - 1).astype(np.int64)
-    bw, bh = np.maximum(x1 - x0 + 1, 0), np.maximum(y1 - y0 + 1, 0)
-    return x0, y0, bw, bh
+ROW_BAND = 8  # rows of pixels each thread rasterizes at a time
 
 
-def _batches(counts):
-    """Split triangle indices into runs whose candidate totals stay under MAX_FRAGMENTS."""
-    start, total = 0, 0
-    for i, n in enumerate(counts):
-        if total and total + n > MAX_FRAGMENTS:
-            yield start, i
-            start, total = i, 0
-        total += n
-    if start < len(counts):
-        yield start, len(counts)
-
-
-def rasterize(depth, width, height, xs, ys, inv_w, offsets=((0.5, 0.5),), slots=None):
+@njit(cache=True, parallel=True)
+def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots):
     """Depth-test every triangle at every sample position and keep the nearest surface.
 
-    depth: (S, M) nearest 1/w so far for each of the S sample positions `offsets`
-    ((x, y) within a pixel) in each of M pixels, updated in place. The pixels are
-    all width * height of them in row order, or, with `slots` (an int array giving
-    each pixel's column in depth, -1 to skip it), just a chosen few.
+    depth, tris: (M, S) nearest 1/w so far (larger is nearer, 0 is empty) and the
+    index of the triangle it belongs to (-1 for none), for each of the S sample
+    positions `offsets` ((x, y) within a pixel) in each of M pixels; updated in place.
+    slots: (width * height,) each pixel's row in depth, or -1 to skip the pixel.
     xs, ys, inv_w: (T, 3) pixel coordinates and 1/w of each triangle corner.
 
-    Returns (flat indices into depth, triangle indices, barycentric weights (N, 3))
-    of the samples that were won, for the caller to shade.
+    Where triangles tie, the first one wins. Rows of pixels are split into bands
+    that are rasterized in parallel, each band taking the triangles in order.
     """
-    offsets = np.asarray(offsets, dtype=float)
-    n_samples, n_pixels = depth.shape
-    out_idx, out_tri, out_bary = [], [], []
-    area = (xs[:, 1] - xs[:, 0]) * (ys[:, 2] - ys[:, 0]) - (ys[:, 1] - ys[:, 0]) * (xs[:, 2] - xs[:, 0])
-    x0, y0, bw, bh = _bboxes(xs, ys, width, height, offsets)
-    counts = np.where(np.abs(area) > 1e-9, bw * bh, 0)
-    flat_depth = depth.reshape(-1)
-    for a, b in _batches(counts * n_samples):
-        n = counts[a:b]
-        total = int(n.sum())
-        if not total:
-            continue
-        tri = np.repeat(np.arange(a, b), n)
-        local = np.arange(total) - np.repeat(np.cumsum(n) - n, n)
-        px = x0[tri] + local % bw[tri]
-        py = y0[tri] + local // bw[tri]
-        col = py * width + px
-        if slots is not None:
-            col = slots[col]
-            sel = col >= 0
-            px, py, col, tri = px[sel], py[sel], col[sel], tri[sel]
-        # Every candidate pixel once per sample position.
-        sample = np.tile(np.arange(n_samples), len(tri))
-        tri, col = np.repeat(tri, n_samples), np.repeat(col, n_samples)
-        cx = np.repeat(px, n_samples) + offsets[sample, 0]
-        cy = np.repeat(py, n_samples) + offsets[sample, 1]
-        X, Y = xs[tri], ys[tri]
-
-        def edge(i, j):
-            return (X[:, j] - X[:, i]) * (cy - Y[:, i]) - (Y[:, j] - Y[:, i]) * (cx - X[:, i])
-
-        bary = np.stack([edge(1, 2), edge(2, 0), edge(0, 1)], axis=1) / area[tri, None]
-        inside = (bary >= -1e-4).all(axis=1)  # the slack closes hairline gaps between triangles
-        idx = sample * n_pixels + col
-        z = np.einsum("ij,ij->i", bary, inv_w[tri])
-        keep = inside & (z > flat_depth[idx])
-        if not keep.any():
-            continue
-        idx, z, tri, bary = idx[keep], z[keep], tri[keep], bary[keep]
-        # Several triangles may cover one sample: the nearest wins.
-        order = np.lexsort((-z, idx))
-        first = np.r_[True, idx[order][1:] != idx[order][:-1]]
-        win = order[first]
-        flat_depth[idx[win]] = z[win]
-        out_idx.append(idx[win])
-        out_tri.append(tri[win])
-        out_bary.append(bary[win])
-    if not out_idx:
-        return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 3))
-    idx, tri, bary = np.concatenate(out_idx), np.concatenate(out_tri), np.concatenate(out_bary)
-    if len(out_idx) > 1:  # a later batch may have overdrawn an earlier one
-        latest = np.unique(idx[::-1], return_index=True)[1]
-        latest = len(idx) - 1 - latest
-        idx, tri, bary = idx[latest], tri[latest], bary[latest]
-    return idx, tri, bary
+    n_samples = offsets.shape[0]
+    oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
+    oymin, oymax = offsets[:, 1].min(), offsets[:, 1].max()
+    n_bands = (height + ROW_BAND - 1) // ROW_BAND
+    for band in prange(n_bands):
+        band_y0 = band * ROW_BAND
+        band_y1 = min(band_y0 + ROW_BAND, height) - 1
+        for t in range(xs.shape[0]):
+            x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
+            y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
+            # Pixels that any sample position could put inside the triangle.
+            by0 = max(int(np.floor(min(y0, y1, y2) - oymax)), band_y0)
+            by1 = min(int(np.ceil(max(y0, y1, y2) - oymin)), band_y1)
+            if by0 > by1:
+                continue
+            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+            if abs(area) <= 1e-9:
+                continue
+            bx0 = max(int(np.floor(min(x0, x1, x2) - oxmax)), 0)
+            bx1 = min(int(np.ceil(max(x0, x1, x2) - oxmin)), width - 1)
+            w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+            for py in range(by0, by1 + 1):
+                for px in range(bx0, bx1 + 1):
+                    col = slots[py * width + px]
+                    if col < 0:
+                        continue
+                    for s in range(n_samples):
+                        cx, cy = px + offsets[s, 0], py + offsets[s, 1]
+                        # Barycentric weights; the slack closes hairline gaps between triangles.
+                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) / area
+                        if b0 < -1e-4:
+                            continue
+                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) / area
+                        if b1 < -1e-4:
+                            continue
+                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) / area
+                        if b2 < -1e-4:
+                            continue
+                        z = b0 * w0 + b1 * w1 + b2 * w2
+                        if z > depth[col, s]:
+                            depth[col, s] = z
+                            tris[col, s] = t
 
 
-def barycentric(xs, ys, tri, cx, cy):
-    """Barycentric weights (N, 3) of points (cx, cy) in triangles `tri`, clamped to the triangle.
+@njit(cache=True)
+def barycentric(xs, ys, t, cx, cy):
+    """Barycentric weights of point (cx, cy) in triangle t, clamped to the triangle.
 
-    Points outside their triangle (a pixel centre just past the edge of a triangle
-    that covers some of the pixel's samples) snap onto it, so attributes are never
-    extrapolated beyond the corners' values.
+    A point outside the triangle (a pixel centre just past the edge of a triangle
+    that covers some of the pixel's samples) snaps onto it, so attributes are
+    never extrapolated beyond the corners' values.
     """
-    X, Y = xs[tri], ys[tri]
-
-    def edge(i, j):
-        return (X[:, j] - X[:, i]) * (cy - Y[:, i]) - (Y[:, j] - Y[:, i]) * (cx - X[:, i])
-
-    area = edge(0, 1) + edge(1, 2) + edge(2, 0)
-    bary = np.stack([edge(1, 2), edge(2, 0), edge(0, 1)], axis=1) / np.where(np.abs(area) > 1e-12, area, 1e-12)[:, None]
-    bary = np.clip(bary, 0.0, None)
-    return bary / np.maximum(bary.sum(axis=1, keepdims=True), 1e-12)
-
-
-def perspective_interpolate(values, tri, bary, inv_w):
-    """Perspective-correct interpolation of per-corner values (T, 3, K) at the given fragments."""
-    w = bary * inv_w[tri]
-    return np.einsum("ij,ijk->ik", w, values[tri]) / w.sum(axis=1, keepdims=True)
+    x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
+    y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
+    e12 = (x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)
+    e20 = (x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)
+    e01 = (x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)
+    area = e01 + e12 + e20
+    if abs(area) <= 1e-12:
+        area = 1e-12
+    b0, b1, b2 = max(e12 / area, 0.0), max(e20 / area, 0.0), max(e01 / area, 0.0)
+    total = max(b0 + b1 + b2, 1e-12)
+    return b0 / total, b1 / total, b2 / total
 
 
-def clip_near(corners, near):
-    """Clip triangles against the near plane w = near.
+@njit(cache=True)
+def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
+    """Store triangle `corners` (3, 12: clip xyzw | world xyz | normal xyz | uv) as screen triangle k."""
+    for j in range(3):
+        iw = 1.0 / corners[j, 3]
+        inv_w[k, j] = iw
+        xs[k, j] = (corners[j, 0] * iw + 1.0) * 0.5 * width
+        ys[k, j] = (1.0 - corners[j, 1] * iw) * 0.5 * height
+        attrs[k, j, :] = corners[j, 4:]
 
-    corners: (T, 3, K) per-corner attributes with clip-space w at index 3; every
-    attribute is interpolated linearly, which is correct in clip space.
-    Returns the surviving triangles (T', 3, K) and, for each, the index of its source triangle.
+
+@njit(cache=True)
+def project(vertices, vertex_normals, faces, uvs, textured, rotation, scale, position, view_proj, eye, double_sided,
+            near, width, height, scratch, xs, ys, inv_w, attrs, src, k):
+    """A mesh's faces as screen-space triangles: placed in the world, culled, clipped against the near
+    plane w = near, and projected.
+
+    vertices, vertex_normals: (V, 3) in the mesh's own space; the mesh is scaled, rotated by
+    `rotation` (3, 3) and moved to `position`. faces: (F, 3). uvs: (F, 3, 2) per-corner
+    texture coordinates, read only if `textured`. eye: camera position, for back-face
+    culling (skipped if double_sided: back faces are drawn with flipped normals).
+    scratch: (V, 10) working space.
+
+    The triangles are written to xs, ys, inv_w (pixel coordinates and 1/w of each
+    corner), attrs (world xyz | normal xyz | uv of each corner) and src (each
+    triangle's face) from row k on; these need room for 2F rows. Returns the row
+    after the last one written. Faces wholly in front of the near plane come
+    first, then the pieces of those it cuts; attributes are interpolated
+    linearly, which is correct in clip space.
     """
-    w = corners[:, :, 3]
-    ahead = w > near
-    n_ahead = ahead.sum(axis=1)
-    whole = np.flatnonzero(n_ahead == 3)
-    parts, sources = [corners[whole]], [whole]
-    for t in np.flatnonzero((n_ahead > 0) & (n_ahead < 3)):
-        poly = []
+    # Per vertex: world xyz | normal xyz | clip xyzw
+    for v in range(vertices.shape[0]):
         for i in range(3):
-            a, b = corners[t, i], corners[t, (i + 1) % 3]
-            if ahead[t, i]:
-                poly.append(a)
-            if ahead[t, i] != ahead[t, (i + 1) % 3]:
-                s = (near - a[3]) / (b[3] - a[3])
-                poly.append(a + s * (b - a))
-        for k in range(1, len(poly) - 1):  # fan-triangulate the clipped polygon
-            parts.append(np.array([[poly[0], poly[k], poly[k + 1]]]))
-            sources.append(np.array([t]))
-    return np.concatenate(parts), np.concatenate(sources)
+            scratch[v, i] = (rotation[i, 0] * vertices[v, 0] + rotation[i, 1] * vertices[v, 1]
+                             + rotation[i, 2] * vertices[v, 2]) * scale + position[i]
+            scratch[v, 3 + i] = (rotation[i, 0] * vertex_normals[v, 0] + rotation[i, 1] * vertex_normals[v, 1]
+                                 + rotation[i, 2] * vertex_normals[v, 2])
+        for i in range(4):
+            scratch[v, 6 + i] = (view_proj[i, 0] * scratch[v, 0] + view_proj[i, 1] * scratch[v, 1]
+                                 + view_proj[i, 2] * scratch[v, 2] + view_proj[i, 3])
+    corners = np.zeros((3, 12))
+    poly = np.empty((4, 12))
+    tri = np.empty((3, 12))
+    for cut_pass in range(2):
+        for f in range(faces.shape[0]):
+            ahead = 0
+            for j in range(3):
+                ahead += scratch[faces[f, j], 9] > near
+            if ahead == 0 or (ahead < 3) != (cut_pass == 1):
+                continue
+            a, b, c = scratch[faces[f, 0]], scratch[faces[f, 1]], scratch[faces[f, 2]]
+            e1x, e1y, e1z = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+            e2x, e2y, e2z = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+            nx, ny, nz = e1y * e2z - e1z * e2y, e1z * e2x - e1x * e2z, e1x * e2y - e1y * e2x
+            sign = 1.0
+            if nx * (eye[0] - a[0]) + ny * (eye[1] - a[1]) + nz * (eye[2] - a[2]) <= 0:
+                if not double_sided:
+                    continue
+                sign = -1.0
+            # Per corner: clip xyzw | world xyz | normal xyz | uv
+            for j in range(3):
+                v = faces[f, j]
+                corners[j, 0:4] = scratch[v, 6:10]
+                corners[j, 4:7] = scratch[v, 0:3]
+                corners[j, 7:10] = sign * scratch[v, 3:6]
+                if textured:
+                    corners[j, 10:12] = uvs[f, j]
+            if ahead == 3:
+                _emit(corners, k, width, height, xs, ys, inv_w, attrs)
+                src[k] = f
+                k += 1
+                continue
+            m = 0
+            for j in range(3):
+                p, q = corners[j], corners[(j + 1) % 3]
+                if p[3] > near:
+                    poly[m] = p
+                    m += 1
+                if (p[3] > near) != (q[3] > near):
+                    poly[m] = p + (near - p[3]) / (q[3] - p[3]) * (q - p)
+                    m += 1
+            for j in range(1, m - 1):  # fan-triangulate the clipped polygon
+                tri[0], tri[1], tri[2] = poly[0], poly[j], poly[j + 1]
+                _emit(tri, k, width, height, xs, ys, inv_w, attrs)
+                src[k] = f
+                k += 1
+    return k
