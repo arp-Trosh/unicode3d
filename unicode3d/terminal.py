@@ -25,11 +25,11 @@ from numba import njit
 from .color import COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
 from .console import detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
-from .keys import InputDecoder, Key, MouseEvent
+from .keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from .mesh import make_box
 from .scene import Camera, Light, Object3D, Renderer
 
-__all__ = ["Color", "Key", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
+__all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
            "frame_to_text"]
 
 BOLD, DIM, REVERSE = 1, 2, 4
@@ -140,6 +140,8 @@ class Screen:
         self.background = None if background is None else to_linear_rgb(background)
         self.fps = 30               # frames a second run() aims for; change it any time
         self.measured_fps = None    # frames run() actually drew in the last second
+        self.key_release = console is not None and console.key_release  # keys() returns KeyRelease events
+        self.held = HeldKeys()      # which keys are down, updated by keys()
         self._decoder = InputDecoder()
         self._rows = self._cols = 0
         self.set_glyphs(glyphs)
@@ -200,13 +202,30 @@ class Screen:
     # ----- input ---------------------------------------------------------------------------
 
     def keys(self):
-        """Keys pressed and mouse clicks since the last call: ints (see keys.Key) and MouseEvents."""
+        """Keys pressed and mouse events since the last call: ints (see keys.Key) and MouseEvents,
+        plus KeyReleases if the console was opened with key_release (run(key_release=True)).
+
+        Also brings `held` up to date. Where releases are reported, Ctrl-C arrives
+        as a key rather than a signal, and raises KeyboardInterrupt here as usual.
+        """
         if self.console is None:
             return []
         now = time.monotonic()
         text = self.console.read()
-        events = self._decoder.feed(text, now) if text else []
-        return events + self._decoder.flush(now)
+        events = (self._decoder.feed(text, now) if text else []) + self._decoder.flush(now)
+        if self._decoder.kitty and 3 in events:
+            raise KeyboardInterrupt
+        if self.console.reports_releases:
+            # Ask the keyboard about every key held before this frame; one released and pressed again
+            # within the frame shows up as its new press, after the release.
+            for key in self.held.keys():
+                if not self.console.key_is_down(key):  # None (can't tell) counts as released
+                    events.insert(0, KeyRelease(key))
+        self.held.exact = self.console.reports_releases or self._decoder.kitty
+        self.held.update(events, now)
+        if not self.key_release:
+            events = [e for e in events if not isinstance(e, KeyRelease)]
+        return events
 
     # ----- drawing -------------------------------------------------------------------------
 
@@ -314,15 +333,20 @@ def _compile_with_notice(console):
         timer.join()  # the notice is written in full or not at all; the first frame then clears the screen
 
 
-def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None):
+def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
 
     frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved.
 
+    mouse: False, True (clicks and wheel), "drag" (also moves while a button is
+    held, for sliders) or "move" (every move, for hover effects).
+    key_release: ask the terminal to report key releases, and pass them to
+    frame_fn as KeyRelease events. screen.held tells which keys are down either
+    way, exactly where releases are reported and by estimate elsewhere.
     title sets the terminal window's title while the app runs. The terminal is
     restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
     """
-    with open_console(mouse=mouse, title=title) as console:
+    with open_console(mouse=mouse, title=title, key_release=key_release) as console:
         screen = Screen(console, glyphs=glyphs, color=color, background=background)
         screen.fps = fps
         _compile_with_notice(console)

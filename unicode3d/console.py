@@ -14,10 +14,12 @@ import os
 import select
 import sys
 
+from .keys import KITTY_KEYBOARD_OFF, KITTY_KEYBOARD_ON, Key
+
 ENTER_SEQ = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"  # alternate screen, hide cursor, no auto-wrap, clear
 EXIT_SEQ = "\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"
-MOUSE_ON = "\x1b[?1000h\x1b[?1006h"   # report clicks, in SGR encoding
-MOUSE_OFF = "\x1b[?1000l\x1b[?1006l"
+# Mouse reporting, in SGR encoding: clicks (1000), plus moves while a button is held (1002), or all moves (1003).
+MOUSE_MODES = {True: "1000", "click": "1000", "drag": "1002", "move": "1003"}
 TITLE_PUSH, TITLE_POP = "\x1b[22;0t", "\x1b[23;0t"  # save and restore the window title, where supported
 
 TRUECOLOR_TERMS = ("kitty", "ghostty", "alacritty", "foot", "wezterm", "contour", "iterm", "rio")
@@ -87,26 +89,50 @@ def detect_glyphs(env=None, unicode_ok=True):
     return "quad"
 
 
+def mouse_sequences(mouse):
+    """(on, off) escape sequences for a mouse setting: False, True or "click", "drag", "move"."""
+    if not mouse:
+        return "", ""
+    if mouse not in MOUSE_MODES:
+        raise ValueError(f"mouse must be False, True, 'click', 'drag' or 'move', not {mouse!r}")
+    mode = MOUSE_MODES[mouse]
+    return f"\x1b[?{mode}h\x1b[?1006h", f"\x1b[?{mode}l\x1b[?1006l"
+
+
 class Console:
-    """Raw terminal I/O. Use as a context manager: entering switches to a full-screen raw mode."""
+    """Raw terminal I/O. Use as a context manager: entering switches to a full-screen raw mode.
+
+    mouse: False, True (clicks), "drag" (clicks, and moves while a button is held) or "move" (every move).
+    key_release: ask the terminal to report key releases (the kitty keyboard protocol); terminals
+    without it ignore the request.
+    """
 
     unicode = True
+    reports_releases = False  # whether key_is_down() can tell when a key is let go
 
-    def __init__(self, mouse=False, title=None):
+    def __init__(self, mouse=False, title=None, key_release=False):
         self.mouse = mouse
         self.title = title
+        self.key_release = key_release
+        self._mouse_on, self._mouse_off = mouse_sequences(mouse)
 
     def __enter__(self):
         self._setup()
         title = f"{TITLE_PUSH}\x1b]0;{self.title}\x07" if self.title else ""
-        self.write(title + ENTER_SEQ + (MOUSE_ON if self.mouse else ""))
+        # The keyboard flags go on the alternate screen's own stack, so they are popped before leaving it.
+        self.write(title + ENTER_SEQ + self._mouse_on + (KITTY_KEYBOARD_ON if self.key_release else ""))
         return self
 
     def __exit__(self, *exc):
         try:
-            self.write((MOUSE_OFF if self.mouse else "") + EXIT_SEQ + (TITLE_POP if self.title else ""))
+            self.write((KITTY_KEYBOARD_OFF if self.key_release else "") + self._mouse_off + EXIT_SEQ
+                       + (TITLE_POP if self.title else ""))
         finally:
             self._restore()
+
+    def key_is_down(self, key):
+        """Whether `key` is physically held right now; None where that can't be asked (see WindowsConsole)."""
+        return None
 
     def size(self):
         """(columns, rows) of the terminal window."""
@@ -121,8 +147,8 @@ class Console:
 
 
 class PosixConsole(Console):
-    def __init__(self, mouse=False, title=None):
-        super().__init__(mouse, title)
+    def __init__(self, mouse=False, title=None, key_release=False):
+        super().__init__(mouse, title, key_release)
         import termios
         self._termios = termios
         self.fd_in = sys.stdin.fileno()
@@ -186,7 +212,7 @@ class WindowsInput:
     fields ctypes gives KEY_EVENT_RECORD and MOUSE_EVENT_RECORD.
     """
 
-    MOUSE_WHEELED = 0x4
+    MOUSE_MOVED, MOUSE_WHEELED = 0x1, 0x4
 
     # Virtual-key codes of keys with no character, and the sequence a VT terminal sends for each.
     VK_SEQ = {0x26: "\x1b[A", 0x28: "\x1b[B", 0x27: "\x1b[C", 0x25: "\x1b[D", 0x24: "\x1b[H", 0x23: "\x1b[F",
@@ -195,7 +221,9 @@ class WindowsInput:
               0x76: "\x1b[18~", 0x77: "\x1b[19~", 0x78: "\x1b[20~", 0x79: "\x1b[21~", 0x7A: "\x1b[23~",
               0x7B: "\x1b[24~"}
 
-    def __init__(self):
+    def __init__(self, mouse=True):
+        self.moves = mouse in ("drag", "move")  # report moves: while a button is held, or ("move") always
+        self.all_moves = mouse == "move"
         self.buttons = 0  # mouse buttons held, as dwButtonState bits: presses and releases are the changes
 
     def key(self, ev):
@@ -211,7 +239,13 @@ class WindowsInput:
         if ev.dwEventFlags & self.MOUSE_WHEELED:
             up = ev.dwButtonState >> 16 < 0x8000  # the high word is the signed wheel delta
             return f"\x1b[<{64 if up else 65};{x};{y}M"
-        if ev.dwEventFlags:  # movement, double clicks, horizontal wheel
+        if ev.dwEventFlags == self.MOUSE_MOVED:
+            state = ev.dwButtonState & 0x7
+            button = next((b for bit, b in ((1, 0), (4, 1), (2, 2)) if state & bit), 3)
+            if self.moves and (button != 3 or self.all_moves):
+                return f"\x1b[<{32 + button};{x};{y}M"
+            return ""
+        if ev.dwEventFlags:  # double clicks, horizontal wheel
             return ""
         state, out = ev.dwButtonState & 0x7, []
         for bit, button in ((1, 0), (4, 1), (2, 2)):  # left, middle, right
@@ -240,8 +274,16 @@ class WindowsConsole(Console):
     DISABLE_NEWLINE_AUTO_RETURN = 0x8
     KEY_EVENT, MOUSE_EVENT = 0x1, 0x2
 
-    def __init__(self, mouse=False, title=None):
-        super().__init__(mouse, title)
+    reports_releases = True  # key_is_down() asks Windows directly
+
+    # Virtual-key codes of keys that are not characters (characters are looked up with VkKeyScanW).
+    VK_OF_KEY = {Key.ENTER: 0x0D, 10: 0x0D, Key.TAB: 0x09, Key.ESC: 0x1B, Key.BACKSPACE: 0x08, 8: 0x08, 32: 0x20,
+                 Key.UP: 0x26, Key.DOWN: 0x28, Key.LEFT: 0x25, Key.RIGHT: 0x27, Key.HOME: 0x24, Key.END: 0x23,
+                 Key.PAGE_UP: 0x21, Key.PAGE_DOWN: 0x22, Key.INSERT: 0x2D, Key.DELETE: 0x2E,
+                 **{Key.F1 + i: 0x70 + i for i in range(12)}}
+
+    def __init__(self, mouse=False, title=None, key_release=False):
+        super().__init__(mouse, title, key_release)
         import ctypes
         from ctypes import wintypes as wt
 
@@ -276,8 +318,13 @@ class WindowsConsole(Console):
         k.WriteConsoleW.argtypes = [wt.HANDLE, wt.LPCWSTR, wt.DWORD, ctypes.POINTER(wt.DWORD), wt.LPVOID]
         self.h_in = k.GetStdHandle(self.STD_INPUT_HANDLE & 0xFFFFFFFF)
         self.h_out = k.GetStdHandle(self.STD_OUTPUT_HANDLE & 0xFFFFFFFF)
+        u = self._u32 = ctypes.WinDLL("user32")
+        u.GetAsyncKeyState.restype = ctypes.c_short
+        u.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        u.VkKeyScanW.restype = ctypes.c_short
+        u.VkKeyScanW.argtypes = [ctypes.c_wchar]
         self._saved = None
-        self._input = WindowsInput()
+        self._input = WindowsInput(mouse)
 
     def _mode(self, handle):
         mode = self._wt.DWORD()
@@ -300,6 +347,23 @@ class WindowsConsole(Console):
         if self._saved is not None:
             self._k32.SetConsoleMode(self.h_in, self._saved[0])
             self._k32.SetConsoleMode(self.h_out, self._saved[1])
+
+    def key_is_down(self, key):
+        """Whether `key` (a character's code or a Key) is held right now, as the keyboard itself reports it.
+
+        Windows keeps the state of every key, so a release is seen even when the
+        console doesn't pass one on (and even when the window has lost focus).
+        None for keys with no virtual-key code.
+        """
+        vk = self.VK_OF_KEY.get(key)
+        if vk is None:
+            if not 32 < key < 0x10000:
+                return None
+            scan = self._u32.VkKeyScanW(chr(key))
+            if scan == -1:
+                return None
+            vk = scan & 0xFF
+        return bool(self._u32.GetAsyncKeyState(vk) & 0x8000)
 
     def read(self):
         ct, wt = self._ctypes, self._wt
@@ -330,6 +394,7 @@ class WindowsConsole(Console):
             self._k32.WriteConsoleW(self.h_out, chunk, units, ct.byref(written), None)
 
 
-def open_console(mouse=False, title=None):
-    """The console for this platform; `title` names the terminal window while it is open."""
-    return WindowsConsole(mouse, title) if os.name == "nt" else PosixConsole(mouse, title)
+def open_console(mouse=False, title=None, key_release=False):
+    """The console for this platform; `title` names the terminal window while it is open (see Console)."""
+    cls = WindowsConsole if os.name == "nt" else PosixConsole
+    return cls(mouse, title, key_release)

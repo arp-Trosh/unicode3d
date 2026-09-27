@@ -75,14 +75,19 @@ def linear_to_srgb(c):
     return out
 
 
-def to_linear_rgb(color):
-    """Linear RGB (3,) of a named Color, an (r, g, b) tuple of 0..255 ints, or of 0..1 floats."""
+def to_srgb(color):
+    """sRGB values 0..1 (3,) of a named Color, an (r, g, b) tuple of 0..255 ints, or of 0..1 floats."""
     if isinstance(color, (int, np.integer)):
-        return srgb_to_linear(np.array(HUE_RGB[Color(int(color))]) / 255.0)
+        return np.array(HUE_RGB[Color(int(color))]) / 255.0
     c = np.asarray(color, dtype=float)
     if c.shape != (3,):
         raise ValueError(f"colour must be a Color or an (r, g, b) triple, not {color!r}")
-    return srgb_to_linear(c / 255.0 if np.issubdtype(np.asarray(color).dtype, np.integer) or c.max() > 1.0 else c)
+    return c / 255.0 if np.issubdtype(np.asarray(color).dtype, np.integer) or c.max() > 1.0 else c
+
+
+def to_linear_rgb(color):
+    """Linear RGB (3,) of a named Color, an (r, g, b) tuple of 0..255 ints, or of 0..1 floats."""
+    return srgb_to_linear(to_srgb(color))
 
 
 def luminance(linear_rgb):

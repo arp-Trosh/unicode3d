@@ -6,6 +6,7 @@ import argparse
 import numpy as np
 
 from .dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
+from .hud import StatusBar
 from ..scene import Camera, Light, Object3D, Renderer
 from ..color import Color
 from ..keys import Key
@@ -26,9 +27,7 @@ class DiceDemo:
         self.renderer = Renderer(1, 1)
         self.camera = Camera(target=np.array([0.0, 0.4, 0.0]), fov=35.0)
         self.light = Light()
-        self.fps = 0
-        self.frames = 0
-        self.fps_clock = 0.0
+        self.bar = StatusBar()
         self.set_count(count)
 
     def set_count(self, n):
@@ -55,7 +54,7 @@ class DiceDemo:
         self.camera.position = self.camera.target + CAMERA_DIR * dist
 
     def frame(self, screen, dt, keys):
-        for k in keys:
+        for k in self.bar.handle(keys, screen):
             if k in (ord("q"), ord("Q"), 27):
                 return False
             if k in (ord(" "), ord("\n"), Key.ENTER):
@@ -68,10 +67,6 @@ class DiceDemo:
         self.t += dt
         for die, anim in zip(self.dice, self.anims):
             die.position, die.rotation = anim.pose(self.t)
-        self.frames += 1
-        self.fps_clock += dt
-        if self.fps_clock >= 1.0:
-            self.fps, self.frames, self.fps_clock = self.frames, 0, 0.0
 
         rows, cols = screen.size()
         view_rows = max(rows - HUD_ROWS, 1)
@@ -86,7 +81,7 @@ class DiceDemo:
         else:
             status = "Showing: " + "  ".join(str(DIE_VALUES[top_face(d.rotation)]) for d in self.dice)
         screen.text(rows - 2, 1, status, bold=True)
-        screen.text(rows - 1, 1, f"[space] roll   [+/-] dice ({len(self.dice)})   [q] quit   {self.fps} fps")
+        self.bar.draw(screen, f"[space] roll   [+/-] dice ({len(self.dice)})   [q] quit")
         screen.refresh()
         return True
 
@@ -100,7 +95,7 @@ def main():
     args = parser.parse_args()
     demo = DiceDemo(min(max(args.dice, 1), MAX_DICE), args.seed)
     try:
-        run(demo.frame, args.fps, **display_options(args))
+        run(demo.frame, args.fps, mouse=True, title="unicode3d dice", **display_options(args))
     except KeyboardInterrupt:
         pass
 

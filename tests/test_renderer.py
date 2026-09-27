@@ -9,16 +9,18 @@ import numpy as np
 
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
+from unicode3d.background import Gradient, Sky, SkyBox
 from unicode3d.color import (Color, encode_index, encode_rgb, linear_to_srgb, luminance, put_sgr_color, quantize,
                              sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb)
 from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
-from unicode3d.keys import InputDecoder, Key, MouseEvent
+from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
-from unicode3d.scene import Camera, Light, Object3D, Renderer
+from unicode3d.scene import Camera, Light, Node, Object3D, PointLight, Renderer
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
 from unicode3d.terminal import Screen
 from unicode3d.texture import build_mipmaps
+from unicode3d.ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
 from unicode3d.transforms import quat_axis_angle, quat_between, quat_to_matrix
 
 
@@ -171,16 +173,29 @@ class RenderTests(unittest.TestCase):
             self.skipTest("needs a machine with more than one core")
         spheres = [Object3D(blob_mesh((1.0, 1.0, 1.0), rings=48, segments=64), color=Color.GREEN,
                             position=np.array([0.4 * i - 0.6, 0.1 * i, -0.3 * i])) for i in range(4)]
-        scenes = [[Object3D(make_die(), rotation=quat_axis_angle((1, 2, 0), 0.7)), *spheres],
-                  [Object3D(make_box(), position=np.array([0.0, 0.0, 4.6]))]]  # the camera in front of its near face
+        # Many small objects, some with parents, coloured per vertex and per face, some double-sided.
+        rng = np.random.default_rng(5)
+        ball = blob_mesh((1.0, 1.0, 1.0), rings=8, segments=10)
+        ball.vertex_colors = rng.uniform(0, 1, (len(ball.vertices), 3))
+        cube = make_box()
+        cube.face_colors = rng.integers(0, 256, (len(cube.faces), 3))
+        group = Node(position=np.array([0.2, 0.0, 0.0]), rotation=quat_axis_angle((0, 1, 0), 0.4), scale=0.8)
+        crowd = [Object3D((ball, cube)[i % 2], rng.uniform(-1.5, 1.5, 3), quat_axis_angle(rng.normal(size=3), 1.0),
+                          scale=rng.uniform(0.1, 0.4), color=(255, 255, 255), double_sided=i % 3 == 0,
+                          parent=group if i % 4 == 0 else None) for i in range(80)]
+        crowd[1].emissive = 1.0
+        lights = [Light(color=(255, 200, 150)), PointLight(np.array([0.5, 0.5, 1.0]), color=Color.CYAN, range=3.0)]
+        scenes = [([Object3D(make_die(), rotation=quat_axis_angle((1, 2, 0), 0.7)), *spheres], Light()),
+                  ([Object3D(make_box(), position=np.array([0.0, 0.0, 4.6]))], Light()),  # camera in front of its near face
+                  (crowd, lights)]
 
         def draw(threads):
             numba.set_num_threads(threads)
             screen = Screen(glyphs="sextant", color="256", size=(30, 60), background=(20, 20, 30))
-            renderer = Renderer(60, 30, screen.cell_pixels)
+            renderer = Renderer(60, 30, screen.cell_pixels, background=Sky())
             frame = []
-            for objects in scenes:
-                fb = renderer.render(objects, Camera(position=np.array([0.0, 0.5, 5.0])), Light())
+            for objects, light in scenes:
+                fb = renderer.render(objects, Camera(position=np.array([0.0, 0.5, 5.0])), light)
                 screen.draw_frame(fb)
                 frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy(), screen.chars.copy(),
                           screen.fg.copy(), screen.bg.copy(), screen.render_updates()]
@@ -193,6 +208,162 @@ class RenderTests(unittest.TestCase):
                     np.testing.assert_array_equal(a, b)
         finally:
             numba.set_num_threads(most)
+
+    def test_parents_move_turn_scale_and_hide_children(self):
+        group = Node(position=np.array([1.0, 0.0, 0.0]), rotation=quat_axis_angle((0, 1, 0), np.pi / 2), scale=2.0)
+        child = Object3D(make_box(0.5), position=np.array([1.0, 0.0, 0.0]), rotation=quat_axis_angle((1, 0, 0), 0.3),
+                         parent=group, color=Color.RED)
+        grandchild = Object3D(make_box(0.2), position=np.array([0.0, 1.0, 0.0]), parent=child)
+        position, rotation, scale, visible = child.world_transform()
+        np.testing.assert_allclose(position, [1.0, 0.0, -2.0], atol=1e-12)  # +x turned a quarter round y is -z
+        self.assertEqual((scale, visible), (2.0, True))
+        np.testing.assert_allclose(grandchild.to_world([0, 0, 0]), child.to_world([0, 1, 0]), atol=1e-12)
+        # Drawn exactly where the same objects placed directly in the world would be.
+        direct = [Object3D(o.mesh, *o.world_transform()[:3], color=o.color) for o in (child, grandchild)]
+        camera = Camera(position=np.array([3.0, 2.0, 4.0]))
+        a = self.render([child, grandchild], camera=camera)
+        b = self.render(direct, camera=camera)
+        np.testing.assert_allclose(a.rgb, b.rgb, atol=1e-12)
+        np.testing.assert_array_equal(a.ids, b.ids)
+        self.assertEqual(set(np.unique(a.ids)), {0, 1, 2})
+        group.visible = False
+        self.assertFalse(self.render([child, grandchild], camera=camera).drawn.any())
+        # A parent that moves makes the renderer draw again.
+        renderer = Renderer(40, 15)
+        group.visible = True
+        renderer.render([child], camera, Light())
+        group.position = np.array([1.5, 0.0, 0.0])
+        renderer.render([child], camera, Light())
+        self.assertEqual(renderer.draws, 2)
+
+    def test_vertex_and_face_colours(self):
+        quad = Mesh(np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], float), np.array([[0, 1, 2], [0, 2, 3]]))
+        quad.face_colors = np.array([[255, 0, 0], [0, 0, 255]])
+        light = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.0, diffuse=1.0, specular=0.0)
+        renderer = Renderer(40, 20, fog=0, outline=0)
+        camera = Camera(position=np.array([0.0, 0.0, 3.0]))
+        fb = renderer.render([Object3D(quad, color=(255, 255, 255))], camera, light)
+        c = fb.colour()
+        np.testing.assert_allclose(c[25, 26], [1, 0, 0], atol=1e-9)  # below the diagonal: the first face
+        np.testing.assert_allclose(c[15, 14], [0, 0, 1], atol=1e-9)
+        # Colours multiply the object's colour, as textures do.
+        fb = renderer.render([Object3D(quad, color=(1.0, 0.5, 1.0))], camera, light)
+        np.testing.assert_allclose(fb.colour()[15, 14], [0, 0, 1], atol=1e-9)
+        # Vertex colours blend across the faces, in linear light.
+        quad.vertex_colors = np.array([[1.0, 0, 0], [1.0, 0, 0], [0, 1.0, 0], [0, 1.0, 0]])
+        fb = renderer.render([Object3D(quad, color=(255, 255, 255))], camera, light)
+        c = fb.colour()
+        self.assertGreater(c[33, 20, 0], 0.8)  # near the red bottom edge
+        self.assertGreater(c[7, 20, 1], 0.8)   # near the green top
+        self.assertAlmostEqual(c[20, 20, 0], c[20, 20, 1], delta=0.05)  # half way
+        # merge_meshes keeps colours, or gives each part one.
+        merged = merge_meshes([quad, make_box()])
+        np.testing.assert_allclose(merged.vertex_colors[:4], quad.vertex_colors)
+        np.testing.assert_allclose(merged.vertex_colors[4:], 1.0)
+        merged = merge_meshes([make_box(), make_box()], colors=[(255, 0, 0), (0.0, 1.0, 0.0)])
+        np.testing.assert_allclose(merged.face_colors[[0, -1]], [[1, 0, 0], [0, 1, 0]])
+
+    def test_objects_out_of_view_are_skipped_whole(self):
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        box = Object3D(make_box(), color=Color.CYAN)
+        hidden = [Object3D(make_box(), position=np.array(p)) for p in ([0.0, 0.0, 9.0], [30.0, 0.0, 0.0],
+                                                                        [0.0, -30.0, 0.0])]
+        edge = Object3D(blob_mesh((1.0, 1.0, 1.0)), position=np.array([3.4, 0.0, 0.0]))  # partly in view
+        alone = self.render([box, edge], camera=camera)
+        crowded = self.render([box, *hidden, edge], camera=camera)
+        np.testing.assert_allclose(crowded.rgb, alone.rgb, atol=1e-12)
+        self.assertEqual(set(np.unique(crowded.ids)), {0, 1, 5})  # ids still count every object in the list
+
+    def test_point_lights_coloured_lights_and_glow(self):
+        # A wall facing +z, lit only by a point light just in front of its left side.
+        wall = Object3D(block_mesh((0.0, 0.0, 0.0), (6.0, 3.0, 0.1)), color=(255, 255, 255))
+        camera = Camera(position=np.array([0.0, 0.0, 6.0]))
+        renderer = Renderer(60, 20, fog=0, outline=0)
+        lamp = PointLight(np.array([-2.0, 0.0, 1.0]), diffuse=1.0, specular=0.0, range=3.0)
+        fb = renderer.render([wall], camera, lamp)
+        y, row = fb.height // 2, lum(fb)[fb.height // 2]
+        left, mid, right = row[int(fb.width * 0.3)], row[fb.width // 2], row[int(fb.width * 0.8)]
+        self.assertGreater(left, mid)
+        self.assertGreater(mid, 0.0)
+        self.assertEqual(right, 0.0)  # beyond the light's range: dark
+        # Lights add up, and a coloured light tints what it lights.
+        sun = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.0, diffuse=0.5, specular=0.0, color=(255, 0, 0))
+        fb = renderer.render([wall], camera, [sun, lamp])
+        c = fb.colour()[y]
+        self.assertGreater(c[int(fb.width * 0.8), 0], 0.1)
+        self.assertEqual(c[int(fb.width * 0.8), 1], 0.0)
+        self.assertGreater(c[int(fb.width * 0.3), 1], 0.0)
+        # Something that glows shows its own colour in the dark.
+        dark = Light(ambient=0.0, diffuse=0.0, specular=0.0)
+        glow = Object3D(make_box(), color=(40, 200, 60), emissive=1.0)
+        fb = renderer.render([glow], camera, dark)
+        np.testing.assert_allclose(fb.colour()[y, fb.width // 2], to_linear_rgb((40, 200, 60)), atol=1e-9)
+        self.assertFalse(renderer.render([Object3D(make_box())], camera, []).colour().any())  # no lights: black
+
+    def test_backgrounds(self):
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        box = Object3D(make_box(), color=Color.RED)
+        plain = Renderer(40, 20).render([box], camera, Light()).copy()
+        renderer = Renderer(40, 20, background=(0, 0, 255))
+        fb = renderer.render([box], camera, Light())
+        blue = to_linear_rgb((0, 0, 255))
+        self.assertTrue((fb.alpha == 1.0).all())
+        np.testing.assert_allclose(fb.rgb[0, 0], blue)
+        self.assertEqual(fb.ids[0, 0], 0)
+        # Edge pixels blend by how much of them the scene leaves uncovered.
+        edge = (plain.alpha > 0) & (plain.alpha < 1)
+        self.assertTrue(edge.any())
+        np.testing.assert_allclose(fb.rgb[edge], plain.rgb[edge] + (1 - plain.alpha[edge])[:, None] * blue, atol=1e-12)
+        renderer.background = Gradient(top=(255, 255, 255), bottom=(0, 0, 0))
+        fb = renderer.render([box], camera, Light())  # a new background draws afresh
+        self.assertGreater(fb.rgb[0, 0, 0], 0.95)
+        self.assertLess(fb.rgb[-1, 0, 0], 0.01)
+
+    def test_sky_follows_the_view(self):
+        sky = Sky(zenith=(0, 0, 255), horizon=(255, 255, 255), ground=(0, 255, 0))
+        renderer = Renderer(40, 20, background=sky)
+        def centre(target):
+            fb = renderer.render([], Camera(position=np.zeros(3), target=np.array(target, float),
+                                            up=np.array([0.0, 0.0, -1.0]) if abs(target[1]) > 0.9 else np.array([0, 1.0, 0])), Light())
+            return fb.rgb[fb.height // 2, fb.width // 2]
+        np.testing.assert_allclose(centre([0, 1, 0]), to_linear_rgb((0, 0, 255)), atol=0.02)
+        np.testing.assert_allclose(centre([0, -1, 0]), to_linear_rgb((0, 255, 0)), atol=0.02)
+        self.assertGreater(centre([1, 0, 0]).min(), 0.8)  # the horizon, straight ahead
+
+    def test_sky_box_faces(self):
+        colours = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (0, 255, 255), (255, 0, 255)]
+        textures = [np.tile(np.array(c, np.uint8), (8, 8, 1)) for c in colours]
+        top_half = np.zeros((8, 8, 3))
+        top_half[:4] = 1.0  # white top half, black bottom half
+        textures[5] = top_half  # -Z
+        renderer = Renderer(40, 20, background=SkyBox(textures))
+        for axis, colour in zip(np.eye(3).repeat(2, axis=0) * np.tile([1, -1], 3)[:, None], colours):
+            up = np.array([0.0, 0.0, -1.0]) if abs(axis[1]) else np.array([0.0, 1.0, 0.0])
+            fb = renderer.render([], Camera(position=np.zeros(3), target=axis, up=up, fov=40), Light())
+            if axis[2] < 0:  # looking along -Z: the texture's top is up
+                self.assertGreater(fb.rgb[fb.height // 4, fb.width // 2].min(), 0.9)
+                self.assertLess(fb.rgb[3 * fb.height // 4, fb.width // 2].max(), 0.1)
+            else:
+                np.testing.assert_allclose(fb.rgb[fb.height // 2, fb.width // 2], to_linear_rgb(colour), atol=1e-9)
+
+    def test_pick_and_ray(self):
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        near = Object3D(make_box(), position=np.array([0.5, 0.0, 0.0]))
+        far = Object3D(make_box(2.0), position=np.array([0.0, 0.0, -2.0]))
+        renderer = Renderer(40, 20, cell_pixels=(2, 3))
+        self.assertIsNone(renderer.pick(20, 10))
+        renderer.render([far, near], camera, Light())
+        origin, direction = renderer.ray(20, 10)  # the centre of the frame
+        np.testing.assert_allclose(origin, camera.position)
+        np.testing.assert_allclose(direction, [0, 0, -1], atol=1e-12)
+        x, y = renderer.project(np.array([0.5, 0.0, 0.5]))  # the middle of the near box's front face
+        hit = renderer.pick(x, y)
+        self.assertIs(hit.object, near)
+        np.testing.assert_allclose(hit.position[2], 0.5, atol=1e-9)
+        self.assertAlmostEqual(hit.distance, np.linalg.norm(hit.position - camera.position), places=9)
+        self.assertIs(renderer.pick(*renderer.project(np.array([-0.8, 0.8, -1.0]))).object, far)
+        self.assertIsNone(renderer.pick(0, 0))
+        self.assertIsNone(renderer.pick(100, 5))
 
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
@@ -402,8 +573,77 @@ class InputTests(unittest.TestCase):
 
     def test_sgr_mouse(self):
         d = InputDecoder()
-        events = d.feed("\x1b[<0;10;5M\x1b[<0;10;5m\x1b[<65;1;1M\x1b[<32;3;3M", 0.0)
-        self.assertEqual(events, [MouseEvent(9, 4, 0, True), MouseEvent(9, 4, 0, False), MouseEvent(0, 0, 65, True)])
+        events = d.feed("\x1b[<0;10;5M\x1b[<0;10;5m\x1b[<65;1;1M\x1b[<32;3;3M\x1b[<35;4;4M", 0.0)
+        self.assertEqual(events, [MouseEvent(9, 4, 0, True), MouseEvent(9, 4, 0, False), MouseEvent(0, 0, 65, True),
+                                  MouseEvent(2, 2, 0, True, moved=True), MouseEvent(3, 3, 3, False, moved=True)])
+
+    def test_kitty_keyboard_protocol(self):
+        d = InputDecoder()
+        self.assertEqual(d.feed("a\x1b[A", 0.0), [ord("a"), Key.UP])
+        self.assertFalse(d.kitty)
+        self.assertEqual(d.feed("\x1b[119u\x1b[119;1:2u\x1b[119;1:3u", 0.0), [119, 119, KeyRelease(119)])
+        self.assertTrue(d.kitty)
+        # Shift+w types W, and its release names W too, even if Shift is let go first.
+        self.assertEqual(d.feed("\x1b[119;2;87u\x1b[57441;1:3u\x1b[119;1:3u", 0.0), [87, KeyRelease(87)])
+        self.assertEqual(d.feed("\x1b[99;5u\x1b[27u\x1b[13u\x1b[127u\x1b[1;1:3A\x1b[3;1:3~\x1b[57400u", 0.0),
+                         [3, Key.ESC, Key.ENTER, Key.BACKSPACE, KeyRelease(Key.UP), KeyRelease(Key.DELETE), ord("1")])
+        self.assertEqual(d.feed("\x1b[?27u\x1b[57441;2u", 0.0), [])  # a query reply; Shift on its own
+
+    def test_held_keys_with_releases(self):
+        held = HeldKeys()
+        held.exact = True
+        held.update([ord("W"), Key.UP], 0.0)
+        self.assertIn("w", held)
+        self.assertIn(Key.UP, held)
+        held.update([], 5.0)
+        self.assertIn(ord("w"), held)
+        held.update([KeyRelease(ord("w"))], 5.1)
+        self.assertNotIn("w", held)
+        self.assertEqual(held.keys(), [Key.UP])
+
+    def test_held_keys_estimated_from_repeats(self):
+        held = HeldKeys(first_hold=0.5)
+        held.update([ord("w")], 0.0)
+        held.update([], 0.4)
+        self.assertIn("w", held)  # waiting for the first repeat
+        held.update([], 0.6)
+        self.assertNotIn("w", held)  # a tap
+        held.update([ord("d")], 1.0)
+        for t in (1.5, 1.53, 1.56, 1.59):
+            held.update([ord("d")], t)
+        held.update([], 1.62)
+        self.assertIn("d", held)
+        held.update([], 1.7)
+        self.assertNotIn("d", held)  # repeats stopped for more than 1.5 intervals
+
+    def test_screen_asks_the_keyboard_for_releases(self):
+        class FakeConsole:
+            unicode, key_release, reports_releases = True, True, True
+            def __init__(self):
+                self.text, self.down = "", set()
+            def size(self):
+                return 10, 4
+            def read(self):
+                text, self.text = self.text, ""
+                return text
+            def key_is_down(self, key):
+                return key in self.down
+        con = FakeConsole()
+        screen = Screen(con, glyphs="quad", color="truecolor")
+        con.text, con.down = "w", {ord("w")}
+        self.assertEqual(screen.keys(), [ord("w")])
+        self.assertEqual(screen.keys(), [])
+        self.assertIn("w", screen.held)
+        con.down = set()
+        self.assertEqual(screen.keys(), [KeyRelease(ord("w"))])
+        self.assertNotIn("w", screen.held)
+        con.key_release = False
+        screen = Screen(con, glyphs="quad", color="truecolor")
+        con.text, con.down = "w", {ord("w")}
+        screen.keys()
+        con.down = set()
+        self.assertEqual(screen.keys(), [])  # not asked for: releases only update screen.held
+        self.assertNotIn("w", screen.held)
 
     def test_windows_records_translate_to_vt(self):
         from types import SimpleNamespace as NS
@@ -415,6 +655,108 @@ class InputTests(unittest.TestCase):
         mouse = lambda x, y, state, flags=0: NS(dwMousePosition=NS(X=x, Y=y), dwButtonState=state, dwEventFlags=flags)
         text = con.mouse(mouse(4, 2, 1)) + con.mouse(mouse(4, 2, 0))
         self.assertEqual(InputDecoder().feed(text, 0.0), [MouseEvent(4, 2, 0, True), MouseEvent(4, 2, 0, False)])
+        self.assertEqual(con.mouse(mouse(5, 2, 1, WindowsInput.MOUSE_MOVED)), "")  # moves not asked for
+        drag = WindowsInput("drag")
+        text = drag.mouse(mouse(5, 2, 1, WindowsInput.MOUSE_MOVED)) + drag.mouse(mouse(6, 2, 0, WindowsInput.MOUSE_MOVED))
+        self.assertEqual(InputDecoder().feed(text, 0.0), [MouseEvent(5, 2, 0, True, moved=True)])
+        text = WindowsInput("move").mouse(mouse(6, 2, 0, WindowsInput.MOUSE_MOVED))
+        self.assertEqual(InputDecoder().feed(text, 0.0), [MouseEvent(6, 2, 3, False, moved=True)])
+
+
+class WidgetTests(unittest.TestCase):
+    def setUp(self):
+        self.screen = Screen(glyphs="quad", color="truecolor", size=(4, 80))
+
+    def test_widgets_follow_clicks_keys_and_focus(self):
+        pressed, changes = [], []
+        slider = Slider("Balls", 20, 0, 100, step=10, keys="[]", length=11, on_change=changes.append)
+        toggle = Toggle("Spin", False, key="s")
+        choice = Choice("Mode", ("a", "bb", "c"), key=Key.F5)
+        panel = Panel([slider, toggle, choice, Button("Go", lambda: pressed.append(1), key="g")])
+        panel.draw(self.screen, 1, 0)
+        self.assertEqual("".join(self.screen.chars[1, :slider.width]).rstrip(), "Balls ━━●────────  20")
+        x = len("Balls ")
+        rest = panel.handle([MouseEvent(x + 10, 1, 0, True), MouseEvent(x + 10, 1, 0, False), ord("q")])
+        self.assertEqual(rest, [ord("q")])                  # not the panel's: passed on
+        self.assertEqual(slider.value, 100)
+        panel.handle([ord("["), ord("s"), Key.F5, ord("g"), MouseEvent(x + 5, 0, 0, True)])
+        self.assertEqual((slider.value, toggle.value, choice.value, pressed), (90, True, "bb", [1]))
+        self.assertEqual(changes, [100, 90])
+        panel.handle([Key.TAB, Key.RIGHT, Key.TAB, ord(" ")])  # focus the slider, step it, then flip the toggle
+        self.assertEqual((panel.focus, slider.value, toggle.value), (1, 100, False))
+        self.assertEqual(panel.handle([Key.ESC]), [Key.ESC])
+
+    def test_slider_drag_and_wheel(self):
+        slider = Slider("", 0.5, 0.0, 1.0, step=0.25, length=5)
+        panel = Panel([slider])
+        panel.draw(self.screen, 0, 10)
+        panel.handle([MouseEvent(10, 0, 0, True), MouseEvent(13, 0, 0, True, moved=True)])
+        self.assertEqual(slider.value, 0.75)
+        panel.handle([MouseEvent(20, 0, 0, True, moved=True), MouseEvent(20, 0, 0, False)])
+        self.assertEqual(slider.value, 1.0)  # dragged past the end
+        self.assertEqual(panel.handle([MouseEvent(30, 0, 0, True, moved=True)]), [MouseEvent(30, 0, 0, True, moved=True)])
+        panel.handle([MouseEvent(11, 0, MouseEvent.WHEEL_DOWN, True)])
+        self.assertEqual(slider.value, 0.75)
+
+    def test_display_controls_change_the_screen(self):
+        controls = DisplayControls()
+        controls.draw(self.screen, 3, 0)
+        self.assertEqual(controls.width, len("F2 sextant  F3 truecolor  F4 999/144fps"))
+        controls.handle([Key.F2, Key.F3, Key.F4])
+        self.assertEqual((self.screen.mode, self.screen.color_mode, self.screen.fps), ("sextant", "256", 60))
+        controls.draw(self.screen, 3, 0)
+        controls.handle([MouseEvent(3, 3, 0, True)])  # a click on the glyphs
+        self.assertEqual(self.screen.mode, "ascii")
+        self.assertIn("F4 --/60fps", "".join(self.screen.chars[3]))
+
+
+class DemoTests(unittest.TestCase):
+    """Each example program draws frames off-screen, takes its keys and clicks, and quits."""
+
+    def run_demo(self, demo, events, quit_key):
+        screen = Screen(glyphs="quad", color="256", size=(30, 100))
+        for ev in [[], *([e] for e in events), []]:
+            self.assertIsNot(demo.frame(screen, 1 / 30, ev), False)
+        self.assertTrue((screen.chars != " ").any())
+        self.assertIn("F2 quad", "".join(screen.chars[-1]))  # the display settings are on the status line
+        self.assertIs(demo.frame(screen, 1 / 30, [quit_key]), False)
+        return screen
+
+    def test_dice_demo(self):
+        from unicode3d.examples.demo import DiceDemo
+        self.run_demo(DiceDemo(3, seed=1), [ord(" "), ord("+"), Key.F3], ord("q"))
+
+    def test_viewer(self):
+        from unicode3d.examples.viewer import Viewer
+        self.run_demo(Viewer(make_die(), False), [ord("w"), Key.LEFT, ord("e")], Key.ESC)
+
+    def test_balls(self):
+        from unicode3d.examples.balls import Balls
+        demo = Balls(30, seed=1)
+        self.run_demo(demo, [ord("]"), ord("g"), ord(" "), Key.TAB, Key.RIGHT, MouseEvent(50, 12, 0, True)], ord("q"))
+        self.assertEqual(len(demo.balls), 32)  # "]" and then the focused slider's Right added one each
+
+    def test_maze(self):
+        from unicode3d.examples.maze import Maze
+        demo = Maze(5, seed=1)
+        self.run_demo(demo, [ord("t"), ord("m"), ord("r"), ord("n"), ord("l")], ord("q"))
+        demo.speed.value = 5.0
+        screen = Screen(glyphs="quad", color="256", size=(30, 100))
+        mazes = id(demo.walls)
+        for _ in range(600):  # walks to the exit and starts a new maze
+            demo.frame(screen, 0.1, [])
+        self.assertNotEqual(id(demo.walls), mazes)
+
+    def test_room(self):
+        from unicode3d.examples.room import Walk
+        demo = Walk(seed=1)
+        start = (demo.x, demo.z)
+        screen = self.run_demo(demo, [ord("b"), ord("l"), ord("]"), MouseEvent(50, 10, 0, True)], Key.ESC)
+        screen.held.exact = True
+        screen.held.update([ord("w")], 0.0)
+        for _ in range(10):
+            demo.frame(screen, 0.1, [])
+        self.assertLess(demo.z, start[1] - 2.0)  # walked north
 
 
 class ScreenTests(unittest.TestCase):

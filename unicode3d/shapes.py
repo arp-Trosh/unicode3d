@@ -3,17 +3,45 @@
 """Mesh builders: extruded bitmaps and text, ellipsoids, boxes, puffed-up 2D shapes."""
 import numpy as np
 
-from .mesh import Mesh, make_box
+from .mesh import Mesh, _srgb01, make_box
 
 
-def merge_meshes(meshes):
-    """One mesh holding all the given meshes' triangles (untextured)."""
+def merge_meshes(meshes, colors=None):
+    """One mesh holding all the given meshes' triangles (untextured).
+
+    colors: one colour for each mesh, given to all its faces (0..1 sRGB floats or
+    0..255 ints). Without it, the meshes' own colours are kept, per vertex if any
+    of them has vertex colours, otherwise per face; parts with no colours of their
+    own are white.
+    """
+    meshes = list(meshes)
     verts, faces, base = [], [], 0
     for m in meshes:
         verts.append(m.vertices)
         faces.append(m.faces + base)
         base += len(m.vertices)
-    return Mesh(np.concatenate(verts), np.concatenate(faces))
+    mesh = Mesh(np.concatenate(verts), np.concatenate(faces))
+    white = lambda n: np.ones((n, 3))
+    if colors is not None:
+        mesh.face_colors = np.concatenate([np.broadcast_to(_srgb01(c), (len(m.faces), 3)) for m, c in zip(meshes, colors)])
+    elif any(m.vertex_colors is not None for m in meshes):
+        parts = []
+        for m in meshes:
+            if m.vertex_colors is not None:
+                parts.append(_srgb01(m.vertex_colors))
+            elif m.face_colors is not None:  # vertices shared by faces of different colours take the average
+                c, count = np.zeros((len(m.vertices), 3)), np.zeros(len(m.vertices))
+                for k in range(3):
+                    np.add.at(c, m.faces[:, k], _srgb01(m.face_colors))
+                    np.add.at(count, m.faces[:, k], 1)
+                parts.append(c / np.maximum(count, 1)[:, None] + (count == 0)[:, None])
+            else:
+                parts.append(white(len(m.vertices)))
+        mesh.vertex_colors = np.concatenate(parts)
+    elif any(m.face_colors is not None for m in meshes):
+        mesh.face_colors = np.concatenate([_srgb01(m.face_colors) if m.face_colors is not None else white(len(m.faces))
+                                           for m in meshes])
+    return mesh
 
 
 def block_mesh(center, size, rotation=None):

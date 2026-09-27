@@ -48,8 +48,18 @@ def sphere_scene(rings, segments):
     return [obj], Camera(position=np.array([0.0, 0.0, 4.0])), Light()
 
 
+def balls_scene(count):
+    """Many small smooth-shaded balls in different colours: the cost of each object."""
+    rng = np.random.default_rng(1)
+    mesh = blob_mesh((1.0, 1.0, 1.0), rings=12, segments=16)
+    objects = [Object3D(mesh, rng.uniform(-4, 4, 3), scale=rng.uniform(0.2, 0.6),
+                        color=tuple(int(c) for c in rng.integers(40, 255, 3))) for _ in range(count)]
+    return objects, Camera(position=np.array([0.0, 2.0, 12.0]), fov=45.0), Light()
+
+
 SCENES = {
     "dice": lambda: dice_scene(3),
+    "balls-400": lambda: balls_scene(400),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
 }

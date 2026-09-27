@@ -10,6 +10,7 @@ import argparse
 import numpy as np
 
 from .dice import make_die
+from .hud import StatusBar
 from ..mesh import load_obj
 from ..scene import Camera, Light, Object3D, Renderer
 from ..color import Color
@@ -27,13 +28,14 @@ class Viewer:
         self.yaw = self.pitch = 0.0
         self.spin = 0.6  # radians per second
         self.axis = np.array([1.0, 1.0, 0.3])
+        self.bar = StatusBar()
 
     def frame(self, screen, dt, keys):
         fwd = np.array([np.sin(self.yaw) * np.cos(self.pitch), np.sin(self.pitch), -np.cos(self.yaw) * np.cos(self.pitch)])
         right = np.cross(fwd, UP)
         right /= np.linalg.norm(right)
         step, turn = 0.1, 0.05
-        for k in keys:
+        for k in self.bar.handle(keys, screen):
             if k in (27, 3):
                 return False
             moves = {ord("w"): fwd * step, ord("s"): -fwd * step, ord("d"): right * step, ord("a"): -right * step}
@@ -60,8 +62,8 @@ class Viewer:
         screen.erase()
         screen.draw_frame(fb)
         p = self.camera.position
-        screen.text(rows - 1, 1, f"{len(self.obj.mesh.faces)} tris   cam {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}   "
-                                 f"spin {self.spin:.2f}   [wasd/arrows] move  [q/e] spin  [esc] quit")
+        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [esc] quit   {len(self.obj.mesh.faces)} tris   "
+                              f"cam {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}   spin {self.spin:.2f}")
         screen.refresh()
         return True
 
@@ -70,11 +72,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("model", nargs="?", help="Wavefront .obj file (default: a die)")
     parser.add_argument("--double-sided", action="store_true", help="draw back faces (for meshes with bad winding)")
+    parser.add_argument("--fps", type=int, default=30)
     add_display_args(parser)
     args = parser.parse_args()
     mesh = load_obj(args.model).normalized() if args.model else make_die(1.5)
     try:
-        run(Viewer(mesh, args.double_sided).frame, 30, **display_options(args))
+        run(Viewer(mesh, args.double_sided).frame, args.fps, mouse=True, title="unicode3d viewer",
+            **display_options(args))
     except KeyboardInterrupt:
         pass
 

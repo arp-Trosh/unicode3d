@@ -46,12 +46,40 @@ The environment variables `UNICODE3D_GLYPHS` and `UNICODE3D_COLOR` set the same 
 ```sh
 python3 -m unicode3d [-n DICE] [--seed N]                # dice roll demo: space rolls, +/- dice count, q quits
 python3 -m unicode3d.examples.viewer [model.obj]         # spinning model viewer (WASD/arrows, q/e spin, Esc)
+python3 -m unicode3d.examples.balls [-n BALLS]           # balls bouncing around a room, with a settings panel
+python3 -m unicode3d.examples.maze [--size N]            # the Windows 98 maze screensaver
+python3 -m unicode3d.examples.room                       # walk around a courtyard of things to look at (WASD)
 python3 -m unittest                                      # the tests
 ```
 
-Both demos take the display flags below, `--fps` included; the viewer shows a die when given no
-model, and `--double-sided` draws back faces for meshes with inconsistent winding. A small font and
-a large terminal give the best detail.
+Every demo takes the display flags below, `--fps` included, and shows the display settings at the
+bottom right: F2 cycles the glyph set, F3 the colours and F4 the target frame rate (shown as
+achieved/target), and each can be clicked too. A small font and a large terminal give the best detail.
+
+- **dice** (`python3 -m unicode3d`): textured dice that tumble and land on a chosen face.
+- **viewer**: spins an OBJ model, or a die when given none; `--double-sided` draws back faces for
+  meshes with inconsistent winding.
+- **balls**: up to 500 balls of many colours drift and bounce around a room seen from outside
+  (the near walls are see-through, since only the insides of the walls are drawn). The panel on the
+  left sets the number of balls, their size, the room's size and their speed, and switches
+  collisions, gravity, blob shadows, a lamp (a point light and a glowing bulb) and the camera's
+  orbit. Drag the sliders, click the toggles, use their keys (shown in the panel), or Tab through
+  them. Click a ball to make it glow (picking). Balls small on screen use meshes with fewer
+  triangles, so hundreds stay fast. Shows: many objects, point lights, emissive objects, picking,
+  widgets.
+- **maze**: the camera walks a random maze, keeping a hand on the right-hand wall (or taking the
+  shortest way), from the blue marker to the gold one, spins round at the exit and starts a new
+  maze. The panel sets the size (3 to 40 cells a side), the speed and the fog, and switches the
+  headlamp, the textures (off: flat colours per face) and a map. Space pauses, n starts a new maze.
+  Shows: textures, a point light moving with the camera, fog, per-face colours, parts of the maze out
+  of view skipped whole.
+- **room**: walk around an open courtyard with WASD, turn with Q/E or Left/Right, look up and
+  down with Up/Down. Inside are dice turning on a pedestal, an orrery (a planet and its moon
+  circling a glowing sun, built as a scene graph), a table with coloured cubes on it, a rainbow blob
+  in vertex colours, a lamp, and a sign. The crosshair names whatever it is on; clicking names what
+  you clicked. The panel switches the lamp and the sun, picks the background (a sky, a starry sky
+  box, a gradient or none) and sets the fog. Walking is smooth in terminals that report key
+  releases (see [Input](#input)); elsewhere a tap walks for about half a second. Esc quits.
 
 ### How it draws
 
@@ -60,12 +88,16 @@ a large terminal give the best detail.
   so for each cell the renderer tries every way of splitting its pixels in two and picks the glyph
   and colour pair with the least error (the approach [chafa](https://hpjansson.org/chafa/) uses).
   Edges land on the right sub-pixel while flat areas stay solid.
-- **Colour:** everything is computed in linear light and converted to sRGB at the end. Truecolor
+- **Colour output:** everything is computed in linear light and converted to sRGB at the end. Truecolor
   terminals get exact 24-bit colour. On 256- or 16-colour terminals, colours are matched in the OKLab
   colour space (so a shaded green stays green) with ordered dithering instead of banding.
 - **Shading:** per-pixel Blinn-Phong lighting with interpolated vertex normals (smooth where a mesh
-  shares vertices, flat where it doesn't, like cube faces), plus a white specular highlight. Light
-  levels are perceived brightness, so a level of 0.5 looks half as bright.
+  shares vertices, flat where it doesn't, like cube faces), plus a specular highlight. Any number of
+  lights add up: directional ones (like the sun) and point lights (lamps, torches) that fade out
+  with distance, each in its own colour, and objects can glow by themselves. Light levels are
+  perceived brightness, so a level of 0.5 looks half as bright.
+- **Colour:** one colour per object, or colours per face or per vertex (blended smoothly across
+  each face) in the mesh itself, and textures on top.
 - **Antialiasing:** 4 samples per pixel in a rotated-grid pattern, so near-vertical and
   near-horizontal edges get four coverage steps instead of two. Pixels whose samples disagree
   (silhouettes, creases, overlaps) get 8 more. Each pixel is shaded once per triangle, as GPUs do with
@@ -74,13 +106,17 @@ a large terminal give the best detail.
   stays steady instead of shimmering as a die turns.
 - **Depth cues:** surfaces dim with distance across the scene (fog), and where one surface passes in
   front of another the far side gets a dark outline.
+- **Backgrounds:** behind the scene, a colour, a vertical gradient, a sky that follows the camera
+  (zenith, horizon and ground colours), or a sky box of six pictures.
 - **Output:** the screen is a grid of cells, and each refresh sends only the cells that changed, as
   VT escape sequences, wrapped in synchronized-output markers where the terminal supports them. There
   is no curses: on Windows the console is put in VT mode, and keys and mouse clicks are read as
   console input records.
 - **Speed:** the per-pixel work (projecting and clipping triangles, rasterizing, shading, fog and
   outlines, matching glyphs, encoding the output) is plain Python loops that Numba compiles to
-  machine code, split across CPU cores where it pays. The renderer keeps its working arrays from
+  machine code, split across CPU cores where it pays. All objects go through one kernel call rather
+  than one each, meshes shared by many objects are stored once, and objects wholly outside the view
+  are skipped before any of their triangles are touched. The renderer keeps its working arrays from
   frame to frame rather than allocating new ones. Triangles crossing the camera's near plane are
   clipped rather than dropped.
 
@@ -94,19 +130,25 @@ does with `examples/dice.py`.
 | module          | role |
 |-----------------|------|
 | `transforms.py` | projection/view matrices, quaternions |
-| `mesh.py`       | `Mesh` with vertex normals and cached mipmaps, OBJ loader, textured `make_box` |
+| `mesh.py`       | `Mesh` with vertex normals, per-vertex or per-face colours, bounding sphere and cached mipmaps, OBJ loader, textured `make_box` |
 | `texture.py`    | mipmap chains and trilinear sampling |
-| `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), projection with culling and near-plane clipping, multi-sample z-buffered rasterizer |
-| `scene.py`      | `Camera`, `Light`, `Object3D`, `Renderer` (transform, cull, lighting, multisampling with extra edge samples, fog, outlines) |
+| `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), projection of all objects at once with view culling and near-plane clipping, multi-sample z-buffered rasterizer |
+| `scene.py`      | `Camera`, `Light`, `PointLight`, `Node`, `Object3D`, `Renderer` (transform, cull, lighting, multisampling with extra edge samples, fog, outlines, picking) |
+| `background.py` | what is drawn behind the scene: `Gradient`, `Sky`, `SkyBox` |
 | `color.py`      | sRGB/linear conversion, named `Color`s, OKLab palette matching, dithering, SGR colour codes |
 | `glyphs.py`     | glyph sets (half, quad, sextant, ascii) and matching pixels to cells |
-| `keys.py`       | `Key` codes, `MouseEvent`, the VT input decoder |
-| `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), colour and glyph detection |
-| `terminal.py`   | `Screen` (cell grid, text, frames, diffed output), `run`, command-line display flags |
+| `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
+| `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
+| `terminal.py`   | `Screen` (cell grid, text, frames, diffed output, held keys), `run`, command-line display flags |
+| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate on F2/F3/F4) |
 | `shapes.py`     | mesh builders: `text_mesh` (extruded text in any bitmap font), `bitmap_mesh`, `blob_mesh` (ellipsoid), `block_mesh`, `pillow_mesh` (a 2D shape puffed into a cushion), `merge_meshes` |
 | `examples/dice.py`   | pip-textured die, `orientation_showing`, `top_face`, `RollAnimation` (result chosen first, then animated to land on it); Zombie Dice builds its dice on it |
+| `examples/hud.py`    | the status line the demos share: help text and `DisplayControls` |
 | `examples/demo.py`   | the dice roll demo (`python3 -m unicode3d`) |
 | `examples/viewer.py` | the model viewer |
+| `examples/balls.py`  | balls in a room, with a settings panel |
+| `examples/maze.py`   | the maze screensaver |
+| `examples/room.py`   | the walk-around courtyard |
 
 ### Using it in a game
 
@@ -135,7 +177,9 @@ unchanged and 0.0 is black.
 
 ### Engine reference
 
-**Display detection.** `Screen` picks a glyph set and colour depth unless told otherwise (arguments,
+#### Display detection
+
+`Screen` picks a glyph set and colour depth unless told otherwise (arguments,
 the `--glyphs`/`--color` flags from `add_display_args`, or `UNICODE3D_GLYPHS`/`UNICODE3D_COLOR`):
 
 | setting | chosen when |
@@ -153,7 +197,9 @@ A program can't ask a terminal which characters its font has (a missing one stil
 drawn as a box), so sextants are picked by terminal, never by guessing at fonts.
 `console.shows_sextants()` holds the list.
 
-**`Renderer(width, height, cell_pixels=(1, 2), ...)` options:**
+#### Renderer
+
+`Renderer(width, height, cell_pixels=(1, 2), ...)` options:
 
 | option | default | effect |
 |--------|---------|--------|
@@ -164,30 +210,130 @@ drawn as a box), so sextants are picked by terminal, never by guessing at fonts.
 | `fog` | `0.3` | how much the farthest surfaces are dimmed |
 | `outline` | `0.55` | how much the far side of a depth edge is darkened |
 | `lod_bias` | `-0.5` | added to texture mip levels: lower is sharper, higher is softer |
+| `background` | `None` | drawn behind the scene (see [Backgrounds](#backgrounds)); `None` leaves it empty, so the screen's background shows |
 
-`render()` returns the renderer's own `FrameBuffer`, which the next render reuses; `copy()` it to
-cache a frame. `fb.ids` tells you which object (its index in the render
-list plus one) covers each pixel, which is handy for mouse picking. `renderer.project(point)` gives
+`render(objects, camera, lights)` takes one light or a list of them. It returns the renderer's own
+`FrameBuffer`, which the next render reuses; `copy()` it to cache a frame. `fb.ids` tells you which
+object (its index in the render list plus one) covers each pixel. `renderer.project(point)` gives
 the cell a world point landed on, for placing text labels. An unchanged scene isn't drawn again:
 `render()` hands back the last frame, and `renderer.draws` counts only the renders that rasterized.
 
-**Shapes.** `unicode3d.shapes` builds meshes to use with `Object3D`: `text_mesh(text, font)` extrudes
+#### Picking
+
+`renderer.pick(x, y)` tells what the last render drew in cell `(x, y)` of its frame (cells count
+from the frame's top-left, so subtract where you drew it, e.g. from a `MouseEvent`): a `Pick` with
+`object` (the `Object3D` itself), `position` (the point on its surface, in the world) and
+`distance` from the camera, or `None` where nothing was drawn. `renderer.ray(x, y)` gives the line
+of sight through a cell as `(origin, direction)`, for aiming at things that aren't drawn, such as an
+imaginary floor plane:
+
+```python
+for ev in events:
+    if isinstance(ev, MouseEvent) and ev.pressed and ev.button == MouseEvent.LEFT:
+        hit = renderer.pick(ev.x, ev.y - top)
+        if hit:
+            selected = hit.object
+```
+
+#### Scene graph
+
+An `Object3D`'s `position`, `rotation` and `scale` are relative to its `parent`, if it has one: a
+`Node` (a transform with no mesh, for grouping) or another `Object3D`. Children move, turn, scale
+and hide with their parent, through any number of levels. Only the objects to draw go in the render
+list; their parents are followed automatically. `obj.world_transform()` gives `(position, rotation,
+scale, visible)` in the world, and `obj.to_world(point)` places a point given in the object's own
+space.
+
+```python
+from unicode3d import Node, Object3D
+from unicode3d.shapes import blob_mesh, block_mesh
+from unicode3d.transforms import UP, quat_axis_angle
+
+car = Node(position=np.array([0.0, 0.0, 0.0]))
+body = Object3D(block_mesh((0, 0.5, 0), (2, 0.6, 1)), color=Color.RED, parent=car)
+wheel = blob_mesh((0.3, 0.3, 0.12))
+wheels = [Object3D(wheel, np.array([x, 0.3, z]), parent=car) for x in (-0.7, 0.7) for z in (-0.55, 0.55)]
+car.rotation = quat_axis_angle(UP, heading)   # the whole car turns
+renderer.render([body, *wheels], camera, light)
+```
+
+#### Many objects
+
+Draw as many objects as you like in one render list: objects that share a `Mesh` share its packed
+copy, all objects are projected in one parallel kernel call, and those wholly outside the view are
+skipped. 400 small balls (140,000 triangles) take about 15 ms at 180x50 cells. For thousands of
+static pieces, merging them into one mesh with `merge_meshes` (keeping each part's colour) is
+cheaper still.
+
+#### Shapes
+
+`unicode3d.shapes` builds meshes to use with `Object3D`: `text_mesh(text, font)` extrudes
 text in a bitmap font you supply (`{char: ["#..#", ...]}`, every glyph the same height) and returns
 `(mesh, width)`; `bitmap_mesh(cells)` does the same for any boolean grid; `blob_mesh(radii, center)`
 is an ellipsoid with an optional bump function; `block_mesh(center, size, rotation)` a box;
 `pillow_mesh(shape)` puffs a 2D inside/outside function into a cushion with texture coordinates
-that line up with the shape; and `merge_meshes(meshes)` joins them into one.
+that line up with the shape; and `merge_meshes(meshes, colors=None)` joins them into one, keeping
+their colours or giving each part the colour listed for it.
 
-**Colours and light.** `Object3D.color` takes a named `Color` or an `(r, g, b)` triple (0..255 ints
-or 0..1 floats). `Light` levels (`ambient`, `diffuse`, `specular`) are perceived brightness from 0
-to 1; the highlight is always white, so lower `specular` for large flat faces that would otherwise
-wash out.
+#### Colours
 
-**`Screen` and `run()`.** `run(frame_fn, fps=30, glyphs=None, color=None, mouse=False,
-background=None, title=None)` takes over the terminal (naming its window `title`, if given) and
-restores it however the loop ends (Ctrl-C raises `KeyboardInterrupt`). `frame_fn(screen, dt, keys)` returns `False` to stop. `keys` holds ints (a
-character's code, or a `Key` such as `Key.UP`, `Key.ENTER`, `Key.ESC`) and, with `mouse=True`,
-`MouseEvent(x, y, button, pressed)` values. `screen.text()` draws in the terminal's own ANSI colours,
+`Object3D.color` takes a named `Color` or an `(r, g, b)` triple (0..255 ints or 0..1 floats). A mesh
+can carry its own colours: `mesh.face_colors` (one per face) or `mesh.vertex_colors` (one per
+vertex, blended smoothly across each face, in linear light). Like textures, they multiply the
+object's colour, so give the object `color=(255, 255, 255)` to show them as they are; the default
+colour is a light grey.
+
+```python
+terrain = Mesh(vertices, faces)
+terrain.vertex_colors = np.where(vertices[:, 1:2] > 2.0, (240, 240, 250), (60, 140, 50))  # snow above 2
+```
+
+#### Lights
+
+Pass `render()` a list of lights and their light adds up.
+
+- `Light(direction, ambient=0.3, diffuse=0.7, specular=0.35, shininess=24, color=(255, 255, 255))`
+  is light from far away, the same everywhere (the sun).
+- `PointLight(position, color=(255, 255, 255), diffuse=0.8, specular=0.35, shininess=24,
+  range=10, ambient=0)` spreads from a point and fades smoothly to nothing at `range`.
+- `Object3D.emissive` is light a surface gives off itself: `1.0` shows its colour at full brightness
+  whatever the lighting (a lamp's bulb, a screen, a glowing marker). It lights nothing else; put a
+  `PointLight` beside it for that.
+
+Levels (`ambient`, `diffuse`, `specular`) are perceived brightness from 0 to 1, and a light's colour
+scales them channel by channel. The highlight takes the light's colour, so lower `specular` for
+large flat faces that would otherwise wash out. Each light costs a little shading time per pixel;
+point lights cost nothing where they are out of range.
+
+```python
+lights = [Light(ambient=0.15, diffuse=0.3), PointLight(np.array([0.0, 2.5, 0.0]), color=(255, 200, 140), range=8)]
+bulb = Object3D(blob_mesh((0.15, 0.15, 0.15)), np.array([0.0, 2.5, 0.0]), color=(255, 230, 180), emissive=1.0)
+```
+
+#### Backgrounds
+
+`Renderer(background=...)`, or `renderer.background = ...` at any time:
+
+- a colour: fills everything the scene leaves empty;
+- `Gradient(top, bottom)`: fixed on screen, top row to bottom row;
+- `Sky(zenith, horizon, ground)`: by the direction each pixel looks in, so it moves as the camera
+  turns: the horizon colour at eye level, fading up to the zenith and quickly down to the ground;
+- `SkyBox(textures)`: six pictures (in `+X, -X, +Y, -Y, +Z, -Z` order, `(H, W)` brightness or
+  `(H, W, 3)` colour) on the inside of a box that moves with the camera, so it never gets nearer.
+  The sides are upright; the top continues upward from the top edge of the `-Z` picture and the
+  bottom downward from its bottom edge (`background.SKYBOX_FACES` has the exact axes).
+
+The background fills in behind edges in proportion to how much of each pixel the scene leaves
+uncovered, so antialiased silhouettes blend into it. It is not fogged or outlined.
+
+#### Screen and run()
+
+`run(frame_fn, fps=30, glyphs=None, color=None, mouse=False,
+background=None, title=None, key_release=False)` takes over the terminal (naming its window
+`title`, if given) and restores it however the loop ends (Ctrl-C raises `KeyboardInterrupt`).
+`frame_fn(screen, dt, keys)` returns `False` to stop. `keys` holds ints (a character's code, or a
+`Key` such as `Key.UP`, `Key.ENTER`, `Key.ESC`), `MouseEvent`s and, with `key_release=True`,
+`KeyRelease`s (see [Input](#input)). `screen.text()` draws in the terminal's own ANSI colours,
 so text follows the user's theme. Characters that aren't exactly one cell wide are shown as `?`.
 `background=(r, g, b)` fills the screen with a known colour so anti-aliased edges blend into it
 exactly; by default, edges blend toward black over the terminal's own background.
@@ -197,27 +343,98 @@ exactly; by default, edges blend toward black over the terminal's own background
 terminal can take), and `screen.fps` is the target frame rate, which `run()` re-reads every frame;
 `screen.measured_fps` is the rate it achieved over the last second.
 
-**Performance.** Rendering a frame and building its screen update takes about 1.5 ms for a
+#### Input
+
+**Mouse.** `run(mouse=True)` reports clicks and the wheel as `MouseEvent(x, y, button, pressed,
+moved)`; `mouse="drag"` adds moves while a button is held (`moved=True`, `pressed=True`), which
+dragging a slider needs; `mouse="move"` reports every move (with `button=MouseEvent.NONE` when no
+button is held), for hover effects.
+
+**Holding keys.** Most terminals send only key presses, and a held key repeats: once, a pause of
+about half a second, then steadily. That is fine for menus but makes "walk while W is held" stutter.
+`screen.held` (a `HeldKeys`) tells which keys are down, and `"w" in screen.held` is the way to ask:
+
+```python
+def frame(screen, dt, keys):
+    if "w" in screen.held:
+        player.walk(speed * dt)
+```
+
+With `run(key_release=True)` the engine asks the terminal to report releases too, and passes them
+on as `KeyRelease(key)` events:
+
+| terminal | held keys |
+|----------|-----------|
+| kitty, foot, Ghostty, Alacritty, iTerm2, Rio; WezTerm with `enable_kitty_keyboard = true` | exact: presses and releases come through the kitty keyboard protocol |
+| Windows (Windows Terminal and the console) | exact: the engine asks Windows for the state of each held key |
+| everything else | estimated: a key counts as held for half a second after its press, and then for as long as its repeats keep coming. A tap moves a player for up to half a second, and on many systems holding a second key stops the first one repeating |
+
+`screen.held.exact` says which you have. Letters are tracked without case, so Shift+W still holds
+W. With the kitty protocol on, Ctrl-C arrives as a key, and `screen.keys()` raises
+`KeyboardInterrupt` for it as usual.
+
+#### Widgets
+
+`unicode3d.ui` has text widgets that work with the mouse and keyboard: `Button(label, action,
+key=None)`, `Toggle(label, value, key=None)`, `Slider(label, value, lo, hi, step=1, keys="[]")` and
+`Choice(label, options, key=None)`. A `Panel` lays them out in a row (or a column, with
+`vertical=True`) and handles a frame's events: clicks, drags, the mouse wheel, each widget's own key,
+and Tab/Shift-Tab to move the focus followed by Left/Right/Enter/Space. It returns the events it
+didn't use, so the rest of the program sees only those. Each widget calls `on_change(value)` when
+the user changes it, or you can read `widget.value` every frame.
+
+`DisplayControls()` is the display settings panel from Zombie Dice: glyphs on F2, colours on F3 and
+the frame rate (achieved/target) on F4, each also clickable. Draw it every frame; its `width` stays
+fixed as the values change.
+
+```python
+from unicode3d.ui import Button, DisplayControls, Panel, Slider, Toggle
+
+count = Slider("Balls", 20, 1, 400, keys="[]")
+spin = Toggle("Spin", True, key="s")
+panel = Panel([count, spin, Button("Reset", reset, key="r")])
+controls = DisplayControls()
+
+def frame(screen, dt, events):
+    events = controls.handle(panel.handle(events), screen)
+    ...
+    rows, cols = screen.size()
+    panel.draw(screen, rows - 1, 1)
+    controls.draw(screen, rows - 1, cols - controls.width - 1)
+    screen.refresh()
+
+run(frame, mouse="drag")
+```
+
+#### Performance
+
+Rendering a frame and building its screen update takes about 1.5 ms for a
 60x15-cell view of three rolling dice, and about 3 ms for a 150x45 view in `sextant` mode (2.4 ms in
 `quad`, 2 ms in `half`). Cost grows with the pixel count and, more slowly, the triangle count: a
-27,000-triangle sphere filling a 180x50 view takes about 6 ms. A scene that hasn't changed since the
-last `render()` (same objects, poses, camera, light and size) isn't drawn again, so still frames
+27,000-triangle sphere filling a 180x50 view takes about 5 ms, and 400 separate balls about 15 ms. A scene that hasn't changed since the
+last `render()` (same objects, poses, camera, lights, background and size) isn't drawn again, so still frames
 cost almost nothing; after editing a mesh's arrays in place, call `renderer.invalidate()`. The
 terminal showing the frame usually takes longer than drawing it. `python benchmarks/bench.py`
 times each stage of a frame.
 
-**First run.** Numba compiles the renderer the first time it is used, which takes about 10 seconds;
+#### First run
+
+Numba compiles the renderer the first time it is used, which takes about 10 seconds;
 the result is cached (in `__pycache__` beside the code, or a user cache folder if that can't be
 written), so later runs start in a fraction of a second. Upgrading unicode3d or Numba, or moving to
 another CPU, compiles it again. `run()` compiles before the first frame and shows "First run
 compile, please wait..." while it does; programs that drive a `Screen` themselves can call
 `compile_kernels()` at a moment of their choosing.
 
-**Threads.** The renderer uses every CPU core Numba finds, about twice as fast as one core at
+#### Threads
+
+The renderer uses every CPU core Numba finds, about twice as fast as one core at
 typical sizes. Set `NUMBA_NUM_THREADS`, or call `numba.set_num_threads()`, to leave cores for other
 work. Frames come out identical whatever the thread count.
 
-**Windows.** Needs Windows 10 or later (for VT sequences in the console), numpy and Numba. Windows
+#### Windows
+
+Needs Windows 10 or later (for VT sequences in the console), numpy and Numba. Windows
 Terminal is recommended, and gets sextants by default; the classic console works too, with quadrants
 (its default fonts may lack sextants).
 

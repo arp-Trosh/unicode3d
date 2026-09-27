@@ -20,6 +20,10 @@ change the result.
 - Scratch space written inside a `prange` loop must be either indexed by that iteration (like `sample_rgb[c]` in
   `scene._resolve`) or allocated inside the loop body, once per iteration of the outer loop (like `feat` in
   `glyphs._match`), never shared.
+- Output whose length depends on the work (like the triangles `raster.project` makes, which clipping can
+  split) is written in two passes: count what each iteration will write, turn the counts into offsets
+  serially, then have each iteration write only from its own offset (`raster.transform` counts,
+  `raster.project` writes).
 - Read-only inputs can be shared freely.
 - A kernel may read an element that another iteration writes only if it runs in a separate pass afterwards.
 
