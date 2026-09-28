@@ -19,7 +19,7 @@ To work on the engine and a game together, install your local copy in the game's
 environment in editable mode, so the game always runs your latest engine code:
 
 ```sh
-cd ~/Documents/Claude/someGame
+cd ../your-game                                  # a checkout next to unicode3d
 python -m venv .venv && . .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 pip install -e ../unicode3d                      # replaces the pinned copy with your working tree
