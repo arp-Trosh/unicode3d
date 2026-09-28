@@ -460,3 +460,7 @@ In short: any program, open or closed, may use unicode3d. If you distribute a mo
 your changes to it must be released under the LGPL too. A program that ships unicode3d should
 include these two license files and say that it uses unicode3d, and must let its users swap in their
 own version of unicode3d (with Python source files, that's automatic).
+
+---
+
+*Disclaimer: This project was created with Claude Code.*
