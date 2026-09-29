@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Walk around a courtyard of things to look at: python -m unicode3d.examples.room
+"""Walk around a courtyard showing off the engine: python -m unicode3d.examples.room
 
 WASD walks, Q/E or Left/Right turn, Up/Down look up and down, Esc quits. The
 crosshair names what it is on; click anything to name that. The panel switches
 the lamp and the sun, picks the background (a sky, a starry sky box, a
-gradient or none) and sets the fog.
+gradient or none) and sets the fog. There are shadows (the sun and the lamp),
+glass, cut-outs (a tree, a trellis), stained glass, a mirror, a pool and a
+chrome ball among the things to see; F5 and F6 switch shadows and reflections.
 
 Walking feels best in a terminal that reports key releases (kitty, foot,
 Ghostty, WezTerm, Alacritty, iTerm2, Windows Terminal): elsewhere a held key is
@@ -28,8 +30,9 @@ from ..terminal import add_display_args, display_options, run
 from ..transforms import UP, quat_axis_angle, quat_mul
 from ..ui import Choice, Panel, Slider, Toggle
 
-HALF = 8.0           # the courtyard runs from -HALF to HALF in x and z
+HALF = 11.0          # the courtyard runs from -HALF to HALF in x and z
 WALL_HEIGHT = 3.5
+DIE_SIZE = 0.34      # of the dice in the glass case
 EYE = 1.6
 RADIUS = 0.35        # how close the walker gets to walls and things
 WALK, TURN, LOOK = 3.0, 1.8, 1.2  # units a second, radians a second
@@ -59,6 +62,46 @@ def plaster(rng, res=64):
     tex[-res // 6:] = (0.45, 0.35, 0.3)
     tex[-res // 6 - 1] = (0.3, 0.22, 0.18)
     return np.clip(tex * rng.uniform(0.94, 1.03, (res, res, 1)), 0, 1)
+
+
+def leaves(rng, res=128, count=110):
+    """A clump of leaves on clear ground (alpha 0): ellipses in greens, their edges soft."""
+    tex = np.zeros((res, res, 4))
+    y, x = np.mgrid[0:res, 0:res] + 0.5
+    for _ in range(count):
+        cx, cy, r, turn = rng.uniform(6, res - 6), rng.uniform(6, res - 6), rng.uniform(4, 8), rng.uniform(0, np.pi)
+        dx, dy = x - cx, y - cy
+        along, across = dx * np.cos(turn) + dy * np.sin(turn), -dx * np.sin(turn) + dy * np.cos(turn)
+        alpha = np.clip((1.0 - np.hypot(along / 1.7, across) / r) * r, 0.0, 1.0)
+        green = (rng.uniform(0.15, 0.3), rng.uniform(0.4, 0.7), rng.uniform(0.08, 0.2))
+        tex[..., :3] = np.where(alpha[..., None] > tex[..., 3:], green, tex[..., :3])
+        tex[..., 3] = np.maximum(tex[..., 3], alpha)
+    return tex
+
+
+def lattice(res=128, bars=6, width=0.16):
+    """Crossed wooden laths with square holes between them (alpha 0)."""
+    tex = np.zeros((res, res, 4))
+    tex[..., :3] = (0.62, 0.48, 0.32)
+    u = (np.arange(res) + 0.5) / res * bars
+    lath = np.abs(u - np.round(u)) < width
+    frame = (np.arange(res) < res * 0.04) | (np.arange(res) >= res * 0.96)
+    tex[..., 3] = (lath | frame)[None, :] | (lath | frame)[:, None]
+    return tex
+
+
+def stained_glass(rng, res=96, panes=14):
+    """Panes of coloured glass (alpha 0.5) set in dark lead (solid), as a Voronoi pattern."""
+    points = rng.uniform(0, res, (panes, 2))
+    colours = np.array([(0.9, 0.15, 0.15), (0.15, 0.35, 0.95), (0.95, 0.8, 0.15), (0.2, 0.75, 0.3),
+                        (0.7, 0.25, 0.85)])[rng.integers(0, 5, panes)]
+    y, x = np.mgrid[0:res, 0:res] + 0.5
+    d = np.sort(np.hypot(x[..., None] - points[:, 0], y[..., None] - points[:, 1]), axis=2)
+    nearest = np.hypot(x[..., None] - points[:, 0], y[..., None] - points[:, 1]).argmin(axis=2)
+    tex = np.concatenate([colours[nearest], np.full((res, res, 1), 0.5)], axis=2)
+    lead = (d[..., 1] - d[..., 0] < 2.2) | (x < 3) | (x > res - 3) | (y < 3) | (y > res - 3)
+    tex[lead] = (0.08, 0.07, 0.06, 1.0)
+    return tex
 
 
 def starry_sky_box(rng, res=128):
@@ -91,6 +134,16 @@ def inward_box(size, height, textures):
     keep = np.repeat(np.arange(6) != 2, 2)  # no ceiling
     return Mesh(verts, box.faces[keep][:, ::-1].copy(), box.uvs[keep][:, ::-1].copy(), box.materials[keep],
                 box.textures)
+
+
+def picture(width, height, texture, turn=0.0):
+    """A width x height rectangle standing upright on y = 0, turned `turn` about the vertical (facing +z at 0),
+    showing all of `texture`."""
+    c, s = np.cos(turn), np.sin(turn)
+    right = np.array([c, 0.0, -s]) * width / 2
+    corners = np.array([-right, right, right + (0, height, 0), -right + (0, height, 0)])
+    uvs = np.array([[(0, 0), (1, 0), (1, 1)], [(0, 0), (1, 1), (0, 1)]], float)
+    return Mesh(corners, np.array([(0, 1, 2), (0, 2, 3)]), uvs, np.zeros(2, int), [texture])
 
 
 def rainbow_text(text):
@@ -128,11 +181,17 @@ class Courtyard:
 
         # Dice turning slowly on a pedestal.
         self.add(Object3D(block_mesh((-4.0, 0.5, -3.0), (1.2, 1.0, 1.2)), color=(90, 90, 110)), "a pedestal", (-4.0, -3.0, 0.9))
-        die = make_die(0.45)
-        self.dice = [Object3D(die, np.array([-4.0 + dx, 1.25, -3.0 + dz]), orientation_showing(i, 0.0), color=c)
+        # Small enough that, turning, they keep inside the glass case below and clear of each other.
+        die = make_die(DIE_SIZE)
+        self.dice = [Object3D(die, np.array([-4.0 + dx, 1.0 + DIE_SIZE / 2, -3.0 + dz]), orientation_showing(i, 0.0),
+                              color=c)
                      for i, (dx, dz, c) in enumerate(((-0.28, 0.0, Color.RED), (0.28, 0.2, Color.GREEN), (0.1, -0.3, Color.YELLOW)))]
         for d in self.dice:
             self.add(d, "three dice")
+        # In a glass case, which shows them through its near side and its far one, and casts a faint,
+        # blue-tinted shadow.
+        self.add(Object3D(block_mesh((-4.0, 1.45, -3.0), (1.1, 0.9, 1.1)), color=(200, 225, 255), opacity=0.15),
+                 "a glass case")
 
         # The orrery: a scene graph of nodes turning inside each other.
         self.orrery = Node(position=np.array([3.5, 1.4, -3.5]))
@@ -170,8 +229,63 @@ class Courtyard:
         # A lamp by the west wall: a glowing bulb, and the light it gives.
         self.lamp_at = np.array([-6.5, 2.3, 0.0])
         self.add(Object3D(block_mesh((-6.5, 1.1, 0.0), (0.12, 2.2, 0.12)), color=(60, 60, 60)), "a lamp", (-6.5, 0.0, 0.4))
-        self.bulb = Object3D(blob_mesh((0.18, 0.18, 0.18)), self.lamp_at, color=(255, 225, 160), emissive=1.0)
+        self.bulb = Object3D(blob_mesh((0.18, 0.18, 0.18)), self.lamp_at, color=(255, 225, 160), emissive=1.0,
+                             cast_shadows=False)  # it would shadow everything from the light inside it
         self.add(self.bulb, "a lamp")
+
+        # A tree: a trunk and a crown of leaves, each clump a picture with holes (a cut-out texture), so
+        # sunlight dapples the ground through it.
+        tree = Node(position=np.array([5.5, 0.0, 0.2]))
+        self.add(Object3D(block_mesh((0.0, 0.9, 0.0), (0.22, 1.8, 0.22)), color=(95, 70, 45), parent=tree), "a tree",
+                 (5.5, 0.2, 0.4))
+        for i in range(3):
+            self.add(Object3D(picture(2.4, 2.0, leaves(rng), i * np.pi / 3), np.array([0.0, 1.5, 0.0]),
+                              color=(255, 255, 255), parent=tree), "a tree")
+        crown = picture(2.4, 2.4, leaves(rng, count=140))  # and one lying flat on top
+        crown.vertices = crown.vertices - (0, 1.2, 0)
+        self.add(Object3D(crown, np.array([0.0, 2.9, 0.0]), quat_axis_angle((1, 0, 0), -np.pi / 2),
+                          color=(255, 255, 255), parent=tree), "a tree")
+
+        # A trellis between the lamp and the middle, whose lattice the lamp throws across the ground.
+        self.add(Object3D(picture(2.6, 1.9, lattice(), np.pi / 2), np.array([-4.2, 0.0, 0.0]), color=(255, 255, 255)),
+                 "a trellis")
+        for z in (-1.0, 0.0, 1.0):
+            self.obstacles.append((-4.2, z, 0.3))
+
+        # A stained-glass panel in a frame, turned to face the sun (see Walk.frame): its colours fall on the
+        # ground behind it.
+        turn, at = -0.96, np.array([0.0, 0.0, -4.0])
+        self.add(Object3D(picture(1.4, 1.8, stained_glass(rng), turn), at + (0, 0.25, 0), color=(255, 255, 255)),
+                 "a stained-glass panel")
+        for side in (-0.73, 0.73):
+            post = at + side * np.array([np.cos(turn), 0.0, -np.sin(turn)])
+            self.add(Object3D(block_mesh((post[0], 1.0, post[2]), (0.06, 2.0, 0.06)), color=(70, 55, 40)),
+                     "a stained-glass panel", (post[0], post[2], 0.3))
+
+        # A mirror on the south wall, in a frame: turn round at the start to see the courtyard behind you.
+        mirror = Mesh(np.array([(3.0, 0.4, 0.0), (-3.0, 0.4, 0.0), (-3.0, 3.0, 0.0), (3.0, 3.0, 0.0)], float),
+                      np.array([(0, 1, 2), (0, 2, 3)]))
+        self.add(Object3D(mirror, np.array([0.0, 0.0, HALF - 0.08]), color=(180, 185, 190), reflectivity=0.9),
+                 "a mirror")
+        for x, y, w, h in ((0.0, 0.3, 6.4, 0.2), (0.0, 3.1, 6.4, 0.2), (-3.1, 1.7, 0.2, 2.6), (3.1, 1.7, 0.2, 2.6)):
+            self.add(Object3D(block_mesh((x, y, HALF - 0.1), (w, h, 0.12)), color=(110, 80, 45)), "a mirror")
+
+        # A still pool in a stone rim, which mirrors the sky and whatever stands round it.
+        pool_at, pool = np.array([7.0, 0.0, 7.0]), 1.6
+        water = Mesh(np.array([(-pool, 0.12, -pool), (-pool, 0.12, pool), (pool, 0.12, pool), (pool, 0.12, -pool)]),
+                     np.array([(0, 1, 2), (0, 2, 3)]))
+        self.add(Object3D(water, pool_at, color=(40, 70, 80), reflectivity=0.6), "a pool")
+        for dx, dz, w, d in ((0, -pool - 0.1, 2 * pool + 0.4, 0.2), (0, pool + 0.1, 2 * pool + 0.4, 0.2),
+                             (-pool - 0.1, 0, 0.2, 2 * pool), (pool + 0.1, 0, 0.2, 2 * pool)):
+            self.add(Object3D(block_mesh((pool_at[0] + dx, 0.15, pool_at[2] + dz), (w, 0.3, d)), color=(150, 145, 135)),
+                     "a pool")
+        self.obstacles.append((*pool_at[[0, 2]], pool + 0.3))
+
+        # A chrome ball on a plinth, reflecting the sky.
+        self.add(Object3D(block_mesh((-7.0, 0.45, -7.0), (0.9, 0.9, 0.9)), color=(80, 80, 90)), "a plinth",
+                 (-7.0, -7.0, 0.8))
+        self.add(Object3D(blob_mesh((0.55, 0.55, 0.55), rings=24, segments=32), np.array([-7.0, 1.45, -7.0]),
+                          color=(230, 230, 235), reflectivity=0.85), "a chrome ball")
 
         # The sign on the north wall.
         sign = rainbow_text("UNICODE3D")
@@ -208,7 +322,7 @@ class Walk:
     def __init__(self, seed=None):
         self.court = Courtyard(seed)
         self.renderer = Renderer(1, 1)
-        self.bar = StatusBar()
+        self.bar = StatusBar(self.renderer)
         self.lamp = Toggle("Lamp (l)", True, key="l")
         self.sun = Toggle("Sun (u)", True, key="u")
         self.backgrounds = {"sky": Sky(), "stars": starry_sky_box(np.random.default_rng(7)),
@@ -247,12 +361,13 @@ class Walk:
         eye = np.array([self.x, EYE, self.z])
         look = np.array([fx * np.cos(self.pitch), np.sin(self.pitch), fz * np.cos(self.pitch)])
         camera = Camera(position=eye, target=eye + look, fov=70.0, near=0.05, far=100.0)
-        lights = [Light(direction=np.array([0.5, -1.0, -0.35]), ambient=0.3, diffuse=0.6, color=(255, 245, 230))
+        lights = [Light(direction=np.array([0.5, -1.0, -0.35]), ambient=0.3, diffuse=0.6, color=(255, 245, 230),
+                        shadows=True)
                   if self.sun.value else Light(ambient=0.08, diffuse=0.0, specular=0.0)]
         objects = list(self.court.objects)
         self.court.bulb.visible = self.lamp.value
         if self.lamp.value:
-            lights.append(PointLight(self.court.lamp_at, color=(255, 210, 150), diffuse=0.9, range=9.0))
+            lights.append(PointLight(self.court.lamp_at, color=(255, 210, 150), diffuse=0.9, range=9.0, shadows=True))
         self.renderer.background = self.backgrounds[self.background.value]
         self.renderer.fog = self.fog.value
 

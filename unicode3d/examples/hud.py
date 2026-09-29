@@ -2,15 +2,15 @@
 # Copyright (C) 2026 arp-Trosh
 """The status line the demos share: help text on the left, display settings on the right.
 
-The display settings (glyphs F2, colours F3, frame rate F4) are ui.DisplayControls,
-so they work by key or by click on any screen of any demo.
+The display settings (glyphs F2, colours F3, frame rate F4, shadows F5, reflections
+F6) are ui.DisplayControls, so they work by key or by click on any screen of any demo.
 """
 from ..ui import DisplayControls
 
 
 class StatusBar:
-    def __init__(self):
-        self.controls = DisplayControls()
+    def __init__(self, renderer=None):
+        self.controls = DisplayControls(renderer=renderer)
 
     def handle(self, events, screen):
         """Act on the display keys and clicks; returns the other events."""

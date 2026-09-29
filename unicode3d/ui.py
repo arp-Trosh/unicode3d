@@ -411,7 +411,9 @@ class Panel:
 
 
 class DisplayControls(Panel):
-    """The display settings, each clickable and on a function key: glyphs (F2), colours (F3), frame rate (F4).
+    """The display settings, each clickable and on a function key: glyphs (F2), colours (F3), frame rate (F4),
+    and, if given a Renderer, shadows (F5) and reflections (F6), which it switches with renderer.shadows
+    and renderer.reflections.
 
     The frame rate shows as achieved/target. Draw it every frame (it needs the
     screen it changes), e.g. at the bottom right:
@@ -419,8 +421,9 @@ class DisplayControls(Panel):
         controls.draw(screen, rows - 1, cols - controls.width - 1)
     """
 
-    def __init__(self, fps_steps=FPS_STEPS, keyboard=False):
+    def __init__(self, fps_steps=FPS_STEPS, keyboard=False, renderer=None):
         self.screen = None
+        self.renderer = renderer
         steps = tuple(fps_steps)
         fps_width = len(f"999/{max(steps)}fps")
 
@@ -435,7 +438,21 @@ class DisplayControls(Panel):
                             set=lambda v: self.screen and self.screen.set_color(v))
         self.fps = Choice("F4", steps, key=Key.F4, show=fps_text, width=fps_width,
                           get=lambda: self.screen.fps if self.screen else steps[0], set=self._set_fps)
-        super().__init__([self.glyphs, self.color, self.fps], keyboard=keyboard)
+        widgets = [self.glyphs, self.color, self.fps]
+        if renderer is not None:
+            self.shadows = Choice("F5", (True, False), key=Key.F5, show=lambda v: "shadows" if v else "no shadows",
+                                  get=lambda: self.renderer.shadows, set=self._set_shadows)
+            self.reflections = Choice("F6", (True, False), key=Key.F6,
+                                      show=lambda v: "reflections" if v else "no reflections",
+                                      get=lambda: self.renderer.reflections, set=self._set_reflections)
+            widgets += [self.shadows, self.reflections]
+        super().__init__(widgets, keyboard=keyboard)
+
+    def _set_shadows(self, v):
+        self.renderer.shadows = v
+
+    def _set_reflections(self, v):
+        self.renderer.reflections = v
 
     def _set_glyphs(self, v):
         if self.screen is not None:

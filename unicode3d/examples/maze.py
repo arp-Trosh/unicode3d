@@ -6,7 +6,7 @@ The camera walks through a random maze from the blue marker to the gold one,
 keeping a hand on the right-hand wall (or taking the shortest way), spins round
 at the exit and starts a new maze. The panel sets the maze's size, the walking
 speed and the fog, and switches the headlamp, the textures (off: flat colours
-per face) and a map.
+per face), a polished floor that mirrors the maze, and a map.
 """
 import argparse
 from collections import deque
@@ -126,9 +126,10 @@ def ceiling_texture(res=64, panels=2):
     return tex
 
 
-def maze_meshes(walls, textures, x0, z0, x1, z1):
-    """The textured and the flat-coloured mesh of cells x0..x1, z0..z1: walls facing into their cells,
-    a floor and a ceiling square per cell (materials 0 wall, 1 floor, 2 ceiling)."""
+def maze_meshes(walls, textures, x0, z0, x1, z1, floor=False):
+    """The textured and the flat-coloured mesh of cells x0..x1, z0..z1: walls facing into their cells and
+    a ceiling square per cell, or with floor, just a floor square per cell (materials 0 wall, 1 floor,
+    2 ceiling). The floor is kept apart so that it is flat, and can be a mirror."""
     verts, faces, uvs, materials = [], [], [], []
     corner_uv = np.array([(0, 0), (1, 0), (1, 1), (0, 1)], float)
 
@@ -144,7 +145,9 @@ def maze_meshes(walls, textures, x0, z0, x1, z1):
             cx, cz = (x + 0.5) * CELL, (z + 0.5) * CELL
             a, b = x * CELL, (x + 1) * CELL
             c, d = z * CELL, (z + 1) * CELL
-            quad([(a, 0, d), (b, 0, d), (b, 0, c), (a, 0, c)], 1)                                  # floor, facing up
+            if floor:
+                quad([(a, 0, d), (b, 0, d), (b, 0, c), (a, 0, c)], 1)                              # facing up
+                continue
             quad([(a, WALL_HEIGHT, c), (b, WALL_HEIGHT, c), (b, WALL_HEIGHT, d), (a, WALL_HEIGHT, d)], 2)  # ceiling
             for side in range(4):
                 if not walls[z, x, side]:
@@ -179,17 +182,20 @@ class Maze:
         self.rng = np.random.default_rng(seed)
         self.textures = [brick_texture(self.rng), floor_texture(self.rng), ceiling_texture()]
         self.renderer = Renderer(1, 1, fog=0.45)
-        self.bar = StatusBar()
+        self.bar = StatusBar(self.renderer)
         self.size = Slider("Size", size, 3, 40, keys="[]", length=10, on_change=lambda v: self.new_maze())
         self.speed = Slider("Speed", 1.5, 0.5, 5.0, step=0.5, keys="-=", length=10, fmt=lambda v: f"{v:.1f}")
         self.fog = Slider("Fog", 0.45, 0.0, 0.9, step=0.05, keys=",.", length=8, fmt=lambda v: f"{v:.2f}")
         self.headlamp = Toggle("Headlamp (l)", True, key="l")
         self.textured = Toggle("Textures (t)", True, key="t")
+        self.polished = Toggle("Polished floor (p)", False, key="p")
         self.show_map = Toggle("Map (m)", True, key="m")
         self.route = Choice("Route (r)", ("right-hand wall", "shortest way"), key="r", on_change=lambda v: self.new_maze())
-        self.panel = Panel([self.size, self.speed, self.fog, self.headlamp, self.textured, self.show_map, self.route])
-        self.start_marker = Object3D(gem_mesh(), color=(60, 120, 255), emissive=0.8, scale=0.3)
-        self.exit_marker = Object3D(gem_mesh(), color=(255, 200, 40), emissive=0.8, scale=0.3)
+        self.panel = Panel([self.size, self.speed, self.fog, self.headlamp, self.textured, self.polished, self.show_map,
+                            self.route])
+        # Glowing, see-through gems: the corridor shows through them.
+        self.start_marker = Object3D(gem_mesh(), color=(60, 120, 255), emissive=0.8, scale=0.3, opacity=0.35)
+        self.exit_marker = Object3D(gem_mesh(), color=(255, 200, 40), emissive=0.8, scale=0.3, opacity=0.35)
         self.paused = False
         self.new_maze()
 
@@ -201,6 +207,10 @@ class Maze:
             for x0 in range(0, n, BLOCK):
                 textured, flat = maze_meshes(self.walls, self.textures, x0, z0, min(x0 + BLOCK, n), min(z0 + BLOCK, n))
                 self.pieces.append((Object3D(textured, color=(255, 255, 255)), textured, flat))
+        # The whole floor as one flat piece: one mirror when polished, rather than one for each block.
+        textured, flat = maze_meshes(self.walls, self.textures, 0, 0, n, n, floor=True)
+        self.floor = Object3D(textured, color=(255, 255, 255))
+        self.pieces.append((self.floor, textured, flat))
         self.goal = (n - 1, n - 1)
         self.cell, self.heading = (0, 0), S if not self.walls[0, 0, S] else E
         plan = wall_follower if self.route.value == "right-hand wall" else shortest
@@ -284,11 +294,15 @@ class Maze:
 
         for obj, textured, flat in self.pieces:
             obj.mesh = textured if self.textured.value else flat
+        self.floor.reflectivity = 0.35 if self.polished.value else 0.0
         spin = quat_axis_angle((0, 1, 0), 2.0 * (self.t + 0.37 * len(self.visited)))
         self.start_marker.rotation = self.exit_marker.rotation = spin
         if self.headlamp.value:
+            # Carried a little to the right of and below the eye, so that its shadows show beside what casts them.
+            lantern = position + 0.3 * np.array([np.cos(yaw), 0.0, np.sin(yaw)]) + np.array([0.0, -0.25, 0.0])
             lights = [Light(direction=np.array([0.3, -1.0, -0.6]), ambient=0.12, diffuse=0.25, specular=0.0),
-                      PointLight(position, color=(255, 240, 215), diffuse=0.85, specular=0.2, range=5 * CELL)]
+                      PointLight(lantern, color=(255, 240, 215), diffuse=0.85, specular=0.2, range=5 * CELL,
+                                 shadows=True)]
         else:
             lights = Light(direction=np.array([0.3, -1.0, -0.6]), ambient=0.4, diffuse=0.5, specular=0.1)
         self.renderer.fog = self.fog.value

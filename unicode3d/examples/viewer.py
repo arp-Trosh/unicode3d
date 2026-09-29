@@ -3,7 +3,7 @@
 """Model viewer, after the original C renderer: python -m unicode3d.examples.viewer [model.obj]
 
 WASD moves the camera, arrow keys look around, q/e slow down / speed up the
-spin, Esc or Ctrl-C quits.
+spin, c makes the model chrome (reflecting a sky), Esc or Ctrl-C quits.
 """
 import argparse
 
@@ -11,6 +11,7 @@ import numpy as np
 
 from .dice import make_die
 from .hud import StatusBar
+from ..background import Sky
 from ..mesh import load_obj
 from ..scene import Camera, Light, Object3D, Renderer
 from ..color import Color
@@ -23,12 +24,12 @@ class Viewer:
     def __init__(self, mesh, double_sided):
         self.obj = Object3D(mesh, color=Color.CYAN, double_sided=double_sided)
         self.camera = Camera(position=np.array([0.0, 0.0, 4.0]))
-        self.light = Light(direction=np.array([0.0, 0.0, -1.0]))
+        self.light = Light(direction=np.array([0.0, 0.0, -1.0]), shadows=True)
         self.renderer = Renderer(1, 1)
         self.yaw = self.pitch = 0.0
         self.spin = 0.6  # radians per second
         self.axis = np.array([1.0, 1.0, 0.3])
-        self.bar = StatusBar()
+        self.bar = StatusBar(self.renderer)
 
     def frame(self, screen, dt, keys):
         fwd = np.array([np.sin(self.yaw) * np.cos(self.pitch), np.sin(self.pitch), -np.cos(self.yaw) * np.cos(self.pitch)])
@@ -53,6 +54,9 @@ class Viewer:
                 self.spin /= 2
             elif k == ord("e"):
                 self.spin = min(self.spin * 2, 20.0)
+            elif k == ord("c"):  # chrome, with a sky to reflect
+                self.obj.reflectivity = 0.0 if self.obj.reflectivity else 0.85
+                self.renderer.background = Sky() if self.obj.reflectivity else None
         self.camera.target = self.camera.position + fwd
         self.obj.rotation = quat_mul(quat_axis_angle(self.axis, self.spin * dt), self.obj.rotation)
 
@@ -62,7 +66,8 @@ class Viewer:
         screen.erase()
         screen.draw_frame(fb)
         p = self.camera.position
-        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [esc] quit   {len(self.obj.mesh.faces)} tris   "
+        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [c] chrome  [esc] quit   "
+                              f"{len(self.obj.mesh.faces)} tris   "
                               f"cam {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}   spin {self.spin:.2f}")
         screen.refresh()
         return True

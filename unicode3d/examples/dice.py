@@ -98,6 +98,10 @@ class RollAnimation:
         p = t / self.duration
         slide = 1.0 - (1.0 - p) ** 2
         position = self.start + (self.rest - self.start) * slide
-        position[1] = self.rest[1] + np.interp(t, self.times, self.heights)
         spin = quat_axis_angle(self.spin_axis, self.spin_angle * (1.0 - p) ** 2)
-        return position, quat_mul(spin, self.final_rotation)
+        rotation = quat_mul(spin, self.final_rotation)
+        # Lifted so that its lowest corner, not its centre, is what touches the table as it tumbles.
+        half = self.rest[1]
+        reach = half * np.abs(quat_to_matrix(rotation)[1]).sum()
+        position[1] = reach + np.interp(t, self.times, self.heights)
+        return position, rotation

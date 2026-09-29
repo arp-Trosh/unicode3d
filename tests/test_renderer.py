@@ -19,7 +19,7 @@ from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Node, Object3D, PointLight, Renderer
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
 from unicode3d.terminal import Screen
-from unicode3d.texture import build_mipmaps
+from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
 from unicode3d.transforms import quat_axis_angle, quat_between, quat_to_matrix
 
@@ -76,6 +76,20 @@ class ShapeTests(unittest.TestCase):
         mesh = merge_meshes([block_mesh((0.0, 0.0, 0.0), (1.0, 2.0, 3.0)), block_mesh((5.0, 0.0, 0.0), (1.0, 1.0, 1.0))])
         self.assertAlmostEqual(volume(mesh), 7.0)
         self.assertEqual(len(mesh.faces), 24)
+
+
+def flat_quad(width, height):
+    """A width x height rectangle facing +z, centred on the origin."""
+    w, h = width / 2, height / 2
+    return Mesh(np.array([(-w, -h, 0), (w, -h, 0), (w, h, 0), (-w, h, 0)], float), np.array([(0, 1, 2), (0, 2, 3)]))
+
+
+def textured_quad(width, height, texture):
+    """A width x height rectangle facing +z, centred on the origin, showing all of `texture`."""
+    w, h = width / 2, height / 2
+    return Mesh(np.array([(-w, -h, 0), (w, -h, 0), (w, h, 0), (-w, h, 0)], float), np.array([(0, 1, 2), (0, 2, 3)]),
+                uvs=np.array([[(0, 0), (1, 0), (1, 1)], [(0, 0), (1, 1), (0, 1)]], float), materials=np.zeros(2, int),
+                textures=[texture])
 
 
 def lum(fb):
@@ -184,15 +198,30 @@ class RenderTests(unittest.TestCase):
                           scale=rng.uniform(0.1, 0.4), color=(255, 255, 255), double_sided=i % 3 == 0,
                           parent=group if i % 4 == 0 else None) for i in range(80)]
         crowd[1].emissive = 1.0
+        for obj in crowd[5::7]:  # some see-through, overlapping each other
+            obj.opacity = 0.4
+        holes = np.ones((16, 16, 4))
+        holes[::2, :, 3] = 0.0  # stripes of holes
+        stained = np.full((16, 16, 4), 0.5)
+        crowd += [Object3D(textured_quad(1.5, 1.5, t), rng.uniform(-1, 1, 3), quat_axis_angle(rng.normal(size=3), 1.0),
+                           color=(255, 255, 255)) for t in (holes, stained)]
+        # Mirrors (seeing each other: two bounces), and something shiny.
+        crowd += [Object3D(flat_quad(2.0, 1.5), np.array([x, 0.0, -1.2]), quat_axis_angle((0, 1, 0), turn),
+                           color=(150, 150, 150), reflectivity=0.8) for x, turn in ((-0.8, 0.6), (0.8, -0.6))]
+        crowd[3].reflectivity = 0.9
         lights = [Light(color=(255, 200, 150)), PointLight(np.array([0.5, 0.5, 1.0]), color=Color.CYAN, range=3.0)]
+        shadowed = [Light(direction=np.array([0.5, -1.0, -0.3]), shadows=True), Light(shadows=True),
+                    PointLight(np.array([0.5, 0.5, 1.0]), color=Color.CYAN, range=3.0, shadows=True),
+                    PointLight(np.array([-0.2, 0.0, 0.3]), color=Color.RED, range=2.0, shadows=True)]
         scenes = [([Object3D(make_die(), rotation=quat_axis_angle((1, 2, 0), 0.7)), *spheres], Light()),
                   ([Object3D(make_box(), position=np.array([0.0, 0.0, 4.6]))], Light()),  # camera in front of its near face
-                  (crowd, lights)]
+                  (crowd, lights),
+                  (crowd, shadowed)]
 
         def draw(threads):
             numba.set_num_threads(threads)
             screen = Screen(glyphs="sextant", color="256", size=(30, 60), background=(20, 20, 30))
-            renderer = Renderer(60, 30, screen.cell_pixels, background=Sky())
+            renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), mirror_bounces=2)
             frame = []
             for objects, light in scenes:
                 fb = renderer.render(objects, Camera(position=np.array([0.0, 0.5, 5.0])), light)
@@ -299,6 +328,288 @@ class RenderTests(unittest.TestCase):
         fb = renderer.render([glow], camera, dark)
         np.testing.assert_allclose(fb.colour()[y, fb.width // 2], to_linear_rgb((40, 200, 60)), atol=1e-9)
         self.assertFalse(renderer.render([Object3D(make_box())], camera, []).colour().any())  # no lights: black
+
+    def test_shadows(self):
+        # A box above a floor, seen from straight above, lit from up and to the left: its shadow falls a
+        # unit to the right of it, where the floor gets only the light's ambient light.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (6.0, 0.1, 6.0)), color=(255, 255, 255))
+        box = Object3D(block_mesh((0.0, 1.0, 0.0), (0.6, 0.6, 0.6)), color=(255, 255, 255))
+        camera = Camera(position=np.array([0.0, 6.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
+        renderer = Renderer(60, 30, fog=0, outline=0)
+        sun = Light(direction=np.array([1.0, -1.0, 0.0]), shadows=True)
+
+        def at(fb, *point):
+            x, y = renderer.project(point)
+            return lum(fb)[int(y * 2), int(x)]
+
+        fb = renderer.render([floor, box], camera, sun).copy()
+        shadow, lit, top = at(fb, 1.0, 0.0, 0.0), at(fb, -1.0, 0.0, 0.0), at(fb, 0.0, 1.3, 0.0)
+        ambient = Light(direction=sun.direction, diffuse=0.0, specular=0.0)
+        self.assertAlmostEqual(shadow, at(renderer.render([floor, box], camera, ambient), 1.0, 0.0, 0.0), places=9)
+        self.assertGreater(lit, shadow + 0.1)
+        self.assertGreater(top, shadow + 0.1)  # the box's top, facing the light, is lit, not in its own shadow
+        # The edge is smoothed over at least a pixel: part-way between the shadow's middle and the lit floor.
+        self.assertTrue(any(shadow < v < lit for v in (at(fb, x, 0.0, 0.0) for x in np.linspace(1.4, 1.8, 40))))
+        # Moving the camera keeps the shadow where it is (and the shadow map as it was).
+        camera.position = np.array([0.2, 6.0, 0.1])
+        fb = renderer.render([floor, box], camera, sun)
+        self.assertAlmostEqual(at(fb, 1.0, 0.0, 0.0), shadow, places=9)
+        # Something that casts no shadow, or a light without them, leaves the floor lit.
+        plain = Light(direction=sun.direction)
+        fb = renderer.render([floor, box], camera, plain)
+        self.assertGreater(at(fb, 1.0, 0.0, 0.0), shadow + 0.1)
+        unlit = at(fb, 1.0, 0.0, 0.0)
+        box.cast_shadows = False
+        self.assertAlmostEqual(at(renderer.render([floor, box], camera, sun), 1.0, 0.0, 0.0), unlit, places=9)
+        # Nor does a renderer with shadows switched off.
+        box.cast_shadows = True
+        renderer.shadows = False
+        self.assertAlmostEqual(at(renderer.render([floor, box], camera, sun), 1.0, 0.0, 0.0), unlit, places=9)
+
+    def test_point_light_shadows(self):
+        # A low lamp in the middle of a floor with a box on each side: each box's shadow runs away from
+        # the lamp, in a different face of its cube map. Between them, along the diagonals where the
+        # faces meet, the floor is lit just as with no shadows at all.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (16.0, 0.1, 16.0)), color=(255, 255, 255))
+        boxes = [Object3D(block_mesh((x, 0.3, z), (0.3, 0.3, 0.3)), color=(255, 255, 255))
+                 for x, z in ((1.5, 0.0), (-1.5, 0.0), (0.0, 1.5), (0.0, -1.5))]
+        camera = Camera(position=np.array([0.0, 12.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
+        renderer = Renderer(80, 40, fog=0, outline=0)
+        lamp = PointLight(np.array([0.0, 0.6, 0.0]), diffuse=1.0, specular=0.0, range=12.0, shadows=True)
+
+        def at(fb, x, z):
+            cx, cy = renderer.project((x, 0.0, z))
+            return lum(fb)[int(cy * 2), int(cx)]
+
+        fb = renderer.render([floor, *boxes], camera, lamp).copy()
+        plain = renderer.render([floor, *boxes], camera, PointLight(lamp.position, diffuse=1.0, specular=0.0,
+                                                                    range=12.0))
+        for x, z in ((2.5, 0.0), (-2.5, 0.0), (0.0, 2.5), (0.0, -2.5)):
+            self.assertEqual(at(fb, x, z), 0.0)  # no ambient light: black
+            self.assertGreater(at(plain, x, z), 0.02)
+        for x, z in ((1.8, 1.8), (-1.8, 1.8), (1.8, -1.8), (-1.8, -1.8), (3.0, 3.0), (0.5, 0.3)):
+            self.assertAlmostEqual(at(fb, x, z), at(plain, x, z), places=9)
+
+    def test_transparency(self):
+        # A red wall, and in front of it see-through panes and a glass box, lit evenly (no highlights).
+        wall = Object3D(block_mesh((0.0, 0.0, -1.0), (8.0, 6.0, 0.1)), color=(255, 0, 0))
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        flat = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.4, diffuse=0.4, specular=0.0)
+        renderer = Renderer(60, 20, fog=0, outline=0)
+
+        def pane(z, color=(255, 255, 255), **kwargs):
+            return Object3D(block_mesh((0.0, 0.0, z), (1.2, 1.2, 0.02)), color=color, **kwargs)
+
+        def middle(fb):
+            return fb.colour()[fb.height // 2, fb.width // 2]
+
+        red = middle(renderer.render([wall], camera, flat).copy())
+        # Half see-through: part the pane's white, part the red behind it.
+        half = middle(renderer.render([wall, pane(1.0, opacity=0.5)], camera, flat).copy())
+        self.assertTrue(red[0] > 0.1 and red[1] == 0.0)
+        self.assertGreater(half[1], 0.02)
+        self.assertGreater(half[0], half[1])
+        # Wholly clear is not drawn at all, not even for picking; solid shows no red.
+        fb = renderer.render([wall], camera, flat).copy()
+        clear = renderer.render([wall, pane(1.0, opacity=0.0)], camera, flat)
+        for a, b in zip((fb.rgb, fb.alpha, fb.depth, fb.ids), (clear.rgb, clear.alpha, clear.depth, clear.ids)):
+            np.testing.assert_array_equal(a, b)
+        solid = middle(renderer.render([wall, pane(1.0)], camera, flat))
+        self.assertAlmostEqual(solid[0], solid[1], places=9)
+        # The order of the render list does not matter.
+        glass = [pane(1.0, opacity=0.4, color=(0, 0, 255)), pane(2.0, opacity=0.6, color=(0, 255, 0)),
+                 Object3D(make_box(), np.array([0.2, 0.1, 0.0]), color=(255, 255, 0), opacity=0.3)]
+        a = renderer.render([wall, *glass], camera, flat).copy()
+        b = renderer.render([*glass[::-1], wall], camera, flat)
+        np.testing.assert_allclose(a.rgb, b.rgb, atol=1e-12)
+        np.testing.assert_array_equal(a.depth, b.depth)
+        # Picking finds the glass in front, and a see-through object shows its far side: the box's back.
+        self.assertIs(renderer.pick(renderer.width // 2, renderer.height // 2).object, glass[1])
+        box = Object3D(make_box(), color=(255, 255, 255), opacity=0.5)
+        one_side = Object3D(block_mesh((0.0, 0.0, 0.5), (1.0, 1.0, 0.0)), color=(255, 255, 255), opacity=0.5)
+        self.assertGreater(middle(renderer.render([wall, box], camera, flat))[1],  # whiter: two panes of white
+                           middle(renderer.render([wall, one_side], camera, flat))[1] + 0.05)
+        # With room for 2 layers, the nearest 2 of 5 panes show, as if the others were not there.
+        panes = [pane(z, opacity=0.5, color=c) for z, c in zip((0.0, 0.5, 1.0, 1.5, 2.0),
+                                                                ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0),
+                                                                 (0, 255, 255)))]
+        few = Renderer(60, 20, fog=0, outline=0, transparency_layers=2)
+        fb = few.render([wall, *panes], camera, flat).copy()
+        np.testing.assert_allclose(fb.rgb, few.render([wall, *panes[3:]], camera, flat).rgb, atol=1e-12)
+        # Over an empty background, see-through things leave it showing.
+        fb = renderer.render([pane(1.0, opacity=0.5)], camera, flat)
+        self.assertTrue(0.4 < fb.alpha[fb.height // 2, fb.width // 2] < 0.7)
+
+    def test_vertex_and_face_alpha(self):
+        # A pane solid at its left edge and clear at its right, over a red wall; and a box with its
+        # faces clear or solid by turns.
+        wall = Object3D(block_mesh((0.0, 0.0, -1.0), (8.0, 6.0, 0.1)), color=(255, 0, 0))
+        mesh = Mesh(np.array([(-2, -1, 0), (2, -1, 0), (2, 1, 0), (-2, 1, 0)], float), np.array([(0, 1, 2), (0, 2, 3)]),
+                    vertex_colors=np.array([(0, 255, 0, 255), (0, 255, 0, 0), (0, 255, 0, 0), (0, 255, 0, 255)]))
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        flat = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.4, diffuse=0.4, specular=0.0)
+        renderer = Renderer(60, 20, fog=0, outline=0)
+        fb = renderer.render([wall, Object3D(mesh, color=(255, 255, 255))], camera, flat)
+
+        def at(x):
+            cx, cy = renderer.project((x, 0.0, 0.0))
+            return fb.colour()[int(cy * 2), int(cx)]
+
+        left, mid, right = at(-1.9), at(0.0), at(1.9)
+        self.assertGreater(left[1], 10 * left[0])  # nearly solid green
+        self.assertGreater(right[0], 10 * right[1])  # nearly clear: the red wall
+        self.assertTrue(mid[0] > 0.01 and mid[1] > 0.01)
+        box = make_box()
+        box.face_colors = np.array([(255, 255, 255, 255 * (i // 2 % 2)) for i in range(12)])
+        self.assertIsNotNone(renderer.render([wall, Object3D(box, color=(255, 255, 255))], camera, flat))
+
+    def test_see_through_things_cast_tinted_shadows(self):
+        # A floor seen from above, lit straight down through a red glass pane, a clear one and a solid one.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (8.0, 0.1, 8.0)), color=(255, 255, 255))
+        camera = Camera(position=np.array([0.0, 8.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
+        sun = Light(direction=np.array([0.0, -1.0, 0.0]), ambient=0.1, diffuse=0.9, specular=0.0, shadows=True)
+        renderer = Renderer(80, 40, fog=0, outline=0)
+        panes = [Object3D(block_mesh((x, 1.0, 0.0), (1.2, 0.02, 1.2)), color=c, opacity=a)
+                 for x, c, a in ((-2.0, (255, 0, 0), 0.5), (0.0, (255, 255, 255), 0.1), (2.0, (255, 255, 255), 1.0))]
+
+        def at(fb, x):
+            cx, cy = renderer.project((x, 0.0, 0.8))  # beside the panes, seen past them
+            return fb.colour()[int(cy * 2), int(cx)]
+
+        # Seen from above the panes cover their shadows, so look just past their edge at z = 0.8, with
+        # the sun slanting a little along z to put the shadows there.
+        sun.direction = np.array([0.0, -1.0, 0.8])
+        fb = renderer.render([floor, *panes], camera, sun)
+        lit = at(fb, -3.5)
+        tinted, faint, dark = at(fb, -2.0), at(fb, 0.0), at(fb, 2.0)
+        self.assertGreater(tinted[0], 2 * tinted[1])  # red light through red glass
+        self.assertLess(tinted[1], lit[1])
+        self.assertGreater(faint[1], 0.8 * lit[1])  # nearly clear glass: a faint shadow
+        self.assertLess(faint[1], lit[1])
+        self.assertLess(dark[1], 0.3 * lit[1])  # solid: a full shadow
+
+    def test_texture_alpha(self):
+        # A pane whose texture is solid green on the right half and clear on the left, over a red wall.
+        wall = Object3D(block_mesh((0.0, 0.0, -1.0), (8.0, 6.0, 0.1)), color=(255, 0, 0))
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        flat = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.4, diffuse=0.4, specular=0.0)
+        renderer = Renderer(60, 20, fog=0, outline=0)
+        half = np.zeros((32, 32, 4))
+        half[:, :, 1] = 1.0
+        half[:, 16:, 3] = 1.0
+        pane = Object3D(textured_quad(4.0, 2.0, half), color=(255, 255, 255))
+        self.assertEqual(alpha_kind(build_mipmaps(half)), CUTOUT)
+        fb = renderer.render([wall, pane], camera, flat)
+
+        def at(x):
+            cx, cy = renderer.project((x, 0.0, 0.0))
+            return fb.colour()[int(cy * 2), int(cx)], (int(cx), int(cy))
+
+        (left, cell_l), (right, cell_r) = at(-1.0), at(1.0)
+        self.assertGreater(left[0], 0.1)
+        self.assertEqual(left[1], 0.0)  # the wall, through the hole
+        self.assertGreater(right[1], 0.1)
+        self.assertEqual(right[0], 0.0)  # the pane, solid
+        self.assertIs(renderer.pick(*cell_l).object, wall)  # clicks go through holes
+        self.assertIs(renderer.pick(*cell_r).object, pane)
+        # The edge of the hole is smoothed: some pixels along it are part green, part red.
+        row = fb.colour()[int(at(0.0)[1][1] * 2)]
+        self.assertTrue(((row[:, 0] > 0.02) & (row[:, 1] > 0.02)).any())
+        # Shrunk, a cut-out's colour stays its own: the clear part doesn't darken it.
+        levels = build_mipmaps(half)
+        np.testing.assert_allclose(levels[-1][0, 0, 1] / levels[-1][0, 0, 3], 1.0)
+        # Mostly half see-through is stained glass, drawn blended: some of the wall shows through all over.
+        glass = np.zeros((32, 32, 4))
+        glass[..., 2], glass[..., 3] = 1.0, 0.5
+        self.assertEqual(alpha_kind(build_mipmaps(glass)), BLEND)
+        fb = renderer.render([wall, Object3D(textured_quad(4.0, 2.0, glass), color=(255, 255, 255))], camera, flat)
+        c = fb.colour()[fb.height // 2, fb.width // 2]
+        self.assertTrue(c[0] > 0.02 and c[2] > 0.02)
+
+    def test_light_through_textures(self):
+        # A floor lit from straight above through a striped cut-out (a fence lying flat) and stained glass.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (8.0, 0.1, 8.0)), color=(255, 255, 255))
+        camera = Camera(position=np.array([0.0, 8.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
+        sun = Light(direction=np.array([0.0, -1.0, 1.6]), ambient=0.1, diffuse=0.9, specular=0.0, shadows=True)
+        renderer = Renderer(80, 40, fog=0, outline=0)
+        stripes = np.ones((32, 32, 4))
+        stripes[:, :16, 3] = 0.0  # the -x half is a hole
+        red = np.zeros((32, 32, 4))
+        red[..., 0], red[..., 3] = 1.0, 0.5
+        lying = quat_axis_angle((1, 0, 0), -np.pi / 2)
+        fence = Object3D(textured_quad(2.0, 2.0, stripes), np.array([-1.5, 1.0, 0.0]), lying, color=(255, 255, 255))
+        glass = Object3D(textured_quad(2.0, 2.0, red), np.array([1.5, 1.0, 0.0]), lying, color=(255, 255, 255))
+        fb = renderer.render([floor, fence, glass], camera, sun)
+
+        def at(x):
+            cx, cy = renderer.project((x, 0.0, 2.0))  # where the slanting sun puts the shadows, past the panes
+            return fb.colour()[int(cy * 2), int(cx)]
+
+        lit, hole, slat, tinted = at(-3.8), at(-2.0), at(-1.0), at(1.5)
+        self.assertGreater(hole[1], 0.9 * lit[1])  # light through the hole
+        self.assertLess(slat[1], 0.3 * lit[1])  # the solid half's shadow
+        # Red light through the red glass: half its light through, and red besides.
+        self.assertGreater(tinted[0], 1.3 * tinted[1])
+        self.assertLess(tinted[1], 0.7 * lit[1])
+
+    def test_mirrors(self):
+        # A mirror facing the camera, with a red box in front of it on the left, a green one on the right,
+        # and a blue one behind it, which it hides and must not show either.
+        mirror = Object3D(flat_quad(6.0, 3.0), color=(128, 128, 128), reflectivity=1.0)
+        boxes = [Object3D(block_mesh((x, 0.0, z), (0.4, 0.4, 0.4)), color=c)
+                 for x, z, c in ((-1.0, 1.5, (255, 0, 0)), (1.0, 1.5, (0, 255, 0)), (0.0, -1.0, (0, 0, 255)))]
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        flat = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.6, diffuse=0.3, specular=0.0)
+        renderer = Renderer(80, 30, fog=0, outline=0, background=(0, 0, 0))
+
+        def at(fb, point):
+            x, y = renderer.project(point)
+            return fb.colour()[int(y * 2), int(x)]
+
+        fb = renderer.render([mirror, *boxes], camera, flat).copy()
+        # Each box's image is where it would be seen behind the glass: its mirror image in the plane.
+        red, green = at(fb, (-1.0, 0.0, -1.5)), at(fb, (1.0, 0.0, -1.5))
+        self.assertTrue(red[0] > 0.1 and red[1] == 0.0)
+        self.assertTrue(green[1] > 0.1 and green[0] == 0.0)
+        in_mirror = fb.ids == 1
+        self.assertTrue(in_mirror.any())
+        seen = fb.colour()[in_mirror]
+        self.assertFalse((seen[:, 2] > seen[:, 0] + seen[:, 1] + 0.01).any())  # nothing of the box behind it
+        self.assertEqual(renderer.pick(renderer.width // 2, renderer.height // 2 - 3).object, mirror)
+        # Without reflections, the mirror shows its own grey there.
+        renderer.reflections = False
+        plain = at(renderer.render([mirror, *boxes], camera, flat), (-1.0, 0.0, -1.5))
+        self.assertAlmostEqual(plain[0], plain[1], places=9)
+        self.assertGreater(plain[1], 0.1)
+        # Two mirrors facing each other: with one bounce, the far one seen in the near one shows no
+        # reflection; with two it does, and the red box turns up in it again.
+        renderer.reflections = True
+        back = Object3D(flat_quad(6.0, 3.0), np.array([0.0, 0.0, 3.0]), quat_axis_angle((0, 1, 0), np.pi),
+                        color=(128, 128, 128), reflectivity=1.0)
+        camera = Camera(position=np.array([0.3, 0.2, 2.5]), target=np.array([0.0, 0.0, 0.0]))
+        one = renderer.render([mirror, back, *boxes[:2]], camera, flat).copy()
+        renderer.mirror_bounces = 2
+        two = renderer.render([mirror, back, *boxes[:2]], camera, flat)
+        self.assertFalse(np.allclose(one.rgb, two.rgb))
+
+    def test_shiny_surfaces_reflect_the_sky(self):
+        sky = Sky(zenith=(0, 0, 255), horizon=(255, 255, 255), ground=(255, 0, 0))
+        ball = Object3D(blob_mesh((1.0, 1.0, 1.0), rings=24, segments=32), color=(255, 255, 255), reflectivity=1.0)
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        renderer = Renderer(60, 30, fog=0, outline=0, background=sky)
+        fb = renderer.render([ball], camera, Light(ambient=0.3, diffuse=0.3, specular=0.0))
+        x, top = renderer.project((0.0, 0.8, 0.6))
+        _, bottom = renderer.project((0.0, -0.8, 0.6))
+        up, down = fb.colour()[int(top * 2), int(x)], fb.colour()[int(bottom * 2), int(x)]
+        self.assertGreater(up[2], up[0])  # the zenith's blue above
+        self.assertGreater(down[0], down[2])  # the ground's red below
+        # Glass reflects the sky at a slant, round its edge.
+        glass = Object3D(ball.mesh, color=(255, 255, 255), opacity=0.1)
+        lit = Light(ambient=0.3, diffuse=0.3, specular=0.0)
+        edge = lambda fb: fb.colour()[fb.height // 2, int(renderer.project((0.97, 0.0, 0.0))[0])]
+        with_sky = edge(renderer.render([glass], camera, lit)).copy()
+        renderer.reflections = False
+        self.assertFalse(np.allclose(with_sky, edge(renderer.render([glass], camera, lit))))
 
     def test_backgrounds(self):
         camera = Camera(position=np.array([0.0, 0.0, 5.0]))
@@ -708,6 +1019,19 @@ class WidgetTests(unittest.TestCase):
         controls.handle([MouseEvent(3, 3, 0, True)])  # a click on the glyphs
         self.assertEqual(self.screen.mode, "ascii")
         self.assertIn("F4 --/60fps", "".join(self.screen.chars[3]))
+        # Given a renderer, F5 switches its shadows.
+        renderer = Renderer(10, 5)
+        controls = DisplayControls(renderer=renderer)
+        controls.handle([Key.F5], self.screen)
+        self.assertFalse(renderer.shadows)
+        controls.draw(self.screen, 3, 0)
+        self.assertIn("F5 no shadows", "".join(self.screen.chars[3]))
+        controls.handle([Key.F5])
+        self.assertTrue(renderer.shadows)
+        controls.handle([Key.F6])  # and F6 its reflections
+        self.assertFalse(renderer.reflections)
+        controls.draw(self.screen, 3, 0)
+        self.assertIn("F6 no reflections", "".join(self.screen.chars[3]))
 
 
 class DemoTests(unittest.TestCase):
@@ -724,22 +1048,23 @@ class DemoTests(unittest.TestCase):
 
     def test_dice_demo(self):
         from unicode3d.examples.demo import DiceDemo
-        self.run_demo(DiceDemo(3, seed=1), [ord(" "), ord("+"), Key.F3], ord("q"))
+        self.run_demo(DiceDemo(3, seed=1), [ord(" "), ord("+"), Key.F3, ord("g"), ord("m"), Key.F6], ord("q"))
 
     def test_viewer(self):
         from unicode3d.examples.viewer import Viewer
-        self.run_demo(Viewer(make_die(), False), [ord("w"), Key.LEFT, ord("e")], Key.ESC)
+        self.run_demo(Viewer(make_die(), False), [ord("w"), Key.LEFT, ord("e"), ord("c")], Key.ESC)
 
     def test_balls(self):
         from unicode3d.examples.balls import Balls
         demo = Balls(30, seed=1)
-        self.run_demo(demo, [ord("]"), ord("g"), ord(" "), Key.TAB, Key.RIGHT, MouseEvent(50, 12, 0, True)], ord("q"))
+        self.run_demo(demo, [ord("]"), ord("g"), ord(" "), Key.TAB, Key.RIGHT, MouseEvent(50, 12, 0, True), Key.F5,
+                             ord("x"), ord("m")], ord("q"))
         self.assertEqual(len(demo.balls), 32)  # "]" and then the focused slider's Right added one each
 
     def test_maze(self):
         from unicode3d.examples.maze import Maze
         demo = Maze(5, seed=1)
-        self.run_demo(demo, [ord("t"), ord("m"), ord("r"), ord("n"), ord("l")], ord("q"))
+        self.run_demo(demo, [ord("t"), ord("m"), ord("r"), ord("n"), ord("l"), ord("p")], ord("q"))
         demo.speed.value = 5.0
         screen = Screen(glyphs="quad", color="256", size=(30, 100))
         first = demo.walls  # held, so a new maze can't reuse its memory (and id)

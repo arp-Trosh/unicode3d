@@ -19,14 +19,16 @@ def _srgb01(colors):
 class Mesh:
     """A triangle mesh. Its colours (per vertex, blended across each face, or per face) multiply the
     colour of the object showing it, as textures do: give the object color=(255, 255, 255) to show
-    them as they are. Colours are 0..1 sRGB floats or 0..255 ints."""
+    them as they are. Colours are 0..1 sRGB floats or 0..255 ints, with an optional fourth column of
+    opacity (alpha, 0..1 or 0..255: 0 is clear, full is solid), which multiplies the object's."""
     vertices: np.ndarray                 # (V, 3) float
     faces: np.ndarray                    # (F, 3) int, counter-clockwise when seen from outside
     uvs: np.ndarray | None = None        # (F, 3, 2) per-corner texture coordinates
     materials: np.ndarray | None = None  # (F,) index into `textures`
-    textures: list = field(default_factory=list)  # (H, W) brightness multipliers or (H, W, 3) colours, 0..1 sRGB
-    vertex_colors: np.ndarray | None = None  # (V, 3) a colour at each vertex, blended smoothly across faces
-    face_colors: np.ndarray | None = None    # (F, 3) one colour for each face (used if vertex_colors is None)
+    textures: list = field(default_factory=list)  # (H, W) brightness multipliers, (H, W, 3) colours, 0..1 sRGB,
+                                                  # or (H, W, 4) with alpha: holes (cut-outs) or see-through parts
+    vertex_colors: np.ndarray | None = None  # (V, 3 or 4) a colour at each vertex, blended smoothly across faces
+    face_colors: np.ndarray | None = None    # (F, 3 or 4) one colour for each face (used if vertex_colors is None)
 
     def vertex_normals(self):
         """Area-weighted average of the normals of the faces around each vertex.
@@ -47,7 +49,8 @@ class Mesh:
         return normals
 
     def corner_colors(self):
-        """Linear rgb (F, 3, 3) at each corner of each face, from vertex_colors or face_colors; None if neither.
+        """Linear rgb and alpha (F, 3, 4) at each corner of each face, from vertex_colors or face_colors (alpha
+        1 where they have no fourth column); None if neither.
 
         Cached, and worked out afresh when the colour or face arrays are replaced.
         """
@@ -57,11 +60,16 @@ class Mesh:
         cached = self.__dict__.get("_corner_colors")
         if cached is not None and cached[0] is colors and cached[1] is self.faces:
             return cached[2]
-        lin = srgb_to_linear(_srgb01(colors).reshape(-1, 3))
+        c = _srgb01(colors)
+        c = c.reshape(-1, c.shape[-1] if c.ndim > 1 and c.shape[-1] == 4 else 3)
+        rgba = np.ones((len(c), 4))
+        rgba[:, :3] = srgb_to_linear(c[:, :3])
+        if c.shape[1] == 4:
+            rgba[:, 3] = np.clip(c[:, 3], 0.0, 1.0)  # opacity is a fraction, not a colour: no sRGB curve
         if self.vertex_colors is not None:
-            corners = lin[self.faces]
+            corners = rgba[self.faces]
         else:
-            corners = np.repeat(lin[:, None, :], 3, axis=1)
+            corners = np.repeat(rgba[:, None, :], 3, axis=1)
         self._corner_colors = (colors, self.faces, corners)
         return corners
 

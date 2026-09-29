@@ -26,8 +26,9 @@ from .color import COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_col
 from .console import detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
-from .mesh import make_box
-from .scene import Camera, Light, Object3D, Renderer
+from .background import Sky
+from .mesh import Mesh, make_box
+from .scene import Camera, Light, Object3D, PointLight, Renderer
 
 __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
            "frame_to_text"]
@@ -310,10 +311,24 @@ def compile_kernels():
     for the compiling instead.
     """
     screen = Screen(None, glyphs="sextant", color="truecolor", size=(8, 16))
-    renderer = Renderer(16, 8, screen.cell_pixels)
+    renderer = Renderer(16, 8, screen.cell_pixels, background=Sky())
     objects = [Object3D(make_box(textures=[np.ones((4, 4))] * 6)),                     # textured
                Object3D(make_box(), position=np.array([1.0, 0.0, 0.0]), color=Color.RED)]  # plain
-    screen.draw_frame(renderer.render(objects, Camera(), Light()))
+    glass = make_box()
+    glass.vertex_colors = np.full((len(glass.vertices), 4), 255)
+    glass.vertex_colors[::2, 3] = 100  # alpha in the mesh's colours
+    objects += [Object3D(glass, position=np.array([-1.0, 0.0, 0.0]), opacity=0.5)]  # see-through: more kernels
+    holes = np.ones((4, 4, 4))
+    holes[::2, :, 3] = 0.0
+    stained = np.full((4, 4, 4), 0.5)
+    objects += [Object3D(make_box(textures=[t] * 6), position=np.array([x, 1.0, 0.0]))  # alpha in textures
+                for t, x in ((holes, -0.5), (stained, 0.5))]
+    mirror = Mesh(np.array([(-2, -1, -1), (2, -1, -1), (2, 1, -1), (-2, 1, -1)], float),
+                  np.array([(0, 1, 2), (0, 2, 3)]))
+    objects += [Object3D(mirror, reflectivity=0.8), Object3D(make_box(), position=np.array([0.0, -1.0, 0.0]),
+                                                             reflectivity=0.5)]  # a mirror, and something shiny
+    lights = [Light(shadows=True), PointLight(np.array([0.0, 2.0, 2.0]), shadows=True)]  # shadows' kernels too
+    screen.draw_frame(renderer.render(objects, Camera(), lights))
     screen.render_updates()
 
 

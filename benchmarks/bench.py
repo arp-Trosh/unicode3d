@@ -5,7 +5,7 @@
 Renders a few fixed, spinning scenes off-screen and reports the time each stage
 of a frame takes:
 
-  render          Renderer.render: rasterizing and shading the scene into pixels
+  render          Renderer.render: rasterizing and shading the scene into pixels (and shadow maps)
   draw_frame      Screen.draw_frame: pixels into glyphs and terminal colours
   render_updates  Screen.render_updates: the changed cells as escape sequences
 
@@ -21,7 +21,8 @@ import numpy as np
 
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
-from unicode3d.scene import Camera, Light, Object3D, Renderer
+from unicode3d.scene import Camera, Light, Object3D, PointLight, Renderer
+from unicode3d.mesh import Mesh
 from unicode3d.shapes import blob_mesh
 from unicode3d.terminal import Screen
 from unicode3d.transforms import normalize, quat_axis_angle, quat_mul
@@ -30,16 +31,25 @@ STAGES = ("render", "draw_frame", "render_updates")
 SPIN = quat_axis_angle([0.3, 1.0, 0.2], 0.05)
 
 
-def dice_scene(count=3):
-    """The dice demo's view: a row of textured dice seen from above and in front."""
+def dice_scene(count=3, shadows=None, glass=False, polished=False):
+    """The dice demo's view: a row of textured dice seen from above and in front; with shadows ("sun" or
+    "lamp"), on a floor (which keeps still) that they cast them onto, redrawing the shadow map every frame;
+    with glass, see-through dice (casting tinted shadows); polished, on a mirror of a floor."""
     mesh = make_die()
     colors = (Color.GREEN, Color.YELLOW, Color.RED)
     xs = (np.arange(count) - (count - 1) / 2) * 1.8
-    objects = [Object3D(mesh, np.array([x, 0.5, 0.0]), orientation_showing(i % 6, 0.4 * i), color=colors[i % 3])
-               for i, x in enumerate(xs)]
+    objects = [Object3D(mesh, np.array([x, 0.5, 0.0]), orientation_showing(i % 6, 0.4 * i), color=colors[i % 3],
+                        opacity=0.45 if glass else 1.0) for i, x in enumerate(xs)]
     target = np.array([0.0, 0.4, 0.0])
     camera = Camera(position=target + normalize([0.0, 0.8, 0.6]) * 7.0, target=target, fov=35.0)
-    return objects, camera, Light()
+    if not shadows:
+        return objects, camera, Light()
+    top = Mesh(np.array([(-4, -0.5, -2.5), (-4, -0.5, 2.5), (4, -0.5, 2.5), (4, -0.5, -2.5)], float),
+               np.array([(0, 1, 2), (0, 2, 3)]))
+    floor = Object3D(top, color=(200, 200, 200), reflectivity=0.4 if polished else 0.0)
+    light = (Light(shadows=True) if shadows == "sun" else
+             [Light(ambient=0.2, diffuse=0.2), PointLight(np.array([0.5, 2.5, 1.0]), range=8.0, shadows=True)])
+    return objects + [floor], camera, light, [floor]
 
 
 def sphere_scene(rings, segments):
@@ -59,6 +69,10 @@ def balls_scene(count):
 
 SCENES = {
     "dice": lambda: dice_scene(3),
+    "dice-sun": lambda: dice_scene(3, shadows="sun"),
+    "dice-lamp": lambda: dice_scene(3, shadows="lamp"),
+    "dice-glass": lambda: dice_scene(3, shadows="sun", glass=True),
+    "dice-mirror": lambda: dice_scene(3, shadows="sun", polished=True),
     "balls-400": lambda: balls_scene(400),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
@@ -69,12 +83,13 @@ class Frames:
     """A scene, a renderer and an off-screen screen; step() spins the objects and draws one frame."""
 
     def __init__(self, scene, cols, rows, glyphs, color):
-        self.objects, self.camera, self.light = SCENES[scene]()
+        self.objects, self.camera, self.light, *still = SCENES[scene]()
+        self.moving = [obj for obj in self.objects if not any(obj is s for s in (still or [[]])[0])]
         self.screen = Screen(None, glyphs=glyphs, color=color, size=(rows, cols))
         self.renderer = Renderer(cols, rows, self.screen.cell_pixels)
 
     def step(self):
-        for obj in self.objects:
+        for obj in self.moving:
             obj.rotation = quat_mul(SPIN, obj.rotation)
         t0 = time.perf_counter()
         fb = self.renderer.render(self.objects, self.camera, self.light)

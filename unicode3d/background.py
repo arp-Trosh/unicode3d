@@ -112,6 +112,42 @@ def background_args(background, camera, aspect, height):
     return (kind, colors, basis, texels, levels, first, lod), (values, refs)
 
 
+@njit(cache=True)
+def sky_colour(kind, colors, faces, texels, levels, first, lod, dx, dy, dz):
+    """The background seen looking along unit direction (dx, dy, dz) in the world, linear rgb, for a sky
+    or sky box; a plain colour for COLOR; for GRADIENT, the gradient from top (straight up) to bottom
+    (straight down); black for NONE (and for kind -1: reflections switched off)."""
+    if kind == SKY:
+        angle = np.arcsin(min(max(dy, -1.0), 1.0))
+        if angle >= 0.0:  # horizon to zenith, turning quickly at first
+            t, top = np.sqrt(angle / (np.pi / 2)), 0
+        else:  # horizon to ground within about ten degrees
+            t, top = min(-angle / (np.pi / 18), 1.0), 2
+        return (colors[1, 0] + (colors[top, 0] - colors[1, 0]) * t,
+                colors[1, 1] + (colors[top, 1] - colors[1, 1]) * t,
+                colors[1, 2] + (colors[top, 2] - colors[1, 2]) * t)
+    if kind == SKYBOX:
+        ax, ay, az = abs(dx), abs(dy), abs(dz)
+        if ax >= ay and ax >= az:
+            face, m = (0 if dx > 0 else 1), ax
+        elif ay >= az:
+            face, m = (2 if dy > 0 else 3), ay
+        else:
+            face, m = (4 if dz > 0 else 5), az
+        px, py, pz = dx / m, dy / m, dz / m
+        u = 0.5 * (px * faces[face, 1, 0] + py * faces[face, 1, 1] + pz * faces[face, 1, 2] + 1.0)
+        v = 0.5 * (px * faces[face, 2, 0] + py * faces[face, 2, 1] + pz * faces[face, 2, 2] + 1.0)
+        r, g, b, _ = sample_texture(texels, levels, first, face, u, v, lod)
+        return r, g, b
+    if kind == GRADIENT:
+        t = 0.5 - 0.5 * dy
+        return (colors[0, 0] + (colors[1, 0] - colors[0, 0]) * t, colors[0, 1] + (colors[1, 1] - colors[0, 1]) * t,
+                colors[0, 2] + (colors[1, 2] - colors[0, 2]) * t)
+    if kind == COLOR:
+        return colors[0, 0], colors[0, 1], colors[0, 2]
+    return 0.0, 0.0, 0.0
+
+
 @njit(cache=True, parallel=True)
 def fill_background(rgb, alpha, kind, colors, basis, faces, texels, levels, first, lod):
     """Fill what the scene leaves uncovered (alpha < 1) with the background, in place: each pixel gets
@@ -136,28 +172,7 @@ def fill_background(rgb, alpha, kind, colors, basis, faces, texels, levels, firs
                 dy = basis[0, 1] + nx * basis[1, 1] + ny * basis[2, 1]
                 dz = basis[0, 2] + nx * basis[1, 2] + ny * basis[2, 2]
                 dl = np.sqrt(dx * dx + dy * dy + dz * dz)
-                dx, dy, dz = dx / dl, dy / dl, dz / dl
-                if kind == SKY:
-                    angle = np.arcsin(min(max(dy, -1.0), 1.0))
-                    if angle >= 0.0:  # horizon to zenith, turning quickly at first
-                        t, top = np.sqrt(angle / (np.pi / 2)), 0
-                    else:  # horizon to ground within about ten degrees
-                        t, top = min(-angle / (np.pi / 18), 1.0), 2
-                    r = colors[1, 0] + (colors[top, 0] - colors[1, 0]) * t
-                    g = colors[1, 1] + (colors[top, 1] - colors[1, 1]) * t
-                    b = colors[1, 2] + (colors[top, 2] - colors[1, 2]) * t
-                else:
-                    ax, ay, az = abs(dx), abs(dy), abs(dz)
-                    if ax >= ay and ax >= az:
-                        face, m = (0 if dx > 0 else 1), ax
-                    elif ay >= az:
-                        face, m = (2 if dy > 0 else 3), ay
-                    else:
-                        face, m = (4 if dz > 0 else 5), az
-                    px, py, pz = dx / m, dy / m, dz / m
-                    u = 0.5 * (px * faces[face, 1, 0] + py * faces[face, 1, 1] + pz * faces[face, 1, 2] + 1.0)
-                    v = 0.5 * (px * faces[face, 2, 0] + py * faces[face, 2, 1] + pz * faces[face, 2, 2] + 1.0)
-                    r, g, b = sample_texture(texels, levels, first, face, u, v, lod)
+                r, g, b = sky_colour(kind, colors, faces, texels, levels, first, lod, dx / dl, dy / dl, dz / dl)
             uncovered = 1.0 - a
             rgb[y, x, 0] += uncovered * r
             rgb[y, x, 1] += uncovered * g

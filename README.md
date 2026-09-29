@@ -53,33 +53,40 @@ python3 -m unittest                                      # the tests
 ```
 
 Every demo takes the display flags below, `--fps` included, and shows the display settings at the
-bottom right: F2 cycles the glyph set, F3 the colours and F4 the target frame rate (shown as
-achieved/target), and each can be clicked too. A small font and a large terminal give the best detail.
+bottom right: F2 cycles the glyph set, F3 the colours, F4 the target frame rate (shown as
+achieved/target), F5 switches shadows on and off and F6 reflections, and each can be clicked too. A
+small font and a large terminal give the best detail.
 
-- **dice** (`python3 -m unicode3d`): textured dice that tumble and land on a chosen face.
-- **viewer**: spins an OBJ model, or a die when given none; `--double-sided` draws back faces for
-  meshes with inconsistent winding.
-- **balls**: up to 500 balls of many colours drift and bounce around a room seen from outside
-  (the near walls are see-through, since only the insides of the walls are drawn). The panel on the
-  left sets the number of balls, their size, the room's size and their speed, and switches
-  collisions, gravity, blob shadows, a lamp (a point light and a glowing bulb) and the camera's
-  orbit. Drag the sliders, click the toggles, use their keys (shown in the panel), or Tab through
-  them. Click a ball to make it glow (picking). Balls small on screen use meshes with fewer
-  triangles, so hundreds stay fast. Shows: many objects, point lights, emissive objects, picking,
-  widgets.
+- **dice** (`python3 -m unicode3d`): textured dice that tumble onto a table, casting shadows, and
+  land on a chosen face; g makes them glass, m polishes the table so that it mirrors them.
+- **viewer**: spins an OBJ model, or a die when given none; c makes it chrome, reflecting a sky;
+  `--double-sided` draws back faces for meshes with inconsistent winding.
+- **balls**: up to 500 balls of many colours drift and bounce around a room seen from outside (the
+  near walls are see-through, since only the insides of the walls are drawn). The panel on the left
+  sets the number of balls, their size, the room's size and their speed, and switches collisions,
+  gravity, glass (every third ball see-through), a mirror floor, a lamp (a point light and a glowing
+  bulb) and the camera's orbit; the sun and the lamp both cast shadows, tinted through the glass. Drag the
+  sliders, click the toggles, use their keys (shown in the panel), or Tab through them. Click a ball
+  to make it glow (picking). Balls small on screen use meshes with fewer triangles, so hundreds stay
+  fast. Shows: many objects, shadows, transparency, a mirror, point lights, emissive objects,
+  picking, widgets.
 - **maze**: the camera walks a random maze, keeping a hand on the right-hand wall (or taking the
-  shortest way), from the blue marker to the gold one, spins round at the exit and starts a new
-  maze. The panel sets the size (3 to 40 cells a side), the speed and the fog, and switches the
-  headlamp, the textures (off: flat colours per face) and a map. Space pauses, n starts a new maze.
-  Shows: textures, a point light moving with the camera, fog, per-face colours, parts of the maze out
-  of view skipped whole.
-- **room**: walk around an open courtyard with WASD, turn with Q/E or Left/Right, look up and
-  down with Up/Down. Inside are dice turning on a pedestal, an orrery (a planet and its moon
-  circling a glowing sun, built as a scene graph), a table with coloured cubes on it, a rainbow blob
-  in vertex colours, a lamp, and a sign. The crosshair names whatever it is on; clicking names what
-  you clicked. The panel switches the lamp and the sun, picks the background (a sky, a starry sky
-  box, a gradient or none) and sets the fog. Walking is smooth in terminals that report key
-  releases (see [Input](#input)); elsewhere a tap walks for about half a second. Esc quits.
+  shortest way), from the blue marker to the gold one (glowing see-through gems), spins round at the
+  exit and starts a new maze. The panel sets the size (3 to 40 cells a side), the speed and the fog,
+  and switches the headlamp (a lantern carried beside the camera, casting shadows), the textures
+  (off: flat colours per face), a polished floor that mirrors the maze, and a map. Space pauses, n
+  starts a new maze. Shows: textures, a point light moving with the camera, shadows, transparency, a
+  mirror, fog, per-face colours, parts of the maze out of view skipped whole.
+- **room**: an engine showcase to walk around: an open courtyard, WASD to walk, Q/E or Left/Right to
+  turn, Up/Down to look up and down. Inside are dice turning on a pedestal in a glass case, an
+  orrery (a planet and its moon circling a glowing sun, built as a scene graph), a table with
+  coloured cubes on it, a rainbow blob in vertex colours, a tree whose leaves dapple the ground with
+  light, a trellis the lamp throws across the floor at night, a stained-glass panel casting coloured
+  light, a mirror on the south wall (turn round at the start), a still pool, a chrome ball, a lamp,
+  and a sign. The crosshair names whatever it is on; clicking names what you clicked. The sun and
+  the lamp cast shadows. The panel switches the lamp and the sun, picks the background (a sky, a
+  starry sky box, a gradient or none) and sets the fog. Walking is smooth in terminals that report
+  key releases (see [Input](#input)); elsewhere a tap walks for about half a second. Esc quits.
 
 ### How it draws
 
@@ -96,8 +103,19 @@ achieved/target), and each can be clicked too. A small font and a large terminal
   lights add up: directional ones (like the sun) and point lights (lamps, torches) that fade out
   with distance, each in its own colour, and objects can glow by themselves. Light levels are
   perceived brightness, so a level of 0.5 looks half as bright.
+- **Shadows:** lights can cast shadows, from shadow maps (the scene's depth as seen from the light;
+  six of them, a cube, all round a point light) with edges softened by percentage-closer filtering,
+  over at least a pixel on screen so they look as smooth as the edges of shapes.
 - **Colour:** one colour per object, or colours per face or per vertex (blended smoothly across
   each face) in the mesh itself, and textures on top.
+- **Transparency:** see-through objects (glass, water, ghosts), and see-through parts of meshes or
+  textures, blend in depth order whatever order they are listed in, up to 4 layers deep in each
+  pixel. They show their far side through their near one, keep their highlights, grow more opaque
+  at a slant as glass does, and cast shadows tinted by their colour. Textures with holes (leaves,
+  fences) are cut out with smooth edges, and cast shadows with holes in them.
+- **Reflections:** flat objects can be mirrors (a wall mirror, a polished floor, still water),
+  showing the scene reflected in them, lit and shadowed like the rest, mirrors in mirrors included if
+  asked for. Curved shiny objects (chrome, lacquer) reflect the sky or background.
 - **Antialiasing:** 4 samples per pixel in a rotated-grid pattern, so near-vertical and
   near-horizontal edges get four coverage steps instead of two. Pixels whose samples disagree
   (silhouettes, creases, overlaps) get 8 more. Each pixel is shaded once per triangle, as GPUs do with
@@ -133,14 +151,14 @@ does with `examples/dice.py`.
 | `mesh.py`       | `Mesh` with vertex normals, per-vertex or per-face colours, bounding sphere and cached mipmaps, OBJ loader, textured `make_box` |
 | `texture.py`    | mipmap chains and trilinear sampling |
 | `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), projection of all objects at once with view culling and near-plane clipping, multi-sample z-buffered rasterizer |
-| `scene.py`      | `Camera`, `Light`, `PointLight`, `Node`, `Object3D`, `Renderer` (transform, cull, lighting, multisampling with extra edge samples, fog, outlines, picking) |
+| `scene.py`      | `Camera`, `Light`, `PointLight`, `Node`, `Object3D`, `Renderer` (transform, cull, lighting, shadow maps, transparency, mirrors, multisampling with extra edge samples, fog, outlines, picking) |
 | `background.py` | what is drawn behind the scene: `Gradient`, `Sky`, `SkyBox` |
 | `color.py`      | sRGB/linear conversion, named `Color`s, OKLab palette matching, dithering, SGR colour codes |
 | `glyphs.py`     | glyph sets (half, quad, sextant, ascii) and matching pixels to cells |
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
 | `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
 | `terminal.py`   | `Screen` (cell grid, text, frames, diffed output, held keys), `run`, command-line display flags |
-| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate on F2/F3/F4) |
+| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections on F2-F6) |
 | `shapes.py`     | mesh builders: `text_mesh` (extruded text in any bitmap font), `bitmap_mesh`, `blob_mesh` (ellipsoid), `block_mesh`, `pillow_mesh` (a 2D shape puffed into a cushion), `merge_meshes` |
 | `examples/dice.py`   | pip-textured die, `orientation_showing`, `top_face`, `RollAnimation` (result chosen first, then animated to land on it); Zombie Dice builds its dice on it |
 | `examples/hud.py`    | the status line the demos share: help text and `DisplayControls` |
@@ -211,6 +229,13 @@ drawn as a box), so sextants are picked by terminal, never by guessing at fonts.
 | `outline` | `0.55` | how much the far side of a depth edge is darkened |
 | `lod_bias` | `-0.5` | added to texture mip levels: lower is sharper, higher is softer |
 | `background` | `None` | drawn behind the scene (see [Backgrounds](#backgrounds)); `None` leaves it empty, so the screen's background shows |
+| `shadow_size` | `1024` | texels across the shadow map of each `Light` (see [Shadows](#shadows)) |
+| `point_shadow_size` | `256` | texels across each of the six faces of a `PointLight`'s shadow map |
+| `shadow_softness` | `1.5` | how far shadow edges are blurred, in shadow-map texels either way |
+| `shadows` | `True` | `False` draws no shadows whatever the lights say (a graphics setting) |
+| `transparency_layers` | `4` | see-through surfaces each pixel can show in front of the solid ones (see [Transparency](#transparency)) |
+| `reflections` | `True` | `False` draws no reflections whatever the objects' reflectivity (see [Reflections](#reflections)) |
+| `mirror_bounces` | `1` | how deep mirrors show each other, at most 4 |
 
 `render(objects, camera, lights)` takes one light or a list of them. It returns the renderer's own
 `FrameBuffer`, which the next render reuses; `copy()` it to cache a frame. `fb.ids` tells you which
@@ -281,7 +306,7 @@ their colours or giving each part the colour listed for it.
 can carry its own colours: `mesh.face_colors` (one per face) or `mesh.vertex_colors` (one per
 vertex, blended smoothly across each face, in linear light). Like textures, they multiply the
 object's colour, so give the object `color=(255, 255, 255)` to show them as they are; the default
-colour is a light grey.
+colour is a light grey. A fourth column is opacity (see [Transparency](#transparency)).
 
 ```python
 terrain = Mesh(vertices, faces)
@@ -292,10 +317,10 @@ terrain.vertex_colors = np.where(vertices[:, 1:2] > 2.0, (240, 240, 250), (60, 1
 
 Pass `render()` a list of lights and their light adds up.
 
-- `Light(direction, ambient=0.3, diffuse=0.7, specular=0.35, shininess=24, color=(255, 255, 255))`
-  is light from far away, the same everywhere (the sun).
+- `Light(direction, ambient=0.3, diffuse=0.7, specular=0.35, shininess=24, color=(255, 255, 255),
+  shadows=False)` is light from far away, the same everywhere (the sun). See [Shadows](#shadows).
 - `PointLight(position, color=(255, 255, 255), diffuse=0.8, specular=0.35, shininess=24,
-  range=10, ambient=0)` spreads from a point and fades smoothly to nothing at `range`.
+  range=10, ambient=0, shadows=False)` spreads from a point and fades smoothly to nothing at `range`.
 - `Object3D.emissive` is light a surface gives off itself: `1.0` shows its colour at full brightness
   whatever the lighting (a lamp's bulb, a screen, a glowing marker). It lights nothing else; put a
   `PointLight` beside it for that.
@@ -308,6 +333,110 @@ point lights cost nothing where they are out of range.
 ```python
 lights = [Light(ambient=0.15, diffuse=0.3), PointLight(np.array([0.0, 2.5, 0.0]), color=(255, 200, 140), range=8)]
 bulb = Object3D(blob_mesh((0.15, 0.15, 0.15)), np.array([0.0, 2.5, 0.0]), color=(255, 230, 180), emissive=1.0)
+```
+
+#### Shadows
+
+`shadows=True` on a `Light` or a `PointLight` makes objects block that light from whatever lies
+behind them, where only its `ambient` light still reaches. Every object casts shadows unless it
+has `cast_shadows=False`: use that for a lamp's own bulb (which would otherwise shadow
+everything from the light inside it), or for a room with a ceiling, which would keep the sun
+out. Surfaces facing away from the light are in their own shadow.
+
+Each shadowed light draws the scene once more, as seen from the light, into a shadow map. A
+`Light`'s is `shadow_size` x `shadow_size` texels and covers every object (larger is sharper and
+slower; spread over a big scene, texels get coarser). A `PointLight`'s is a cube of six
+`point_shadow_size` x `point_shadow_size` faces looking every way from it, holding whatever is in
+its range. A map is only redrawn when an object or its light moves, so walking the camera around
+a still scene costs little. At 180x50 cells, a shadowed light adds about 1.1-1.3 ms to a frame
+when something moves (a sun or a lamp alike) and about 0.4-0.6 ms when nothing but the camera does.
+`shadow_softness` blurs edges further; they are always smoothed over at least a pixel on screen.
+`renderer.shadows = False` switches all shadows off, as F5 does in the demos
+(`DisplayControls(renderer=...)`).
+
+```python
+sun = Light(direction=np.array([0.5, -1.0, -0.3]), shadows=True)
+room = Object3D(room_mesh, cast_shadows=False)  # lets the sun in; what is inside still casts shadows
+lamp = PointLight(np.array([0.0, 2.5, 0.0]), range=8, shadows=True)
+bulb = Object3D(blob_mesh((0.15, 0.15, 0.15)), lamp.position, emissive=1.0, cast_shadows=False)
+```
+
+#### Transparency
+
+`Object3D(..., opacity=0.3)` makes an object see-through: 1 (the default) is solid, 0 is not drawn
+at all. A mesh's `vertex_colors` or `face_colors` can also carry opacity, as a fourth column
+(0..1 or 0..255, like the colour, but not gamma-encoded), which multiplies the object's: a pane
+that fades out towards one edge, or a model with some faces clear.
+
+See-through surfaces blend over what is behind them in order of depth, whatever order the render
+list has, including where they cross each other. Each pixel shows up to `transparency_layers`
+(4) of them in front of the solid surface there, the nearest ones if there are more. A see-through
+object always shows its back faces, so the far side of a glass box shows through its near side.
+Highlights stay at full strength however clear the surface is, and surfaces grow more opaque when
+seen at a slant, as glass does; below an opacity of 0.25 both fade too, so that an object faded to
+0 disappears. What a pixel shows first is what `pick()` finds, so a click on a window picks the
+window.
+
+With shadows, light through a see-through object is dimmed and tinted by it: through clear glass
+nearly all of it gets through, through red glass red light does, and through nearly solid glass
+little does.
+
+Textures can carry opacity too, as a fourth channel: `(H, W, 4)` arrays, alpha 0..1 (0 is a hole).
+What it is for is worked out from the texture:
+
+- **Cut-outs**, mostly solid or clear with at most soft edges between (leaves, a fence, lettering, a
+  window frame): drawn as solid surfaces with holes, each sample of a pixel testing the texture, so
+  the edges of the holes are smoothed like the edges of shapes, and far away, where a texel is
+  smaller than a pixel, the holes thin out gradually rather than flickering. They cost no
+  transparency layers, and cast shadows with holes in them.
+- **Translucent textures**, where more than a tenth is partly see-through (stained glass): drawn with
+  the see-through surfaces, the texture's alpha multiplying the object's, and casting light tinted
+  pane by pane.
+
+Shrunk (mipmapped), a texture's colour is averaged over what is there, not over its holes, so the
+edge of a leaf stays green rather than darkening. Anything with holes or see-through parts shows
+its far side through them.
+
+Scenes without see-through objects cost nothing extra. Otherwise the cost grows with the screen area
+that see-through surfaces cover: three glass dice, covering about an eighth of a 180x50 view, add
+about 2 ms.
+
+```python
+glass = Object3D(make_box(), color=(200, 225, 255), opacity=0.15)  # a faintly blue glass case
+pane.mesh.vertex_colors = [(255, 255, 255, 255), (255, 255, 255, 0), ...]  # solid on one side, clear on the other
+```
+
+#### Reflections
+
+`Object3D(..., reflectivity=0.8)` makes an object reflect, from 0 (not at all, the default) to 1 (a
+perfect mirror). What it reflects depends on its shape:
+
+- **Flat meshes** (all faces on one plane: a wall mirror, a polished floor or table top, still
+  water) are mirrors. The renderer draws the scene again from the camera reflected in the mirror's
+  plane, into just the pixels the mirror covers, and blends it in by the reflectivity: everything in
+  front of the mirror, lit, shadowed, see-through and cut out as usual, with the background beyond.
+  Only solid objects are mirrors; a flat see-through one reflects the background, like a curved one.
+- **Curved meshes** (chrome, polished metal, lacquer) reflect the background (the sky, sky box,
+  gradient or colour) in the direction each point reflects the view, but not other objects.
+- **See-through surfaces** reflect the background at a slant anyway, as glass and water do, whatever
+  their reflectivity: the extra opacity they gain seen edge-on shows the sky.
+
+`mirror_bounces` sets how deep mirrors show each other. With 1 (the default), a mirror seen in a
+mirror shows the background reflected in it rather than the scene: enough unless strong mirrors face
+each other. Up to 4 draws deeper images, each an extra pass, but stops early where an image covers
+fewer than 50 pixels or its reflectivities multiply to less than 5%, so even an infinity mirror
+costs only a few passes. `renderer.reflections = False` switches all reflections off, as F6 does
+in the demos.
+
+Each mirror on screen costs a pass: about 1.5–2 ms at 180x50 cells, plus the drawing of the pixels
+it covers (a floor mirror under three dice adds about 3 ms in all). Curved shiny objects cost
+almost nothing extra. A mirror off screen, or hidden, costs nothing.
+
+```python
+mirror = Object3D(flat_mesh, reflectivity=0.9)       # flat: shows the scene
+pool = Object3D(water_mesh, color=(40, 70, 80), reflectivity=0.6)
+chrome = Object3D(blob_mesh((1, 1, 1), rings=24, segments=32), reflectivity=0.85)  # curved: the sky
+renderer = Renderer(80, 24, background=Sky(), mirror_bounces=2)
 ```
 
 #### Backgrounds
@@ -384,7 +513,8 @@ didn't use, so the rest of the program sees only those. Each widget calls `on_ch
 the user changes it, or you can read `widget.value` every frame.
 
 `DisplayControls()` is the display settings panel from Zombie Dice: glyphs on F2, colours on F3 and
-the frame rate (achieved/target) on F4, each also clickable. Draw it every frame; its `width` stays
+the frame rate (achieved/target) on F4, each also clickable; `DisplayControls(renderer=renderer)`
+adds shadows on F5 and reflections on F6. Draw it every frame; its `width` stays
 fixed as the values change.
 
 ```python
@@ -409,17 +539,19 @@ run(frame, mouse="drag")
 #### Performance
 
 Rendering a frame and building its screen update takes about 1.5 ms for a
-60x15-cell view of three rolling dice, and about 3 ms for a 150x45 view in `sextant` mode (2.4 ms in
-`quad`, 2 ms in `half`). Cost grows with the pixel count and, more slowly, the triangle count: a
-27,000-triangle sphere filling a 180x50 view takes about 5 ms, and 400 separate balls about 15 ms. A scene that hasn't changed since the
-last `render()` (same objects, poses, camera, lights, background and size) isn't drawn again, so still frames
-cost almost nothing; after editing a mesh's arrays in place, call `renderer.invalidate()`. The
-terminal showing the frame usually takes longer than drawing it. `python benchmarks/bench.py`
-times each stage of a frame.
+60x15-cell view of three rolling dice, and about 3.5 ms for a 180x50 view in `sextant` mode. Cost
+grows with the pixel count and, more slowly, the triangle count: a 27,000-triangle sphere filling a
+180x50 view takes about 5 ms, and 400 separate balls about 15 ms. Shadows, see-through surfaces and
+mirrors cost more where they are used (see [Shadows](#shadows), [Transparency](#transparency) and
+[Reflections](#reflections)); the room demo, with all of them, draws a frame in about 12 ms. A
+scene that hasn't changed since the last `render()` (same objects, poses, camera, lights,
+background and size) isn't drawn again, so still frames cost almost nothing; after editing a mesh's
+arrays in place, call `renderer.invalidate()`. The terminal showing the frame usually takes longer
+than drawing it. `python benchmarks/bench.py` times each stage of a frame.
 
 #### First run
 
-Numba compiles the renderer the first time it is used, which takes about 10 seconds;
+Numba compiles the renderer the first time it is used, which takes about 30 seconds;
 the result is cached (in `__pycache__` beside the code, or a user cache folder if that can't be
 written), so later runs start in a fraction of a second. Upgrading unicode3d or Numba, or moving to
 another CPU, compiles it again. `run()` compiles before the first frame and shows "First run

@@ -5,7 +5,8 @@
 Balls of many colours drift around a room seen from outside (the walls nearest
 the camera are see-through, since only their insides are drawn). The panel on
 the left sets how many balls there are, their size, the room's size and their
-speed, and switches collisions, gravity, shadows, the lamp and the camera's orbit.
+speed, and switches collisions, gravity, glass balls, a mirror floor, the lamp and the camera's orbit
+(F5 switches shadows, F6 reflections).
 Click a ball to make it glow. Tab moves through the panel; arrows then change
 the focused setting, otherwise they turn the camera.
 """
@@ -24,9 +25,9 @@ from ..shapes import blob_mesh
 from ..terminal import add_display_args, display_options, run
 from ..ui import Panel, Slider, Toggle
 
+GLASS_OPACITY = 0.3  # of the glass balls
 MAX_BALLS = 500   # about 15 ms a frame at 180x50 cells on a 6-core machine: room to push, not to freeze
 BASE_SPEED = 1.5  # units a second at speed 1
-FLOOR_SHADE = (70, 60, 50)  # a shadow's colour: the floor's, darkened
 
 
 def grid_texture(res, base, line, cells=8):
@@ -39,13 +40,16 @@ def grid_texture(res, base, line, cells=8):
 
 
 def room_mesh():
-    """A unit box with its faces turned inwards, tiled: walls, a floor, a ceiling."""
+    """A unit box with its faces turned inwards, tiled: (walls and a ceiling, the floor), the floor apart so
+    that it is flat, and can be a mirror."""
     wall = grid_texture(64, (0.75, 0.8, 0.9), (0.45, 0.5, 0.65))
     floor = grid_texture(64, (0.85, 0.72, 0.55), (0.55, 0.42, 0.3))
     ceiling = grid_texture(64, (0.9, 0.9, 0.88), (0.7, 0.7, 0.68), cells=4)
     box = make_box(1.0, [wall, wall, ceiling, floor, wall, wall])
     # Reversed winding faces each side inwards; its corners' uvs go with it.
-    return Mesh(box.vertices, box.faces[:, ::-1].copy(), box.uvs[:, ::-1].copy(), box.materials, box.textures)
+    floor = box.materials == 3
+    return tuple(Mesh(box.vertices, box.faces[keep][:, ::-1].copy(), box.uvs[keep][:, ::-1].copy(), box.materials[keep],
+                      box.textures) for keep in (~floor, floor))
 
 
 @njit(cache=True)
@@ -82,14 +86,6 @@ def collide(pos, vel, radii):
             pos[j, 2] -= push * nz
 
 
-def disc_mesh(segments=16):
-    """A flat unit disc facing up (+y), for blob shadows."""
-    angles = np.linspace(0, 2 * np.pi, segments, endpoint=False)
-    verts = np.r_[[(0.0, 0.0, 0.0)], np.c_[np.cos(angles), np.zeros(segments), np.sin(angles)]]
-    faces = np.array([(0, 1 + (i + 1) % segments, 1 + i) for i in range(segments)])
-    return Mesh(verts, faces)
-
-
 class Balls:
     def __init__(self, count, seed=None):
         self.rng = np.random.default_rng(seed)
@@ -97,26 +93,30 @@ class Balls:
         self.lods = [(4.0, blob_mesh((1.0, 1.0, 1.0), rings=6, segments=8)),
                      (10.0, blob_mesh((1.0, 1.0, 1.0), rings=8, segments=12)),
                      (np.inf, blob_mesh((1.0, 1.0, 1.0), rings=12, segments=16))]
-        self.shadow_mesh = disc_mesh()
-        self.room = Object3D(room_mesh(), color=(255, 255, 255))
-        self.bulb = Object3D(blob_mesh((1.0, 1.0, 1.0), rings=8, segments=12), color=(255, 235, 190), emissive=1.0)
+        # The room has a ceiling, which would put all of it in shadow; only the balls cast shadows.
+        walls, floor = room_mesh()
+        self.room = Object3D(walls, color=(255, 255, 255), cast_shadows=False)
+        self.floor = Object3D(floor, color=(255, 255, 255), cast_shadows=False)
+        self.bulb = Object3D(blob_mesh((1.0, 1.0, 1.0), rings=8, segments=12), color=(255, 235, 190), emissive=1.0,
+                             cast_shadows=False)
         self.renderer = Renderer(1, 1, background=Gradient((22, 26, 40), (4, 4, 8)))
-        self.bar = StatusBar()
+        self.bar = StatusBar(self.renderer)
         self.count = Slider("Balls", count, 1, MAX_BALLS, keys="[]", length=14)
         self.size = Slider("Size ", 0.4, 0.1, 1.5, step=0.05, keys="-=", length=14, fmt=lambda v: f"{v:.2f}")
         self.room_size = Slider("Room ", 10.0, 3.0, 30.0, step=0.5, keys=",.", length=14, fmt=lambda v: f"{v:.1f}")
         self.speed = Slider("Speed", 1.0, 0.0, 3.0, step=0.1, keys=";'", length=14, fmt=lambda v: f"{v:.1f}")
         self.collide = Toggle("Collisions (c)", True, key="c")
         self.gravity = Toggle("Gravity (g)", False, key="g")
-        self.shadows = Toggle("Shadows (h)", True, key="h")
+        self.mirror = Toggle("Mirror floor (m)", False, key="m")
+        self.glass = Toggle("Glass (x)", False, key="x")
         self.lamp = Toggle("Lamp (l)", True, key="l")
         self.orbit = Toggle("Orbit (o)", True, key="o")
         self.panel = Panel([self.count, self.size, self.room_size, self.speed, self.collide, self.gravity,
-                            self.shadows, self.lamp, self.orbit], vertical=True)
+                            self.glass, self.mirror, self.lamp, self.orbit], vertical=True)
         self.pos = np.zeros((0, 3))
         self.vel = np.zeros((0, 3))
         self.radius_factor = np.zeros(0)
-        self.balls, self.shadows_objs = [], []
+        self.balls = []
         self.yaw, self.pitch, self.paused = 0.6, 0.45, False
 
     # ----- the balls ---------------------------------------------------------------------
@@ -125,7 +125,7 @@ class Balls:
         """Add or remove balls to match the slider; new ones start at random places, heading anywhere."""
         n, have = self.count.value, len(self.balls)
         if n < have:
-            del self.balls[n:], self.shadows_objs[n:]
+            del self.balls[n:]
             self.pos, self.vel, self.radius_factor = self.pos[:n], self.vel[:n], self.radius_factor[:n]
         elif n > have:
             k = n - have
@@ -138,7 +138,6 @@ class Balls:
             for _ in range(k):
                 r, g, b = colorsys.hsv_to_rgb(self.rng.uniform(), self.rng.uniform(0.55, 0.95), self.rng.uniform(0.75, 1.0))
                 self.balls.append(Object3D(self.lods[-1][1], color=(r, g, b)))
-                self.shadows_objs.append(Object3D(self.shadow_mesh, color=FLOOR_SHADE))
 
     def step(self, dt):
         radii = self.size.value * self.radius_factor
@@ -187,21 +186,19 @@ class Balls:
         # Place everything.
         s = self.room_size.value
         half = s / 2
-        self.room.scale = s
+        self.room.scale = self.floor.scale = s
+        self.floor.reflectivity = 0.55 if self.mirror.value else 0.0
         radii = self.size.value * self.radius_factor
-        for ball, shadow, p, r in zip(self.balls, self.shadows_objs, self.pos, radii):
+        for i, (ball, p, r) in enumerate(zip(self.balls, self.pos, radii)):
             ball.position, ball.scale = p, r
-            height = (p[1] + half - r) / max(s - 2 * r, 1e-6)  # 0 on the floor, 1 at the ceiling
-            shadow.position = np.array([p[0], -half + 0.01 * s, p[2]])
-            shadow.scale = r * (1.0 - 0.5 * height)
-        lights = [Light(direction=np.array([0.4, -1.0, -0.3]), ambient=0.25, diffuse=0.45 if self.lamp.value else 0.7)]
-        objects = [self.room, *self.balls]
-        if self.shadows.value:
-            objects += self.shadows_objs
+            ball.opacity = GLASS_OPACITY if self.glass.value and i % 3 == 0 else 1.0  # every third one glass
+        lights = [Light(direction=np.array([0.4, -1.0, -0.3]), ambient=0.25, diffuse=0.45 if self.lamp.value else 0.7,
+                        shadows=True)]
+        objects = [self.room, self.floor, *self.balls]
         if self.lamp.value:
             lamp_at = np.array([0.0, half * 0.8, 0.0])
             self.bulb.position, self.bulb.scale = lamp_at, 0.04 * s
-            lights.append(PointLight(lamp_at, color=(255, 225, 170), diffuse=0.9, range=1.6 * s))
+            lights.append(PointLight(lamp_at, color=(255, 225, 170), diffuse=0.9, range=1.6 * s, shadows=True))
             objects.append(self.bulb)
 
         distance = s * 1.9 + 2
