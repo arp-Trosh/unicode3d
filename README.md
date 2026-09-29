@@ -15,14 +15,15 @@ Python 3.10 or later. In a game, pin a released version (a git tag) in `requirem
 unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.4.0
 ```
 
-To work on the engine and a game together, install your local copy in the game's virtual
-environment in editable mode, so the game always runs your latest engine code:
+To work on the engine and a game together, install your local copy of the engine in the game's
+virtual environment in editable mode, so the game always runs your latest engine code. Here the
+game is in `~/your-game` and the engine in `~/unicode3d`; use your own paths:
 
 ```sh
-cd ../your-game                                  # a checkout next to unicode3d
+cd ~/your-game
 python -m venv .venv && . .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-pip install -e ../unicode3d                      # replaces the pinned copy with your working tree
+pip install -e ~/unicode3d                       # replaces the pinned copy with your working tree
 ```
 
 ## Display options
