@@ -12,7 +12,7 @@ Used by [Zombie Dice](https://github.com/arp-Trosh/zombieDice).
 Python 3.10 or later. In a game, pin a released version (a git tag) in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.3.1
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.4.0
 ```
 
 To work on the engine and a game together, install your local copy in the game's virtual
@@ -575,7 +575,7 @@ Terminal is recommended, and gets sextants by default; the classic console works
 Releases are git tags (`v0.1.0`, ...) following [semantic versioning](https://semver.org): a patch
 release (`0.1.1`) fixes bugs, a minor release (`0.2.0`) adds features, and before 1.0 a minor release
 may also change the API. `unicode3d.__version__` holds the version. To release: bump
-`__version__` in `unicode3d/__init__.py`, commit, then `git tag v0.3.1 && git push --tags`.
+`__version__` in `unicode3d/__init__.py`, commit, then `git tag v0.4.0 && git push --tags`.
 
 ## License
 
