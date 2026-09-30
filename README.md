@@ -41,7 +41,7 @@ Python 3.10 or later; numpy and Numba come with it. In a game, pin a released ve
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.4.1
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.5.0
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
@@ -769,7 +769,7 @@ built but not written to a terminal) on this machine:
 CPU:      AMD Ryzen 5 5600X 6-Core Processor (12 logical cores)
 Threads:  12 (Numba's tbb threading layer)
 System:   Linux 7.2.7-arch1-1 (x86_64)
-Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.4.1
+Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.5.0
 Frames:   180x50 cells, sextant glyphs, truecolor; median of 40 frames, ms
 
 scene        objects    tris   first          render      draw_frame  render_updates    total    fps  KB out
