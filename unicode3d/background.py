@@ -112,7 +112,7 @@ def background_args(background, camera, aspect, height):
     return (kind, colors, basis, texels, levels, first, lod), (values, refs)
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def sky_colour(kind, colors, faces, texels, levels, first, lod, dx, dy, dz):
     """The background seen looking along unit direction (dx, dy, dz) in the world, linear rgb, for a sky
     or sky box; a plain colour for COLOR; for GRADIENT, the gradient from top (straight up) to bottom
@@ -148,7 +148,7 @@ def sky_colour(kind, colors, faces, texels, levels, first, lod, dx, dy, dz):
     return 0.0, 0.0, 0.0
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def fill_background(rgb, alpha, kind, colors, basis, faces, texels, levels, first, lod):
     """Fill what the scene leaves uncovered (alpha < 1) with the background, in place: each pixel gets
     the background in proportion to how much of it is uncovered, and becomes opaque."""

@@ -237,6 +237,7 @@ drawn as a box), so sextants are picked by terminal, never by guessing at fonts.
 | `transparency_layers` | `4` | see-through surfaces each pixel can show in front of the solid ones (see [Transparency](#transparency)) |
 | `reflections` | `True` | `False` draws no reflections whatever the objects' reflectivity (see [Reflections](#reflections)) |
 | `mirror_bounces` | `1` | how deep mirrors show each other, at most 4 |
+| `max_pixels` | `1920 * 1080` | the most pixels drawn; a bigger view is drawn at a lower resolution and stretched to fit (see [Performance](#performance)); `None` for no limit |
 
 `render(objects, camera, lights)` takes one light or a list of them. It returns the renderer's own
 `FrameBuffer`, which the next render reuses; `copy()` it to cache a frame. `fb.ids` tells you which
@@ -473,6 +474,11 @@ exactly; by default, edges blend toward black over the terminal's own background
 terminal can take), and `screen.fps` is the target frame rate, which `run()` re-reads every frame;
 `screen.measured_fps` is the rate it achieved over the last second.
 
+`run()` notes each run, with the terminal's size and settings, in a crash log
+(`crash_log_path()`: `~/.cache/unicode3d/crash.log`, or `%LOCALAPPDATA%\unicode3d\crash.log` on
+Windows). If the program stops with an error, the traceback goes there as well as to the screen
+(which a tiny font can make unreadable), and a crash of Python itself leaves a stack trace there.
+
 #### Input
 
 **Mouse.** `run(mouse=True)` reports clicks and the wheel as `MouseEvent(x, y, button, pressed,
@@ -549,6 +555,15 @@ scene that hasn't changed since the last `render()` (same objects, poses, camera
 background and size) isn't drawn again, so still frames cost almost nothing; after editing a mesh's
 arrays in place, call `renderer.invalidate()`. The terminal showing the frame usually takes longer
 than drawing it. `python benchmarks/bench.py` times each stage of a frame.
+
+A full-screen terminal with a tiny font can have a million cells or more: kitty at font size 2 on a
+1080p screen is about 960x215 cells, 1920x645 pixels in `sextant` mode. Frames there take longer,
+and the renderer's working memory, a few hundred bytes a pixel, would grow without limit, so
+`Renderer.max_pixels` (about 1080p by default) caps what is drawn: a bigger view is drawn at the
+largest resolution within it and stretched to size, and `renderer.drawn_size` tells what was drawn.
+The screen itself still keeps every cell, at about 700 bytes a cell in all (1.4 GB for 1920x540
+cells). `python -m benchmarks.stress` walks the room demo through sizes up to that, resizing as
+it goes, and draws it from thousands of random cameras, to check that nothing breaks.
 
 #### First run
 

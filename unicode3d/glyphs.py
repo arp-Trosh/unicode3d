@@ -101,7 +101,7 @@ def _masks(p):
     return masks, bits.astype(float)
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _match(rgb, alpha, pw, ph, background, masks, bits, min_alpha, min_gain, mask_out, fg, bg, fg_on, bg_on):
     """match_cells() for a framebuffer's rgb (premultiplied) and alpha, with pw x ph pixels to a cell.
 

@@ -55,7 +55,32 @@ class FrameBuffer:
 ROW_BAND = 4  # rows of pixels each thread rasterizes at a time
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy", parallel=True)
+def upscale(rgb, alpha, depth, ids, out_rgb, out_alpha, out_depth, out_ids):
+    """Stretch a framebuffer's arrays (rgb, alpha, depth, ids) over bigger ones (out_*): colour and coverage
+    bilinearly, depth and ids from the nearest pixel (so that each pixel keeps a surface that is there). Each
+    row of the output is written by its own iteration."""
+    h, w = alpha.shape
+    big_h, big_w = out_alpha.shape
+    for y in prange(big_h):
+        sy = (y + 0.5) * h / big_h - 0.5
+        y0 = min(max(int(np.floor(sy)), 0), h - 1)
+        y1, fy = min(y0 + 1, h - 1), min(max(sy - y0, 0.0), 1.0)
+        near_y = min(int((y + 0.5) * h / big_h), h - 1)
+        for x in range(big_w):
+            sx = (x + 0.5) * w / big_w - 0.5
+            x0 = min(max(int(np.floor(sx)), 0), w - 1)
+            x1, fx = min(x0 + 1, w - 1), min(max(sx - x0, 0.0), 1.0)
+            w00, w01, w10, w11 = (1.0 - fy) * (1.0 - fx), (1.0 - fy) * fx, fy * (1.0 - fx), fy * fx
+            for k in range(3):
+                out_rgb[y, x, k] = (w00 * rgb[y0, x0, k] + w01 * rgb[y0, x1, k] + w10 * rgb[y1, x0, k]
+                                    + w11 * rgb[y1, x1, k])
+            out_alpha[y, x] = w00 * alpha[y0, x0] + w01 * alpha[y0, x1] + w10 * alpha[y1, x0] + w11 * alpha[y1, x1]
+            near_x = min(int((x + 0.5) * w / big_w), w - 1)
+            out_depth[y, x], out_ids[y, x] = depth[near_y, near_x], ids[near_y, near_x]
+
+
+@njit(cache=True, error_model="numpy")
 def _scattered(i, n):
     """Item i of 0..n-1 visited in a scattered order (each once), so that neighbouring items, which often
     have similar amounts of work (bands of rows over one small object), go to different threads."""
@@ -70,7 +95,7 @@ def _scattered(i, n):
     return np.int64(i) * step % n
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _band_range(ys, t, height):
     """The bands of rows triangle t can touch (first, last), with a pixel's slack for sample positions;
     first > last if none."""
@@ -81,7 +106,26 @@ def _band_range(ys, t, height):
     return int(np.floor(max(top, 0.0))) // ROW_BAND, int(np.ceil(min(bottom, height - 1.0))) // ROW_BAND
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
+def pixel_range(lo, hi, first, last):
+    """The whole pixels (a, b) from floor(lo) to ceil(hi), kept within first..last; empty (a > b) where there are
+    none, or lo or hi is NaN. Coordinates are only converted to ints once they are in range: converting NaN, an
+    infinity or anything beyond int64 gives an undefined int, and loops over it write outside the arrays."""
+    if not lo <= hi:
+        return 1, 0
+    a = first if lo <= first else (last + 1 if lo >= last + 1 else int(np.floor(lo)))
+    b = last if hi >= last else (first - 1 if hi <= first - 1 else int(np.ceil(hi)))
+    return a, b
+
+
+@njit(cache=True, error_model="numpy")
+def drawable(area):
+    """Whether a triangle whose signed area (in pixels, or texels) is `area` is worth drawing: not a sliver, and
+    with finite corners (a NaN or infinite corner makes the area NaN or infinite)."""
+    return 1e-9 < abs(area) < np.inf
+
+
+@njit(cache=True, error_model="numpy")
 def _in_span(xs, t, span, b):
     """Whether triangle t reaches columns span[b, 0]..span[b, 1] (the pixels band b is drawn in), with a
     pixel's slack."""
@@ -89,7 +133,7 @@ def _in_span(xs, t, span, b):
             and max(xs[t, 0], xs[t, 1], xs[t, 2]) + 1.0 >= span[b, 0])
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def count_bands(xs, ys, select, want, height, span, band_count):
     """First pass of sorting triangles into bands of rows (see bin_bands): how many triangles each band gets,
     of those whose kind select[t] is among `want` (bit k set for kind k: solid ones, say, or see-through
@@ -121,7 +165,7 @@ def count_bands(xs, ys, select, want, height, span, band_count):
     return per_chunk
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def bin_bands(xs, ys, select, want, height, span, per_chunk, band_start, band_tris):
     """Second pass: the triangles whose kind select[t] is among `want` touching band b, in order, into
     band_tris[band_start[b]:band_start[b + 1]].
@@ -144,7 +188,7 @@ def bin_bands(xs, ys, select, want, height, span, per_chunk, band_start, band_tr
                     cursor[b] += 1
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_start, band_tris, see, attrs, chain, lod,
               texels, levels, first):
     """Depth-test every triangle at every sample position and keep the nearest surface.
@@ -178,16 +222,14 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
             t = band_tris[i]
             x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
             y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
+            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+            if not drawable(area):
+                continue
             # Pixels that any sample position could put inside the triangle.
-            by0 = max(int(np.floor(min(y0, y1, y2) - oymax)), band_y0)
-            by1 = min(int(np.ceil(max(y0, y1, y2) - oymin)), band_y1)
+            by0, by1 = pixel_range(min(y0, y1, y2) - oymax, max(y0, y1, y2) - oymin, band_y0, band_y1)
             if by0 > by1:
                 continue
-            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
-            if abs(area) <= 1e-9:
-                continue
-            bx0 = max(int(np.floor(min(x0, x1, x2) - oxmax)), 0)
-            bx1 = min(int(np.ceil(max(x0, x1, x2) - oxmin)), width - 1)
+            bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
             holes = see[t] == 2
             for py in range(by0, by1 + 1):
@@ -221,7 +263,7 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
 LAYER_MERGE = 0.02  # fragments of one object this close in depth (relative) are one surface: one layer
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def bit_count(mask):
     """How many bits of mask are set."""
     n = 0
@@ -231,7 +273,7 @@ def bit_count(mask):
     return n
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, band_start, band_tris, layer_depth,
                      layer_tri, layer_cover, layer_count):
     """The see-through surfaces in front of the solid ones: for each pixel, the K nearest (K =
@@ -261,15 +303,13 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
             t = band_tris[i]
             x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
             y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
-            by0 = max(int(np.floor(min(y0, y1, y2) - oymax)), band_y0)
-            by1 = min(int(np.ceil(max(y0, y1, y2) - oymin)), band_y1)
+            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+            if not drawable(area):
+                continue
+            by0, by1 = pixel_range(min(y0, y1, y2) - oymax, max(y0, y1, y2) - oymin, band_y0, band_y1)
             if by0 > by1:
                 continue
-            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
-            if abs(area) <= 1e-9:
-                continue
-            bx0 = max(int(np.floor(min(x0, x1, x2) - oxmax)), 0)
-            bx1 = min(int(np.ceil(max(x0, x1, x2) - oxmin)), width - 1)
+            bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
             for py in range(by0, by1 + 1):
                 for px in range(bx0, bx1 + 1):
@@ -325,7 +365,7 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
                     layer_count[c] = min(n + 1, k_max)
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def barycentric(xs, ys, t, cx, cy):
     """Barycentric weights of point (cx, cy) in triangle t, clamped to the triangle.
 
@@ -349,7 +389,7 @@ def barycentric(xs, ys, t, cx, cy):
 ATTRS = 12  # per-corner attributes of a screen triangle: world xyz | normal xyz | uv | linear rgb | alpha
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
     """Store triangle `corners` (3, 4 + ATTRS: clip xyzw | attributes) as screen triangle k."""
     for j in range(3):
@@ -360,7 +400,7 @@ def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
         attrs[k, j, :] = corners[j, 4:]
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _outside_view(view_proj, cx, cy, cz, radius, near):
     """Whether a sphere lies wholly outside the view: beyond the left, right, top or bottom edge, or
     behind the near plane w = near."""
@@ -379,7 +419,7 @@ def _outside_view(view_proj, cx, cy, cz, radius, near):
     return False
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _rotation(q, rot):
     """Rotation matrix of unit quaternion q (w, x, y, z), into rot (3, 3)."""
     qw, qx, qy, qz = q[0], q[1], q[2], q[3]
@@ -388,7 +428,7 @@ def _rotation(q, rot):
     rot[2, 0], rot[2, 1], rot[2, 2] = 2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _face_ahead(world, faces, f, v0, near):
     """How many corners of face f are in front of the near plane."""
     ahead = 0
@@ -397,7 +437,7 @@ def _face_ahead(world, faces, f, v0, near):
     return ahead
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _facing(world, faces, f, v0, eye):
     """Whether face f (world positions in `world`) faces the eye."""
     a, b, c = world[v0 + faces[f, 0]], world[v0 + faces[f, 1]], world[v0 + faces[f, 2]]
@@ -410,13 +450,13 @@ def _facing(world, faces, f, v0, eye):
 NO_CLIP = np.array([0.0, 0.0, 0.0, 1.0])  # a clipping plane (a, b, c, d: keeps a x + b y + c z + d > 0) keeping all
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _plane_distance(world, v, clip):
     """How far in front of clipping plane `clip` vertex v of `world` is (positive: kept)."""
     return clip[0] * world[v, 0] + clip[1] * world[v, 1] + clip[2] * world[v, 2] + clip[3]
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _near_clip_distances(w0, w1, w2, d0, d1, d2, near, out):
     """Clip a triangle whose corners have clip-space w (w0, w1, w2) and plane distances (d0, d1, d2)
     against the near plane w = near, into out (4,): the plane distances of the polygon left, which it
@@ -435,7 +475,7 @@ def _near_clip_distances(w0, w1, w2, d0, d1, d2, near, out):
     return n
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _plane_clipped_length(ds, n):
     """How many corners a polygon of n corners with plane distances ds keeps, clipped against the plane."""
     m = 0
@@ -449,7 +489,7 @@ FACE_CHUNK = 512     # faces projected as one piece of parallel work
 VERTEX_CHUNK = 1024  # vertices transformed as one piece
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, inst_quat, inst_scale, inst_pos,
               inst_double, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, chunk_inst,
               chunk_first, chunk_end, world, visible, whole, cut, off_whole, off_cut):
@@ -530,7 +570,7 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
     return k
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
             inst_double, inst_vertex, eye, near, clip, width, height, lod_bias, world, chunk_inst, chunk_first,
             chunk_end, whole, cut, off_whole, off_cut, xs, ys, inv_w, attrs, tri_inst, chain, lod, see):
@@ -640,7 +680,7 @@ def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex,
 SURFACE = 7  # per corner of a shadow map's triangle: linear rgb | alpha | u / w, v / w, 1 / w (for its texture)
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _emit_depth(corners, k, width, height, perspective, xs, ys, depth, surf):
     """Store triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) as screen triangle k of a shadow map
     (see project_depth)."""
@@ -653,7 +693,7 @@ def _emit_depth(corners, k, width, height, perspective, xs, ys, depth, surf):
         surf[k, j, 4], surf[k, j, 5], surf[k, j, 6] = corners[j, 8] * iw, corners[j, 9] * iw, iw
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, out):
     """Corner j of face f of instance inst as a shadow map needs it: linear rgb into out[4:7], alpha into
     out[7] and uv into out[8:10]."""
@@ -663,7 +703,7 @@ def _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, out):
     out[8], out[9] = uvs[f, j, 0], uvs[f, j, 1]
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _face_kind(colors, inst_alpha, face_kind, inst, f):
     """Kind of face f of instance inst, as project() gives triangles: 1 see-through, 2 cut-out, 0 solid."""
     if face_kind[f] == 2 or inst_alpha[inst] < 1.0:
@@ -674,7 +714,7 @@ def _face_kind(colors, inst_alpha, face_kind, inst, f):
     return 2 if face_kind[f] == 1 else 0
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod):
     """Triangle k of a shadow map, from face f: its kind, mipmap chain, and mip level for one texel of the
     map (log2 of how many texture texels span it)."""
@@ -689,7 +729,7 @@ def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, s
     lod[k] = 0.5 * np.log2(max(abs(d1u * d2v - d1v * d2u) * face_texels[f] / max(px_area, 1e-9), 1e-9))
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _clip_near(corners, near, poly):
     """The part of triangle `corners` (3, N: clip xyzw | attributes) in front of the near plane w = near,
     into poly (4, N); returns its number of corners (0, 3 or 4)."""
@@ -705,7 +745,7 @@ def _clip_near(corners, near, poly):
     return n_poly
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
                   inst_vertex, world, width, height, near, perspective, chunk_inst, chunk_first, chunk_end, whole, cut,
                   off_whole, off_cut, xs, ys, depth, surf, see, chain, lod):
@@ -752,7 +792,7 @@ def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_v
                 k_cut += 1
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _cube_face_corners(world, faces, f, base, mat, near, corners):
     """Face f's corners in the clip space of one face of a cube map (`mat`), into corners[:, 0:4], and how
     many of them are in front of its near plane: 0 if none, or if all lie beyond one of its sides."""
@@ -770,7 +810,7 @@ def _cube_face_corners(world, faces, f, base, mat, near, corners):
     return 0 if right == 3 or left == 3 or top == 3 or bottom == 3 else ahead
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def count_cube(faces, mesh_vertex, inst_mesh, inst_vertex, world, mats, near, chunk_inst, chunk_first, chunk_end,
                counts):
     """First pass of projecting faces into the six faces of a cube shadow map (see project_cube): how many
@@ -787,7 +827,7 @@ def count_cube(faces, mesh_vertex, inst_mesh, inst_vertex, world, mats, near, ch
         counts[c, side] = n
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
                  inst_vertex, world, mats, near, size, chunk_inst, chunk_first, chunk_end, offsets, xs, ys, depth, surf,
                  see, chain, lod, tri_side):
@@ -828,7 +868,7 @@ def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_ve
                 k += 1
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _surface_uv(surf, t, b0, b1, b2):
     """Perspective-correct uv at barycentric weights b of shadow triangle t."""
     w = max(b0 * surf[t, 0, 6] + b1 * surf[t, 1, 6] + b2 * surf[t, 2, 6], 1e-30)
@@ -836,7 +876,7 @@ def _surface_uv(surf, t, b0, b1, b2):
             (b0 * surf[t, 0, 5] + b1 * surf[t, 1, 5] + b2 * surf[t, 2, 5]) / w)
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def rasterize_depth(depth, xs, ys, dep, tri_side, side_rows, band_start, band_tris, see, surf, chain, lod, texels,
                     levels, first):
     """A shadow map: the largest `dep` (nearest the light) of any triangle covering each texel's centre,
@@ -862,10 +902,12 @@ def rasterize_depth(depth, xs, ys, dep, tri_side, side_rows, band_start, band_tr
             x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
             y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
             top = tri_side[t] * side_rows
-            by0 = max(int(np.floor(min(y0, y1, y2) - 0.5)), band_y0, top)
-            by1 = min(int(np.ceil(max(y0, y1, y2) - 0.5)), band_y1, top + side_rows - 1)
             area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
-            if by0 > by1 or abs(area) <= 1e-9:
+            if not drawable(area):
+                continue
+            by0, by1 = pixel_range(min(y0, y1, y2) - 0.5, max(y0, y1, y2) - 0.5, max(band_y0, top),
+                                   min(band_y1, top + side_rows - 1))
+            if by0 > by1:
                 continue
             left = max(np.floor(min(x0, x1, x2) - 0.5), 0.0)
             right = min(np.ceil(max(x0, x1, x2) - 0.5), width - 1.0)
@@ -903,7 +945,7 @@ def rasterize_depth(depth, xs, ys, dep, tri_side, side_rows, band_start, band_tr
                         row[px] = z
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def rasterize_tint(trans, offset, width, height, xs, ys, dep, tri_side, side_rows, band_start, band_tris, surf, chain,
                    lod, texels, levels, first):
     """What see-through triangles do to the light at each texel of a shadow map (height x width texels,
@@ -927,10 +969,12 @@ def rasterize_tint(trans, offset, width, height, xs, ys, dep, tri_side, side_row
             x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
             y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
             top = tri_side[t] * side_rows
-            by0 = max(int(np.floor(min(y0, y1, y2) - 0.5)), band_y0, top)
-            by1 = min(int(np.ceil(max(y0, y1, y2) - 0.5)), band_y1, top + side_rows - 1)
             area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
-            if by0 > by1 or abs(area) <= 1e-9:
+            if not drawable(area):
+                continue
+            by0, by1 = pixel_range(min(y0, y1, y2) - 0.5, max(y0, y1, y2) - 0.5, max(band_y0, top),
+                                   min(band_y1, top + side_rows - 1))
+            if by0 > by1:
                 continue
             left = max(np.floor(min(x0, x1, x2) - 0.5), 0.0)
             right = min(np.ceil(max(x0, x1, x2) - 0.5), width - 1.0)

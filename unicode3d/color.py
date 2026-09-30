@@ -60,10 +60,11 @@ def srgb_to_linear(c):
     return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _encode_srgb(linear, out):
     for i in prange(linear.shape[0]):
-        c = min(max(linear[i], 0.0), 1.0)
+        c = linear[i]
+        c = min(c, 1.0) if c > 0.0 else 0.0  # (NaN as 0)
         out[i] = c * 12.92 if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
 
 
@@ -205,7 +206,7 @@ def sgr_color(packed, background=False):
     return f"{48 if background else 38};5;{index}"
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def put_int(buf, k, value):
     """Write a non-negative int in decimal into byte buffer buf at k; returns the index after it."""
     digits = 1
@@ -217,7 +218,7 @@ def put_int(buf, k, value):
     return k + digits
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def put_sgr_color(buf, k, packed, background):
     """sgr_color(packed, background), written as ASCII into byte buffer buf at k; returns the index after it."""
     if packed < 0:

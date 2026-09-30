@@ -210,7 +210,7 @@ class Balls:
         rows, cols = screen.size()
         self.renderer.resize(cols, max(rows - 1, 1), screen.cell_pixels)
         # Each ball's radius in pixels picks its level of detail.
-        pixels_per_unit = self.renderer.framebuffer.height / (2 * np.tan(np.radians(camera.fov) / 2))
+        pixels_per_unit = self.renderer.drawn_size[1] / (2 * np.tan(np.radians(camera.fov) / 2))
         if len(self.balls):
             on_screen = radii * pixels_per_unit / np.maximum(np.linalg.norm(self.pos - camera.position, axis=1), 1e-6)
             for ball, px in zip(self.balls, on_screen):

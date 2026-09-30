@@ -15,8 +15,13 @@ Both are detected, and can be forced with arguments, the UNICODE3D_GLYPHS and
 UNICODE3D_COLOR environment variables, or the command-line flags that
 add_display_args() adds.
 """
+import faulthandler
+import os
+import platform
+import sys
 import threading
 import time
+import traceback
 import unicodedata
 
 import numpy as np
@@ -31,13 +36,14 @@ from .mesh import Mesh, make_box
 from .scene import Camera, Light, Object3D, PointLight, Renderer
 
 __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
-           "frame_to_text"]
+           "frame_to_text", "crash_log_path"]
 
 BOLD, DIM, REVERSE = 1, 2, 4
 MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
 CELL_BYTES = 64  # the most one cell can take to send: a cursor move, a style with two RGB colours, a character
 COMPILE_MESSAGE = "First run compile, please wait..."
 COMPILE_NOTICE_DELAY = 0.5  # seconds: loading compiled kernels from Numba's cache takes less, compiling them more
+CRASH_LOG_LIMIT = 1 << 20  # bytes: a longer crash log is cut down to its last quarter when run() opens it
 SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[0m\x1b[?2026l"  # synchronized output
 _CLEAR = np.frombuffer(b"\x1b[0m\x1b[2J", np.uint8)
 
@@ -49,7 +55,7 @@ def _printable(ch):
     return "?"
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown_attrs, full, mono, ascii_only, buf):
     """Write the escape sequences that bring the terminal from the shown_* grid to the current one into
     byte buffer buf (CELL_BYTES a cell, plus a little); returns how many bytes were written.
@@ -329,6 +335,8 @@ def compile_kernels():
                                                              reflectivity=0.5)]  # a mirror, and something shiny
     lights = [Light(shadows=True), PointLight(np.array([0.0, 2.0, 2.0]), shadows=True)]  # shadows' kernels too
     screen.draw_frame(renderer.render(objects, Camera(), lights))
+    renderer.max_pixels = 16 * 8  # drawn smaller than the screen needs, and stretched (as in huge terminals)
+    screen.draw_frame(renderer.render(objects, Camera(), lights))
     screen.render_updates()
 
 
@@ -348,6 +356,42 @@ def _compile_with_notice(console):
         timer.join()  # the notice is written in full or not at all; the first frame then clears the screen
 
 
+def crash_log_path(env=None, windows=None):
+    """The file run() records crashes in: unicode3d/crash.log in the user's cache directory (XDG_CACHE_HOME
+    or ~/.cache; LOCALAPPDATA on Windows)."""
+    env = os.environ if env is None else env
+    windows = os.name == "nt" if windows is None else windows
+    base = env.get("LOCALAPPDATA") if windows else env.get("XDG_CACHE_HOME")
+    return os.path.join(base or os.path.join(os.path.expanduser("~"), ".cache"), "unicode3d", "crash.log")
+
+
+def _open_crash_log():
+    """crash_log_path() opened for appending (cut down first if it has grown long), or None if it can't be."""
+    path = crash_log_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > CRASH_LOG_LIMIT:
+            with open(path, "rb") as f:
+                f.seek(-CRASH_LOG_LIMIT // 4, os.SEEK_END)
+                tail = f.read()
+            with open(path, "wb") as f:
+                f.write(tail[tail.find(b"\n") + 1:])
+        return open(path, "a", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _describe(screen):
+    """One line about the program and the screen, for the crash log."""
+    import numba
+    from . import __version__
+    rows, cols = screen.size()
+    return (f"{' '.join(sys.argv) or 'python'}: {cols}x{rows} cells, {screen.mode} glyphs, {screen.color_mode}, "
+            f"{screen.measured_fps or 0:.0f}/{screen.fps} fps; unicode3d {__version__}, "
+            f"Python {platform.python_version()}, numba {numba.__version__}, numpy {np.__version__}, "
+            f"{platform.platform()}")
+
+
 def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
 
@@ -360,25 +404,51 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
     way, exactly where releases are reported and by estimate elsewhere.
     title sets the terminal window's title while the app runs. The terminal is
     restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
+
+    Each run is noted in crash_log_path(), with the terminal's size and settings; if the
+    loop raises, the traceback goes there too (and is raised as usual), and a crash of
+    Python itself leaves a stack trace there (faulthandler), where the screen would lose it.
     """
-    with open_console(mouse=mouse, title=title, key_release=key_release) as console:
-        screen = Screen(console, glyphs=glyphs, color=color, background=background)
-        screen.fps = fps
-        _compile_with_notice(console)
-        last = time.perf_counter()
-        second, frames = last, 0
-        while True:
-            start = time.perf_counter()
-            dt, last = start - last, start
-            if start - second >= 1.0:
-                screen.measured_fps, second, frames = frames / (start - second), start, 0
-            frames += 1
-            screen.poll_size()
-            if frame_fn(screen, dt, screen.keys()) is False:
-                return
-            remaining = 1.0 / screen.fps - (time.perf_counter() - start)
-            if remaining > 0:
-                time.sleep(remaining)
+    log, screen, frame, handler = _open_crash_log(), None, 0, faulthandler.is_enabled()
+    if log is not None:
+        faulthandler.enable(log)
+    try:
+        with open_console(mouse=mouse, title=title, key_release=key_release) as console:
+            screen = Screen(console, glyphs=glyphs, color=color, background=background)
+            screen.fps = fps
+            if log is not None:
+                log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} started {_describe(screen)}\n")
+                log.flush()
+            _compile_with_notice(console)
+            last = time.perf_counter()
+            second, frames = last, 0
+            while True:
+                start = time.perf_counter()
+                dt, last = start - last, start
+                if start - second >= 1.0:
+                    screen.measured_fps, second, frames = frames / (start - second), start, 0
+                frames += 1
+                frame += 1
+                screen.poll_size()
+                if frame_fn(screen, dt, screen.keys()) is False:
+                    return
+                remaining = 1.0 / screen.fps - (time.perf_counter() - start)
+                if remaining > 0:
+                    time.sleep(remaining)
+    except Exception:  # (the terminal is restored by now)
+        if log is not None:
+            where = _describe(screen) if screen is not None else " ".join(sys.argv)
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} crashed in frame {frame}: {where}\n"
+                      f"{traceback.format_exc()}\n")
+            log.flush()
+            print(f"unicode3d: stopped by an error; the details are also in {log.name}", file=sys.stderr)
+        raise
+    finally:
+        if log is not None:
+            faulthandler.disable()
+            if handler:
+                faulthandler.enable()
+            log.close()
 
 
 def add_display_args(parser):

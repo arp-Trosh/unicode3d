@@ -80,14 +80,28 @@ def pack(chains):
             np.array(first, dtype=np.int64))
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
+def clamp_index(v, n):
+    """A whole number v (a float) as an index into n items: v kept within 0..n-1, and 0 for NaN.
+
+    Converting NaN, an infinity or anything beyond the range of int64 to an int gives
+    an undefined result, and an index from one reads or writes outside the array.
+    """
+    if v >= n - 1:
+        return n - 1
+    if v > 0.0:
+        return int(v)
+    return 0
+
+
+@njit(cache=True, error_model="numpy")
 def _bilinear(texels, levels, level, u, v):
     offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
     x = u * w - 0.5
     y = (1.0 - v) * h - 0.5  # texture row 0 is the top (v = 1)
     fx, fy = x - np.floor(x), y - np.floor(y)
-    x0 = min(max(int(np.floor(x)), 0), w - 1)
-    y0 = min(max(int(np.floor(y)), 0), h - 1)
+    x0 = clamp_index(np.floor(x), w)
+    y0 = clamp_index(np.floor(y), h)
     x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
     a, b = texels[offset + y0 * w + x0], texels[offset + y0 * w + x1]
     c, d = texels[offset + y1 * w + x0], texels[offset + y1 * w + x1]
@@ -98,12 +112,15 @@ def _bilinear(texels, levels, level, u, v):
     return r, g, bl, al
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def sample(texels, levels, first, chain, u, v, lod):
     """Trilinear sample of chain `chain` of pack()'s arrays: bilinear on the two mip levels around `lod`,
     blended. Returns (r, g, b, alpha), the colour not premultiplied (as it was painted)."""
     n = first[chain + 1] - first[chain]
-    lod = min(max(lod, 0.0), n - 1.0)
+    if not lod > 0.0:  # (NaN too)
+        lod = 0.0
+    elif lod > n - 1.0:
+        lod = n - 1.0
     lo = int(np.floor(lod))
     frac = lod - lo
     r, g, b, a = _bilinear(texels, levels, first[chain] + lo, u, v)
@@ -117,28 +134,28 @@ def sample(texels, levels, first, chain, u, v, lod):
     return r, g, b, a
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def sample_level(texels, levels, first, chain, u, v, lod):
     """Like sample(), but bilinear on the one mip level nearest `lod`: cheaper, for shadow maps."""
     n = first[chain + 1] - first[chain]
-    r, g, b, a = _bilinear(texels, levels, first[chain] + min(max(int(np.floor(lod + 0.5)), 0), n - 1), u, v)
+    r, g, b, a = _bilinear(texels, levels, first[chain] + clamp_index(np.floor(lod + 0.5), n), u, v)
     if a < 1.0 - 1e-9:
         k = 1.0 / max(a, 1e-9)
         r, g, b = min(r * k, 1.0), min(g * k, 1.0), min(b * k, 1.0)
     return r, g, b, a
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def sample_alpha(texels, levels, first, chain, u, v, lod):
     """Just the alpha of chain `chain` at (u, v), bilinear on the mip level nearest `lod` (for cut-outs)."""
     n = first[chain + 1] - first[chain]
-    level = first[chain] + min(max(int(np.floor(lod + 0.5)), 0), n - 1)
+    level = first[chain] + clamp_index(np.floor(lod + 0.5), n)
     offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
     x = u * w - 0.5
     y = (1.0 - v) * h - 0.5
     fx, fy = x - np.floor(x), y - np.floor(y)
-    x0 = min(max(int(np.floor(x)), 0), w - 1)
-    y0 = min(max(int(np.floor(y)), 0), h - 1)
+    x0 = clamp_index(np.floor(x), w)
+    y0 = clamp_index(np.floor(y), h)
     x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
     return ((texels[offset + y0 * w + x0, 3] * (1 - fx) + texels[offset + y0 * w + x1, 3] * fx) * (1 - fy)
             + (texels[offset + y1 * w + x0, 3] * (1 - fx) + texels[offset + y1 * w + x1, 3] * fx) * fy)

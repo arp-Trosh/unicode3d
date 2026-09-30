@@ -228,6 +228,10 @@ class RenderTests(unittest.TestCase):
                 screen.draw_frame(fb)
                 frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy(), screen.chars.copy(),
                           screen.fg.copy(), screen.bg.copy(), screen.render_updates()]
+            # Drawn smaller than the screen needs (Renderer.max_pixels) and stretched to fit.
+            renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), max_pixels=2000)
+            fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), shadowed)
+            frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
             return frame
 
         try:

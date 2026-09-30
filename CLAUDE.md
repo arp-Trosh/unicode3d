@@ -1,9 +1,10 @@
 # unicode3d: notes for working on the engine
 
 A 3D renderer for the terminal in Python. Numba is a required dependency: per-pixel and per-triangle work is
-written as `@njit(cache=True)` kernels (plain loops over numpy arrays), and Python code only prepares arrays and
-calls them. Keep it that way: new rendering features (shadows, transparency, more lights, materials, ...) go into
-kernels, not into vectorized numpy over large temporary arrays, which is several times slower.
+written as `@njit(cache=True, error_model="numpy")` kernels (plain loops over numpy arrays), and Python code only
+prepares arrays and calls them. Keep it that way: new rendering features (shadows, transparency, more lights,
+materials, ...) go into kernels, not into vectorized numpy over large temporary arrays, which is several times
+slower.
 
 ## The one-writer rule (parallel kernels)
 
@@ -45,9 +46,35 @@ rule by reading them. Add anything a new kernel draws to that test's scenes.
 - **No small allocations in per-pixel loops** (`np.empty` inside the innermost loop costs more than the work).
   Use scalars or scratch space allocated outside the loop.
 
+## Bad numbers must not crash (stability)
+
+A frame can hold NaN or infinities (a mesh or a pose gone wrong, a camera at a degenerate spot, a division by a
+near-zero), and a terminal can be tiny or huge (a full screen at font size 2 is about 960x215 cells). Neither may
+stop the program: frames may be slower or wrong for a moment, never an exception or a crash.
+
+- **Every kernel takes `error_model="numpy"`.** With Numba's default, a float division by zero raises
+  ZeroDivisionError in serial code, and SystemError from a helper called inside a `prange` loop, which ends the
+  program. `test_every_kernel_uses_the_numpy_error_model` checks it.
+- **Floats become indices only once they are in range.** Converting NaN, an infinity or anything beyond int64 to an
+  int gives an undefined value, and Numba doesn't check bounds, so an index or loop bound from one writes outside
+  the array (a segfault, or quietly corrupted memory). Clamp as floats first, with comparisons that are false for
+  NaN (Numba's `max(nan, 0.0)` is NaN): `texture.clamp_index` for an index, `raster.pixel_range` for a span of
+  pixels, and `raster.drawable(area)` to skip triangles with non-finite corners.
+- **`Renderer.render()` runs under `np.errstate(all="ignore")`**, as a warning would be printed over the picture;
+  objects with a non-finite pose are skipped in `_instances`.
+- **Memory is bounded by `Renderer.max_pixels`.** Beyond it the scene is drawn into `Renderer._fb`, a smaller
+  framebuffer, and `raster.upscale` stretches it into `Renderer.framebuffer`. Code that draws uses `self._fb`
+  (its size is what rasterizing, shading and buffers work with); only the result and `pick()` use
+  `self.framebuffer`.
+- `run()` writes a line per run and any traceback (and, through faulthandler, any crash of Python itself) to
+  `terminal.crash_log_path()`. Ask for that file when a user reports a crash.
+
 ## Checking a change
 
-- `python -m unittest` from the repository root. The tests use the public API.
+- `python -m unittest` from the repository root. The tests use the public API. `tests/test_stability.py` covers
+  huge terminals, resizing while running, bad numbers, and a real pseudo-terminal (on Unix).
+- Before a release, `python -m benchmarks.stress` (a few minutes): the room demo walked through sizes from one
+  cell to 1920x540 while resizing, and drawn from thousands of random close-up cameras.
 - `python -m benchmarks.bench` times each stage of a frame; compare it before and after a change. Its `first`
   column includes compiling or loading the kernels.
 - For a change meant to keep the picture the same, compare framebuffers (`rgb`, `alpha`, `depth`, `ids`) and

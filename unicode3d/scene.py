@@ -11,7 +11,7 @@ from .color import to_linear_rgb, to_srgb
 from .mesh import Mesh
 from .raster import (ATTRS, FACE_CHUNK, ROW_BAND, VERTEX_CHUNK, FrameBuffer, barycentric, bin_bands, count_bands,
                      count_cube, project, project_cube, project_depth, rasterize, rasterize_depth, rasterize_layers,
-                     rasterize_tint, transform, bit_count, NO_CLIP, SURFACE)
+                     rasterize_tint, transform, upscale, bit_count, NO_CLIP, SURFACE)
 from .texture import alpha_kind, pack as pack_textures, sample as sample_texture
 from .transforms import look_at, normalize, perspective, quat_identity, quat_mul, quat_to_matrix
 
@@ -190,7 +190,7 @@ def _flat_plane(vertices, faces, radius):
     """The plane (unit normal, d: n . x + d = 0) all of a mesh's faces lie on, to within a millionth of its
     size; NaNs if they don't (it is not flat)."""
     vertices = vertices[np.unique(faces)] if len(faces) else vertices[:0]
-    if len(vertices) < 3:
+    if len(vertices) < 3 or not np.isfinite(vertices).all():  # (a corner at NaN or infinity: no plane)
         return (np.nan,) * 4
     centre = vertices.mean(axis=0)
     _, spread, axes = np.linalg.svd(vertices - centre, full_matrices=False)
@@ -268,6 +268,7 @@ SAMPLE_PATTERNS = {
          (0.375, 0.875), (0.5, 0.0625), (0.25, 0.125), (0.125, 0.75),
          (0.0, 0.5), (0.9375, 0.25), (0.875, 0.9375), (0.0625, 0.0)),
 }
+MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 MAX_BOUNCES = 4          # the deepest Renderer.mirror_bounces goes
 MIRROR_MIN_PIXELS = 50   # a mirror seen in a mirror smaller than this shows no reflection
 MIRROR_MIN_WEIGHT = 0.05  # nor one whose reflection would count for less of the frame's colour than this
@@ -276,7 +277,7 @@ _NO_UVS = np.zeros((1, 3, 2))  # stands in for the uvs of untextured meshes
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _decode(level):
     """A perceived light level (0..1, like an sRGB value) as linear light."""
     return level / 12.92 if level <= 0.04045 else ((level + 0.055) / 1.055) ** 2.4
@@ -291,14 +292,14 @@ _NO_SHADOWS = (np.zeros(0, np.float32), np.zeros((4, 0), np.float32), np.zeros((
                np.zeros((0, SHADOW_COLUMNS)))  # when no light has any
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _lit_texel(texels, offset, size, x, y, d):
     """Whether texel (x, y) of a shadow map (size x size texels from texels[offset]) lets light through to
     depth d: nothing nearer the light is there (outside the map there is nothing to cast a shadow)."""
     return x < 0 or y < 0 or x >= size or y >= size or texels[offset + y * size + x] <= d
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _through(trans, offset, size, x, y, d):
     """The light (rgb) that see-through things let through to depth d at texel (x, y) of a shadow map: what
     trans holds there if the nearest of them is nearer the light than d, else all of it."""
@@ -310,7 +311,7 @@ def _through(trans, offset, size, x, y, d):
     return trans[1, k], trans[2, k], trans[3, k]
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _shadow(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, ndl, footprint):
     """How much of a light reaches point p on a surface with normal n, 0 (in shadow) to 1 (lit), from its
     shadow map `first`, or for a PointLight the face of its cube (maps first to first + 5: +x, -x, +y, -y,
@@ -357,6 +358,8 @@ def _shadow(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, ndl, foo
         d = (1.0 - cz) * 0.5 + bias
     # Texel (x, y) has its centre at u = x, v = y.
     u, v = (cx + 1.0) * 0.5 * size - 0.5, (1.0 - cy) * 0.5 * size - 0.5
+    if not (abs(u) < 1e9 and abs(v) < 1e9):  # far outside the map (or NaN): nothing there casts a shadow
+        return 1.0, 1.0, 1.0, 1.0
     lit = tr = tg = tb = 0.0
     if radius <= 3.0:  # at most 8 x 8 texels
         for y in range(int(np.floor(v - radius + 0.5)), int(np.floor(v + radius + 0.5)) + 1):
@@ -396,7 +399,7 @@ def _shadow(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, ndl, foo
     return lit / total, min(tr / total, 1.0), min(tg / total, 1.0), min(tb / total, 1.0)
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _shade(t, b0, b1, b2, inv_w, attrs, chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans,
            shadow_mats, shadow_params, pixel_size, eye, emissive, out, split, spec_out):
     """Linear RGB, into out (3,), of triangle t at barycentric weights b: Blinn-Phong lighting from
@@ -480,7 +483,7 @@ def _shade(t, b0, b1, b2, inv_w, attrs, chain, lod, texels, levels, first, light
     return a, abs(ne), 2 * ne * nx - ex, 2 * ne * ny - ey, 2 * ne * nz - ez
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, shine, chain, lod, texels,
              levels, first, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size, eye, sky,
              sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, contrast, sample_rgb, spec_rgb, rgb,
@@ -548,7 +551,7 @@ def _resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, 
         more[c] = 0 < covered < n or mixed or max(hr - lr, hg - lg, hb - lb) > contrast
 
 
-@njit(cache=True)
+@njit(cache=True, error_model="numpy")
 def _combine(rgb, alpha, base_rgb, base_cover, n, pixels, extra_rgb, extra_cover, n_extra):
     """Each pixel's colour and coverage (flat framebuffer arrays) from its n base samples, plus the
     n_extra samples taken in `pixels`."""
@@ -564,7 +567,7 @@ def _combine(rgb, alpha, base_rgb, base_cover, n, pixels, extra_rgb, extra_cover
             rgb[c, k] = (base_rgb[c, k] + extra_rgb[j, k]) / total
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, layer_cover, n_samples, width, xs, ys,
            inv_w, attrs, tri_inst, ident, emissive, shine, chain, lod, texels, levels, first, lights, shadow_texels,
            shadow_trans, shadow_mats, shadow_params, pixel_size, eye, sky, sky_colors, sky_faces, sky_texels,
@@ -580,7 +583,7 @@ def _blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, 
     showing the background reflected in it; its highlights show at full strength however clear it
     is, as on glass; both fade out below an alpha of 0.25, so that something faded to nothing
     disappears. sky < 0: reflections are off, and the extra shows the surface's own colour. The
-    nearest layer gives the pixel its depth and id if it shows at all. A layer that is shiny as well
+    nearest layer that shows at all gives the pixel its depth and id. A layer that is shiny as well
     (shine, per instance) takes that much of the reflected background into its own colour. scratch
     (len(pixels), 9) is room for the shading, a row for each.
     """
@@ -589,6 +592,7 @@ def _blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, 
         n = layer_count[c]
         cx, cy = c % width + 0.5, c // width + 0.5
         r, g, b, a = rgb[c, 0], rgb[c, 1], rgb[c, 2], alpha[c]
+        shows = -1  # the nearest layer that shows so far
         for layer in range(n - 1, -1, -1):
             t = layer_tri[c, layer]
             b0, b1, b2 = barycentric(xs, ys, t, cx, cy)
@@ -619,13 +623,15 @@ def _blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, 
             b = b * (1.0 - over) + part * ((opacity - mirrored) * scratch[p, 2] + mirrored * scratch[p, 8]
                                             + gloss * scratch[p, 5])
             a = a * (1.0 - over) + over
+            if over > 0.0:
+                shows = layer
         rgb[c, 0], rgb[c, 1], rgb[c, 2] = min(r, a), min(g, a), min(b, a)
         alpha[c] = a
-        if over > 0.0:  # the nearest layer shows: it is what the pixel shows first
-            depth[c], ids[c] = layer_depth[c, 0], ident[tri_inst[layer_tri[c, 0]]]
+        if shows >= 0:  # what the pixel shows first (a layer faded to nothing in front of it shows nothing)
+            depth[c], ids[c] = layer_depth[c, shows], ident[tri_inst[layer_tri[c, shows]]]
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _mirror_cover(tris, tri_inst, ident, mirror, cover):
     """How many of each pixel's samples (rows of tris: rasterize()'s triangle at each) landed on the object
     whose id is `mirror`, into cover."""
@@ -637,7 +643,7 @@ def _mirror_cover(tris, tri_inst, ident, mirror, cover):
         cover[c] = n
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _gather_pass(pixels, rgb, cover, depth, ids, n_samples, out_rgb, out_alpha, out_depth, out_ids):
     """A pass drawn in only some pixels (rows of rgb, cover, depth, ids, one for each of `pixels`, flat indices)
     into whole-frame arrays: colour premultiplied by coverage, coverage, depth and id."""
@@ -648,7 +654,7 @@ def _gather_pass(pixels, rgb, cover, depth, ids, n_samples, out_rgb, out_alpha, 
         out_alpha[c], out_depth[c], out_ids[c] = cover[j] / n_samples, depth[j], ids[j]
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _fill_sky(pixels, rgb, alpha, width, height, inv_view_proj, sky, sky_colors, sky_faces, sky_texels, sky_levels,
               sky_first, sky_lod):
     """Fill what the scene leaves uncovered in each of `pixels` (flat indices of whole-frame rgb, alpha) with
@@ -678,7 +684,7 @@ def _fill_sky(pixels, rgb, alpha, width, height, inv_view_proj, sky, sky_colors,
         alpha[c] = 1.0
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _mix_mirror(target, pixels, rows, tris, sample_rgb, extra_rows, extra_tris, extra_rgb, tri_inst, ident, mirror,
                 reflectivity, seen):
     """Show what a mirror reflects: in each of `pixels` (flat indices of whole-frame colours `target`,
@@ -714,21 +720,22 @@ def _mix_mirror(target, pixels, rows, tris, sample_rgb, extra_rows, extra_tris, 
         target[c, 2] += reflectivity * (part * seen[c, 2] - own_b / total)
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True)
 def _post_effects(rgb, alpha, depth, fog, outline):
     """Fog, then outlines, applied in place to a framebuffer's arrays (see Renderer for both)."""
     h, w = depth.shape
     if fog:
-        # Dim pixels in proportion to how far back they sit within the scene's depth range.
+        # Dim pixels in proportion to how far back they sit within the scene's depth range (of the pixels
+        # drawn that have a depth).
         near, far = np.inf, -np.inf
         for y in range(h):
             for x in range(w):
-                if alpha[y, x] > 0:
+                if alpha[y, x] > 0 and depth[y, x] > 0:
                     near, far = min(near, 1.0 / depth[y, x]), max(far, 1.0 / depth[y, x])
         span = max(far - near, 0.25 * near)
         for y in prange(h):
             for x in range(w):
-                if alpha[y, x] > 0:
+                if alpha[y, x] > 0 and depth[y, x] > 0:
                     rgb[y, x, :] *= 1.0 - fog * (1.0 / depth[y, x] - near) / span
     if outline:
         # Darken pixels just behind a depth edge. 1/w is linear across any plane on screen, so its
@@ -886,11 +893,16 @@ class Renderer:
     mirror_bounces: how deep mirrors show each other (1: a mirror seen in a mirror shows the
     background reflected in it, not what is in front of it; at most 4). Deeper images stop early
     once they are too small or dim to see.
+    max_pixels: the most pixels drawn (about 1080p by default). A bigger framebuffer (a
+    full-screen terminal with a tiny font) is drawn at a lower resolution that fits, and
+    stretched to size, so that time and memory stay bounded however big the terminal is;
+    None or 0 for no limit. Working memory is a few hundred bytes a pixel.
     """
 
     def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
                  fog=0.3, outline=0.55, lod_bias=-0.5, background=None, shadow_size=1024, point_shadow_size=256,
-                 shadow_softness=1.5, shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1):
+                 shadow_softness=1.5, shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
+                 max_pixels=MAX_PIXELS):
         for n in (samples, edge_samples):
             if n not in SAMPLE_PATTERNS and n != 0:
                 raise ValueError(f"sample counts must be one of {sorted(SAMPLE_PATTERNS)}, not {n}")
@@ -910,7 +922,10 @@ class Renderer:
         self.mirror_bounces = mirror_bounces
         self.width = self.height = 0
         self.cell_pixels = tuple(cell_pixels)
+        self.max_pixels = max_pixels
         self.framebuffer = FrameBuffer(0, 0, cell_pixels)
+        self._fb = self.framebuffer  # what is drawn into: the framebuffer itself, or a smaller one within max_pixels
+        self._fb_for = None  # the (width, height, cell_pixels, max_pixels) _fb was made for
         self.view_proj = None
         self.draws = 0     # renders that rasterized the scene, rather than reusing an unchanged frame
         self._last = None  # what the framebuffer shows, as _scene_state() gives it
@@ -929,6 +944,31 @@ class Renderer:
         self.width, self.height, self.cell_pixels = width, height, cell_pixels
         self.framebuffer.cell_pixels = cell_pixels
         self.framebuffer.resize(width * cell_pixels[0], height * cell_pixels[1])
+        self._fit()
+
+    @property
+    def drawn_size(self):
+        """(width, height) in pixels of what render() draws: the framebuffer's size, or less where that is more
+        than max_pixels (the picture is then stretched to the framebuffer's size)."""
+        self._fit()
+        return self._fb.width, self._fb.height
+
+    def _fit(self):
+        """Make the framebuffer drawn into: the framebuffer itself if it has at most max_pixels pixels, else a
+        smaller one of about the same shape with about max_pixels (see Renderer)."""
+        wanted = (self.width, self.height, self.cell_pixels, self.max_pixels)
+        if wanted == self._fb_for:
+            return
+        self._fb_for = wanted
+        out = self.framebuffer
+        budget = int(self.max_pixels) if self.max_pixels else 0
+        if budget <= 0 or out.width * out.height <= budget:
+            self._fb = out
+            return
+        shrink = np.sqrt(budget / (out.width * out.height))
+        w, h = max(int(out.width * shrink), 1), max(int(out.height * shrink), 1)
+        if self._fb is out or (self._fb.width, self._fb.height) != (w, h):
+            self._fb = FrameBuffer(w, h, out.cell_pixels)
 
     def project(self, point):
         """Cell coordinates (x, y) of a world point as of the last render, or None if behind the camera."""
@@ -1015,19 +1055,33 @@ class Renderer:
             shine.append(obj.reflectivity)
         if not meshes:
             return None
+        where = np.array(pos, np.float64).reshape(-1, 3)
+        turn = np.array(quat, dtype=np.float64).reshape(-1, 4)
+        size = np.array(scale, np.float64)
+        placed = np.isfinite(where).all(axis=1) & np.isfinite(turn).all(axis=1) & np.isfinite(size)
+        if not placed.all():  # NaN or infinite in a pose (a physics blow-up, say): nowhere to draw it
+            keep = np.flatnonzero(placed)
+            if not len(keep):
+                return None
+            mesh_idx, rgb, double, ident, emissive, cast, alpha, shine = (
+                [values[i] for i in keep] for values in (mesh_idx, rgb, double, ident, emissive, cast, alpha, shine))
+            where, turn, size = where[keep], turn[keep], size[keep]
+            used = sorted(set(mesh_idx))
+            renumber = {m: j for j, m in enumerate(used)}
+            meshes, keys = [meshes[m] for m in used], [keys[m] for m in used]
+            mesh_idx = [renumber[m] for m in mesh_idx]
         packed = self._pack
         if packed is None or len(packed[0]) != len(keys) or any(
                 len(a) != len(b) or any(x is not y for x, y in zip(a, b)) for a, b in zip(packed[0], keys)):
             packed = self._pack = (keys, _pack_meshes(meshes))
-        quat = np.array(quat, dtype=np.float64).reshape(-1, 4)
-        quat /= np.maximum(np.linalg.norm(quat, axis=1, keepdims=True), 1e-300)
+        quat = turn / np.maximum(np.linalg.norm(turn, axis=1, keepdims=True), 1e-300)
         mesh_idx = np.array(mesh_idx, np.int64)
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
         double = np.array(double, np.bool_) | (alpha < 1.0) | packed[1]["clear"][mesh_idx]
-        return {"mesh": mesh_idx, "pos": np.array(pos, np.float64).reshape(-1, 3), "quat": quat,
-                "scale": np.array(scale, np.float64), "rgb": np.array(rgb, np.float64).reshape(-1, 3),
-                "double": double, "alpha": alpha, "shine": np.clip(np.array(shine, np.float64), 0.0, 1.0),
+        return {"mesh": mesh_idx, "pos": where, "quat": quat, "scale": size,
+                "rgb": np.array(rgb, np.float64).reshape(-1, 3), "double": double, "alpha": alpha,
+                "shine": np.clip(np.array(shine, np.float64), 0.0, 1.0),
                 "ident": np.array(ident, np.int32),
                 "emissive": np.array(emissive, np.float64), "cast": np.array(cast, np.bool_), "pack": packed[1],
                 "keys": keys}
@@ -1038,7 +1092,8 @@ class Renderer:
         Meshes, their arrays and textures count as changed when replaced, as in Mesh's own caches;
         edits made inside them are not seen (call invalidate() after those).
         """
-        values = [self.width, self.height, self.cell_pixels, self.cell_aspect, self.samples, self.edge_samples,
+        values = [self.width, self.height, self.cell_pixels, self.max_pixels, self.cell_aspect, self.samples,
+                  self.edge_samples,
                   self.transparency_layers, self.reflections, self.mirror_bounces,
                   self.fog, self.outline, self.lod_bias, self.shadow_size, self.point_shadow_size,
                   self.shadow_softness,
@@ -1058,13 +1113,19 @@ class Renderer:
         lights: a Light or PointLight, or a list of them (their light adds up).
         Objects with a parent are placed through it (see Node). When nothing has
         changed since the last render (see _scene_state), the framebuffer is
-        returned as it is, so a still scene costs almost nothing.
+        returned as it is, so a still scene costs almost nothing. Floating-point trouble (NaN or infinite
+        coordinates) is drawn around rather than warned about: a warning would be printed over the picture.
         """
+        with np.errstate(all="ignore"):
+            return self._render(objects, camera, lights)
+
+    def _render(self, objects, camera, lights):
         lights = _as_lights(lights)
+        self._fit()
         self._objects = list(objects)
         inst = self._instances(objects)
         aspect = self.width * self.cell_aspect / max(self.height, 1)
-        bg_args, bg_state = background_args(self.background, camera, aspect, self.framebuffer.height)
+        bg_args, bg_state = background_args(self.background, camera, aspect, self._fb.height)
         state = self._scene_state(inst, camera, lights)
         state = (state[0] + list(bg_state[0]), state[1] + list(bg_state[1]))
         last = self._last
@@ -1078,10 +1139,11 @@ class Renderer:
         return fb
 
     def _draw(self, inst, camera, lights, bg_args):
-        fb = self.framebuffer
+        fb = self._fb
         fb.clear()
         if self.width < 1 or self.height < 1:
-            return fb
+            self.framebuffer.clear()
+            return self.framebuffer
         aspect = self.width * self.cell_aspect / self.height
         self.view_proj = perspective(np.radians(camera.fov), aspect, camera.near, camera.far) @ camera.view_matrix()
         self._eye = np.asarray(camera.position, dtype=float).copy()
@@ -1094,12 +1156,15 @@ class Renderer:
             self._shade_scene(scene)
         kind, colors, basis, texels, levels, first, lod = bg_args
         fill_background(fb.rgb, fb.alpha, kind, colors, basis, SKYBOX_FACES, texels, levels, first, lod)
-        return fb
+        out = self.framebuffer
+        if fb is not out:  # drawn smaller, within max_pixels: stretched to the size the screen needs
+            upscale(fb.rgb, fb.alpha, fb.depth, fb.ids, out.rgb, out.alpha, out.depth, out.ids)
+        return out
 
     def _shade_scene(self, scene):
         """Rasterize and shade the scene's triangles into the framebuffer, with extra samples at edges,
         then fog and outlines."""
-        fb = self.framebuffer
+        fb = self._fb
         # Which solid triangles (cut-outs too) may touch each band of rows, for both rasterizing passes.
         scene["bands"] = self._bins(scene["xs"], scene["ys"], scene["see"], SOLID | CUT, fb.height, "")
         n = self.samples
@@ -1154,7 +1219,7 @@ class Renderer:
     def _spans(self, pixels):
         """The columns (first, last) of each band of rows that `pixels` (flat indices) reach; empty
         (first > last) for bands they don't."""
-        width, n_bands = self.framebuffer.width, (self.framebuffer.height + ROW_BAND - 1) // ROW_BAND
+        width, n_bands = self._fb.width, (self._fb.height + ROW_BAND - 1) // ROW_BAND
         band, x = pixels // width // ROW_BAND, (pixels % width).astype(float)
         span = np.empty((n_bands, 2))
         span[:, 0], span[:, 1] = np.inf, -np.inf
@@ -1168,7 +1233,7 @@ class Renderer:
         """The see-through surfaces in front of the solid ones in each pixel, nearest first (see
         raster.rasterize_layers); solid is the solid surfaces' depth at each of the `pattern` positions
         (infinite in pixels to leave alone). In buffers named from `prefix`; None if there are none."""
-        fb, buf = self.framebuffer, self._buffers
+        fb, buf = self._fb, self._buffers
         m, k = fb.width * fb.height, max(int(self.transparency_layers), 1)
         layers = {"depth": buf.get(prefix + "layer_depth", (m, k)),
                   "tri": buf.get(prefix + "layer_tri", (m, k), np.int32),
@@ -1186,7 +1251,7 @@ class Renderer:
     def _blend_layers(self, scene, layers, n_samples, target=None):
         """Shade the see-through layers and blend them over the framebuffer, or `target` (whole-frame rgb,
         alpha, depth, ids, flat), farthest first (see _blend)."""
-        fb, buf = self.framebuffer, self._buffers
+        fb, buf = self._fb, self._buffers
         pixels = np.flatnonzero(layers["count"])
         target = target or (fb.rgb.reshape(-1, 3), fb.alpha.reshape(-1), fb.depth.reshape(-1), fb.ids.reshape(-1))
         _blend(pixels, *target,
@@ -1211,7 +1276,7 @@ class Renderer:
         buffers named from `prefix`, as a scene for _accumulate() and friends; None if there are none.
         shine: each instance's reflectivity of the background (see _shade); shading: its lights, shadow
         maps and pixel size."""
-        fb, buf, pack = self.framebuffer, self._buffers, inst["pack"]
+        fb, buf, pack = self._fb, self._buffers, inst["pack"]
         k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = self._transform(
             pack, inst, inst["double"], view_proj, eye, near, prefix, clip)
         xs, ys = buf.get(prefix + "xs", (k, 3)), buf.get(prefix + "ys", (k, 3))
@@ -1264,7 +1329,7 @@ class Renderer:
         how many mirrors deep the pass is; weight: how much of the frame's colour it makes up (the
         reflectivities multiplied along the way), so that faint images deep down are skipped.
         """
-        inst, fb, buf = scene["inst"], self.framebuffer, self._buffers
+        inst, fb, buf = scene["inst"], self._fb, self._buffers
         mirrors = np.flatnonzero(self._mirrors(inst))
         if level >= min(int(self.mirror_bounces), MAX_BOUNCES) or not len(mirrors):
             return
@@ -1322,7 +1387,7 @@ class Renderer:
 
     def _no_extra(self):
         """What _mix_mirror takes for a pass without extra samples at edges: no pixel has any."""
-        buf, m = self._buffers, self.framebuffer.width * self.framebuffer.height
+        buf, m = self._buffers, self._fb.width * self._fb.height
         rows = buf.get("no_extra_rows", (m,), np.int64)
         rows.fill(-1)
         return rows, np.zeros((0, 1), np.int32), np.zeros((0, 1, 3))
@@ -1330,7 +1395,7 @@ class Renderer:
     def _pixel_size(self, camera):
         """The width in the world of a pixel one unit in front of the camera: the larger of its width and
         height, where pixels are not square."""
-        fb = self.framebuffer
+        fb = self._fb
         tall = 2.0 * np.tan(np.radians(camera.fov) / 2)
         wide = tall * self.width * self.cell_aspect / self.height
         return float(max(tall / fb.height, wide / fb.width))
@@ -1471,7 +1536,7 @@ class Renderer:
         triangle and colour (sample_depth, tris, sample_rgb), in buffers named after `name`; the depth
         and object id of each pixel's nearest sample go into `depth` and `ids` if given.
         """
-        fb, buf = self.framebuffer, self._buffers
+        fb, buf = self._fb, self._buffers
         if pixels is None:
             pixels = slots = buf.arange(fb.width * fb.height)
         else:
