@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -9,7 +11,7 @@ import numpy as np
 
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
-from unicode3d.background import Gradient, Sky, SkyBox
+from unicode3d.background import Fog, Gradient, Sky, SkyBox
 from unicode3d.color import (Color, encode_index, encode_rgb, linear_to_srgb, luminance, put_sgr_color, quantize,
                              sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb)
 from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
@@ -18,10 +20,14 @@ from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Node, Object3D, PointLight, Renderer
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
-from unicode3d.terminal import Screen
+from unicode3d.kernel_signatures import KERNELS
+from unicode3d.precompile import missing_kernels, share_out
+from unicode3d.terminal import Screen, compile_kernels
 from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
-from unicode3d.transforms import quat_axis_angle, quat_between, quat_to_matrix
+from unicode3d.animation import (EASINGS, Animation, RotationTrack, Track, ease_in, ease_out,
+                                 ease_out_back)
+from unicode3d.transforms import quat_axis_angle, quat_between, quat_identity, quat_slerp, quat_to_matrix
 
 
 class TransformTests(unittest.TestCase):
@@ -209,6 +215,10 @@ class RenderTests(unittest.TestCase):
         crowd += [Object3D(flat_quad(2.0, 1.5), np.array([x, 0.0, -1.2]), quat_axis_angle((0, 1, 0), turn),
                            color=(150, 150, 150), reflectivity=0.8) for x, turn in ((-0.8, 0.6), (0.8, -0.6))]
         crowd[3].reflectivity = 0.9
+        # Materials, and shapes stretched unevenly, mirrored, and sheared by a stretched parent.
+        crowd[6].specular, crowd[7].specular, crowd[7].shininess = 0.0, 2.5, 90.0
+        stretched = Node(position=np.array([-0.3, 0.2, 0.0]), scale=(1.0, 2.0, 0.5))
+        crowd[9].scale, crowd[10].scale, crowd[11].parent = (0.4, 0.1, 0.3), (-0.3, 0.3, 0.3), stretched
         lights = [Light(color=(255, 200, 150)), PointLight(np.array([0.5, 0.5, 1.0]), color=Color.CYAN, range=3.0)]
         shadowed = [Light(direction=np.array([0.5, -1.0, -0.3]), shadows=True), Light(shadows=True),
                     PointLight(np.array([0.5, 0.5, 1.0]), color=Color.CYAN, range=3.0, shadows=True),
@@ -232,6 +242,11 @@ class RenderTests(unittest.TestCase):
             renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), max_pixels=2000)
             fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), shadowed)
             frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
+            # Fog in the world, into the background and into a colour.
+            for fog in (Fog(start=4.0, end=7.0), Fog(start=3.0, end=8.0, color=(200, 100, 50))):
+                renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), fog=fog)
+                fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), lights)
+                frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
             return frame
 
         try:
@@ -751,6 +766,100 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(far_px.any())
         self.assertLess(luminance(foggy.rgb)[far_px].mean(), 0.75 * luminance(clear.rgb)[far_px].mean())
 
+    def test_world_fog(self):
+        # Fog by distance in the world: clear up to start, gone at end, into the background or a colour.
+        sky = (40, 80, 160)
+        near = Object3D(make_box(), position=np.array([-1.0, 0.0, 2.0]), color=Color.RED)
+        middle = Object3D(make_box(), position=np.array([0.5, 0.0, -2.0]), color=Color.RED)
+        gone = Object3D(make_box(4.0), position=np.array([6.0, 2.0, -30.0]), color=Color.RED)
+        renderer = Renderer(80, 30, fog=Fog(start=4.0, end=20.0), outline=0, background=sky)
+        clear = Renderer(80, 30, fog=0, outline=0, background=sky)
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]), far=100.0)
+        fb = renderer.render([near, middle, gone], camera, Light()).copy()
+        plain = clear.render([near, middle, gone], camera, Light()).copy()
+        bare = Renderer(80, 30, fog=0, outline=0).render([near, middle, gone], camera, Light())
+        # Pixels wholly inside object i (with no background, so that coverage shows).
+        inside = lambda i: (bare.ids == i) & (bare.alpha == 1) & (np.roll(bare.ids, 2, 1) == i)
+        self.assertTrue(all(inside(i).sum() > 4 for i in (1, 2, 3)))
+        np.testing.assert_allclose(fb.rgb[inside(1)], plain.rgb[inside(1)])  # nearer than start
+        bg = to_linear_rgb(sky)
+        np.testing.assert_allclose(fb.rgb[inside(3)], np.broadcast_to(bg, fb.rgb[inside(3)].shape),
+                                   atol=1e-9)  # beyond end: only the sky
+        # Between: part surface, part sky. Picking still finds what the fog hides.
+        mid = fb.rgb[inside(2)]
+        self.assertTrue(((mid[:, 2] > plain.rgb[inside(2)][:, 2]) & (mid[:, 2] < bg[2])).all())
+        self.assertIs(renderer.pick(*renderer.project((6.0, 2.0, -30.0))).object, gone)
+        # Unlike depth cueing, one object's fog doesn't change as others come into view or leave it.
+        alone = renderer.render([near, middle], camera, Light())
+        np.testing.assert_array_equal(alone.rgb[inside(2)], mid)
+        # Into a colour of its own.
+        renderer.fog = Fog(start=4.0, end=20.0, color=(255, 255, 0))
+        fb = renderer.render([near, middle, gone], camera, Light())
+        np.testing.assert_allclose(fb.rgb[inside(3)][0], to_linear_rgb((255, 255, 0)), atol=1e-9)
+        # With no background, fogged surfaces give way to the terminal's own.
+        renderer.background = None
+        renderer.fog = Fog(start=4.0, end=20.0)
+        fb = renderer.render([near, middle, gone], camera, Light())
+        self.assertEqual(fb.alpha[inside(3)].max(), 0.0)
+        self.assertTrue((fb.alpha[inside(2)] < 1.0).all() and (fb.alpha[inside(2)] > 0.0).all())
+
+    def test_materials(self):
+        # Object3D.specular scales each light's highlight; shininess sets how tight it is.
+        ball = blob_mesh((1.0, 1.0, 1.0), rings=32, segments=48)
+        light = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.2, diffuse=0.4, specular=0.5, shininess=20.0)
+        renderer = Renderer(60, 30, fog=0, outline=0)
+        camera = Camera(position=np.array([0.0, 0.0, 5.0]))
+        shots = {}
+        for name, kwargs in (("plain", {}), ("matte", {"specular": 0.0}), ("strong", {"specular": 2.0}),
+                             ("tight", {"shininess": 200.0}), ("light's", {"shininess": 20.0})):
+            shots[name] = lum(renderer.render([Object3D(ball, color=(80, 80, 200), **kwargs)], camera, light).copy())
+        centre = (30, 30)
+        self.assertLess(shots["matte"][centre], shots["plain"][centre])
+        self.assertGreater(shots["strong"][centre], shots["plain"][centre])
+        np.testing.assert_array_equal(shots["light's"], shots["plain"])  # the same exponent as the light's
+        # A tighter highlight: about as bright at its peak, over far fewer pixels.
+        self.assertAlmostEqual(shots["tight"].max(), shots["plain"].max(), delta=0.1)
+        lit = lambda shot: int((shot > shots["matte"] + 0.05).sum())
+        self.assertLess(3 * lit(shots["tight"]), lit(shots["plain"]))
+
+    def test_uneven_scale(self):
+        # scale=(x, y, z) stretches along the object's own axes; normals stay square to the stretched surface.
+        light = Light(direction=np.array([0.0, -1.0, -1.0]), ambient=0.2, diffuse=0.8, specular=0.0)
+        renderer = Renderer(80, 40, fog=0, outline=0, samples=1)
+        camera = Camera(position=np.array([0.0, 0.0, 6.0]))
+        wide = renderer.render([Object3D(make_box(), scale=(2.0, 1.0, 1.0))], camera, light).copy()
+        cube = renderer.render([Object3D(make_box())], camera, light).copy()
+        rows, cols = np.nonzero(wide.drawn)
+        rows1, cols1 = np.nonzero(cube.drawn)
+        self.assertAlmostEqual(np.ptp(cols) / np.ptp(cols1), 2.0, delta=0.1)
+        self.assertAlmostEqual(np.ptp(rows) / np.ptp(rows1), 1.0, delta=0.1)
+        # A slab tilted towards the light is lit as its face, not as its corners' stretched normals would be.
+        turn = quat_axis_angle((1, 0, 0), 0.6)
+        slab = renderer.render([Object3D(make_box(), rotation=turn, scale=(1.5, 0.2, 1.5))], camera, light).copy()
+        plate = Mesh(np.array([(-0.75, 0.1, 0.75), (0.75, 0.1, 0.75), (0.75, 0.1, -0.75), (-0.75, 0.1, -0.75)]),
+                     np.array([(0, 1, 2), (0, 2, 3)]))
+        top = renderer.render([Object3D(plate, rotation=turn)], camera, light).copy()
+        face = (top.alpha == 1) & (slab.alpha == 1) & (slab.ids == 1)
+        self.assertGreater(face.sum(), 100)
+        np.testing.assert_allclose(lum(slab)[face].mean(), lum(top)[face].mean(), rtol=0.02)
+        # A negative scale mirrors the shape, which is still drawn from outside (not culled as inside out).
+        mirrored = renderer.render([Object3D(make_box(), scale=(-1.0, 1.0, 1.0))], camera, light)
+        np.testing.assert_allclose(mirrored.alpha, cube.alpha)
+        np.testing.assert_allclose(lum(mirrored), lum(cube), atol=1e-9)
+        # Through a parent: a node stretched along y with a turned child shears it, as world_matrix() says.
+        group = Node(position=np.array([0.5, 0.0, 0.0]), scale=(1.0, 3.0, 1.0))
+        child = Object3D(make_box(), position=np.array([0.0, 0.2, 0.0]), rotation=quat_axis_angle((0, 0, 1), 0.7),
+                         scale=0.5, parent=group)
+        linear, position, visible = child.world_matrix()
+        corner = np.array([0.5, 0.5, 0.5])
+        expected = group.position + np.diag([1.0, 3.0, 1.0]) @ (child.position + quat_to_matrix(child.rotation)
+                                                               @ (0.5 * corner))
+        np.testing.assert_allclose(child.to_world(corner), expected)
+        np.testing.assert_allclose(linear @ corner + position, expected)
+        self.assertTrue(visible)
+        with self.assertRaises(ValueError):
+            Renderer(10, 5).render([Object3D(make_box(), scale=(1.0, 2.0))], camera, light)
+
     def test_textures_are_mipmapped(self):
         # A fine checkerboard seen small averages to grey instead of aliasing into random black and white.
         checks = (np.indices((64, 64)).sum(axis=0) % 2).astype(float)
@@ -772,6 +881,84 @@ class RenderTests(unittest.TestCase):
             os.unlink(f.name)
         self.assertEqual(mesh.vertices.shape, (4, 3))
         np.testing.assert_array_equal(mesh.faces, [[0, 1, 2], [0, 2, 3], [0, 1, 2]])
+
+
+class AnimationTests(unittest.TestCase):
+    def test_slerp_turns_steadily_the_short_way(self):
+        a, b = quat_axis_angle((0, 1, 0), 0.2), quat_axis_angle((0, 1, 0), 1.4)
+        np.testing.assert_allclose(quat_slerp(a, b, 0.0), a, atol=1e-12)
+        np.testing.assert_allclose(quat_slerp(a, b, 1.0), b, atol=1e-12)
+        np.testing.assert_allclose(quat_slerp(a, b, 0.25), quat_axis_angle((0, 1, 0), 0.5), atol=1e-12)
+        # -b is the same rotation as b: still the short way (0.6 rad), not the long way round.
+        np.testing.assert_allclose(quat_to_matrix(quat_slerp(a, -b, 0.5)), quat_to_matrix(quat_axis_angle((0, 1, 0), 0.8)),
+                                   atol=1e-12)
+        near = quat_axis_angle((1, 0, 0), 1e-6)  # nearly equal: no division by ~0
+        self.assertTrue(np.isfinite(quat_slerp(quat_identity(), near, 0.5)).all())
+
+    def test_easings_run_from_0_to_1(self):
+        for name, ease in EASINGS.items():
+            self.assertAlmostEqual(ease(0.0), 0.0, msg=name)
+            self.assertAlmostEqual(ease(1.0), 1.0, msg=name)
+        self.assertLess(ease_in(0.5), 0.5)
+        self.assertGreater(ease_out(0.5), 0.5)
+        self.assertGreater(max(ease_out_back(t) for t in np.linspace(0, 1, 50)), 1.0)  # overshoots
+
+    def test_tracks(self):
+        track = Track([(2.0, (0.0, 0.0, 0.0)), (0.0, (0.0, 4.0, 0.0)), (3.0, (1.0, 0.0, 0.0), "ease_in")])
+        np.testing.assert_allclose(track.at(-1.0), (0, 4, 0))  # held before the first key
+        np.testing.assert_allclose(track.at(1.0), (0, 2, 0))   # keys sorted by time; linear by default
+        np.testing.assert_allclose(track.at(2.5), (ease_in(0.5), 0, 0))  # the key's own easing, leading up to it
+        np.testing.assert_allclose(track.at(9.0), (1, 0, 0))  # held after the last
+        looped = Track([(0.0, 0.0), (1.0, 10.0)], loop="loop")
+        pingpong = Track([(0.0, 0.0), (1.0, 10.0)], loop="pingpong")
+        self.assertAlmostEqual(looped.at(1.25), 2.5)
+        self.assertAlmostEqual(pingpong.at(1.25), 7.5)
+        self.assertAlmostEqual(pingpong.at(-0.25), 2.5)
+        with self.assertRaises(ValueError):
+            Track([])
+        turn = RotationTrack([(0.0, quat_identity()), (1.0, quat_axis_angle((0, 0, 1), 1.0))])
+        np.testing.assert_allclose(turn.at(0.5), quat_axis_angle((0, 0, 1), 0.5), atol=1e-12)
+
+    def test_animation_moves_an_object(self):
+        box = Object3D(make_box())
+        anim = Animation(box, position=Track([(0.0, (0, 0, 0)), (2.0, (4, 0, 0))]),
+                         rotation=RotationTrack([(0.0, quat_identity()), (1.0, quat_axis_angle((0, 1, 0), 1.0))]),
+                         scale=Track([(0.0, 1.0), (2.0, (1.0, 3.0, 1.0))]))
+        self.assertTrue(anim.update(0.5))
+        np.testing.assert_allclose(box.position, (1, 0, 0))
+        np.testing.assert_allclose(box.rotation, quat_axis_angle((0, 1, 0), 0.5), atol=1e-12)
+        np.testing.assert_allclose(box.scale, (1.0, 1.5, 1.0))
+        self.assertFalse(anim.update(2.0))  # ended at 2 s, and stays at its last pose
+        np.testing.assert_allclose(box.position, (4, 0, 0))
+        fb = Renderer(40, 20).render([box], Camera(position=np.array([2.0, 0.0, 8.0]), target=np.array([2.0, 0, 0])),
+                                     Light())
+        self.assertTrue(fb.drawn.any())  # a scale from a track (an array) renders
+
+
+class KernelCacheTests(unittest.TestCase):
+    def test_kernel_signatures_are_current(self):
+        # precompile.py compiles the kernels listed in kernel_signatures.py on several cores before the first
+        # frame; a kernel missing from the list, or listed with other argument types, is compiled one at a time
+        # again. After changing a kernel's arguments or adding one: python -m unicode3d.precompile --update
+        compile_kernels()  # into the cache, so that the run below only loads them
+        out = subprocess.run([sys.executable, "-m", "unicode3d.precompile", "--record"], capture_output=True,
+                             text=True, check=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        used = {tuple(line.split("\t")[i] for i in (0, 1, 3)) for line in out.stdout.splitlines()}
+        listed = {(module, name, text) for module, name, _, texts in KERNELS for text in texts}
+        self.assertEqual(used, listed, "run: python -m unicode3d.precompile --update")
+
+    def test_cache_can_be_checked(self):
+        # precompile.missing_kernels() looks into Numba's cache; None means it no longer can (a Numba that keeps
+        # its cache differently), and then every first run compiles one kernel at a time.
+        compile_kernels()
+        self.assertEqual(missing_kernels(), [])
+
+    def test_work_is_shared_out_evenly(self):
+        kernels = [("m", str(i), s, []) for i, s in enumerate((4.0, 3.0, 3.0, 2.0, 2.0, 1.0, 1.0))]
+        groups = share_out(kernels, 3)
+        self.assertEqual(sorted(k for g in groups for k in g), sorted(kernels))
+        self.assertEqual(sorted(sum(k[2] for k in g) for g in groups), [5.0, 5.0, 6.0])
+        self.assertEqual(len(share_out(kernels[:2], 5)), 2)
 
 
 class ColorTests(unittest.TestCase):
@@ -1086,6 +1273,40 @@ class DemoTests(unittest.TestCase):
         for _ in range(10):
             demo.frame(screen, 0.1, [])
         self.assertLess(demo.z, start[1] - 2.0)  # walked north
+        # Standing by the door opens it, and it shuts again once the walker has gone.
+        door, screen = demo.court.door, Screen(glyphs="quad", color="256", size=(30, 100))  # no keys held
+        demo.x, demo.z = 1.4, 3.0
+        for _ in range(15):
+            demo.frame(screen, 0.1, [])
+        self.assertTrue(door.opening)
+        self.assertGreater(abs(door.hinge.rotation[2]), 0.5)  # turned about y, well open
+        demo.x, demo.z = -6.0, 8.0
+        for _ in range(20):
+            demo.frame(screen, 0.1, [])
+        np.testing.assert_allclose(door.hinge.rotation, (1, 0, 0, 0), atol=1e-9)
+        demo.fog_into.value = "mist"
+        self.assertIsNot(demo.frame(screen, 0.1, []), False)
+        self.assertEqual(demo.renderer.fog.color, (225, 228, 232))
+
+    def test_workshop(self):
+        from unicode3d.examples.workshop import Workshop
+        demo = Workshop()
+        self.run_demo(demo, [ord("o"), ord("c"), ord("f"), ord("b"), ord("e"), Key.TAB, Key.TAB, Key.TAB, Key.RIGHT,
+                             ord("h"), ord("d"), ord("z")], ord("q"))
+        self.assertEqual(demo.shape.value, "cube")
+        self.assertEqual(demo.specular.value, 1.1)  # Tab to the third widget, the specular slider, then Right
+        self.assertIsNotNone(demo.hopping)
+        # The panel's settings reach the object and the renderer.
+        demo.sx.value, demo.sy.value, demo.shininess.value, demo.fog.value = -1.5, 0.5, 80, "mist"
+        screen = Screen(glyphs="quad", color="256", size=(30, 100))
+        for _ in range(60):  # past the end of the hop
+            demo.frame(screen, 1 / 30, [])
+        self.assertIsNone(demo.hopping)
+        np.testing.assert_allclose(demo.obj.scale, (-1.5, 0.5, 1.0))
+        self.assertEqual(demo.obj.shininess, 80)
+        self.assertEqual(demo.renderer.fog.color, (225, 228, 232))
+        demo.frame(screen, 1 / 30, [ord("r")])
+        self.assertEqual((demo.shape.value, demo.sx.value, demo.fog.value), ("sphere", 1.0, "off"))
 
 
 class ScreenTests(unittest.TestCase):

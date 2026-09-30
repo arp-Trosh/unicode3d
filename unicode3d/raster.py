@@ -54,6 +54,21 @@ class FrameBuffer:
 
 ROW_BAND = 4  # rows of pixels each thread rasterizes at a time
 
+# Sample positions within a pixel (x, y from its top-left corner): the standard
+# multisample patterns, where no two samples share a row or column, so near-vertical
+# and near-horizontal edges get as many coverage steps as there are samples.
+SAMPLE_PATTERNS = {
+    1: ((0.5, 0.5),),
+    4: ((0.375, 0.125), (0.875, 0.375), (0.125, 0.625), (0.625, 0.875)),
+    8: ((0.5625, 0.3125), (0.4375, 0.6875), (0.8125, 0.5625), (0.3125, 0.1875),
+        (0.1875, 0.8125), (0.0625, 0.4375), (0.6875, 0.9375), (0.9375, 0.0625)),
+    16: ((0.5625, 0.5625), (0.4375, 0.3125), (0.3125, 0.625), (0.75, 0.4375),
+         (0.1875, 0.375), (0.625, 0.8125), (0.8125, 0.6875), (0.6875, 0.1875),
+         (0.375, 0.875), (0.5, 0.0625), (0.25, 0.125), (0.125, 0.75),
+         (0.0, 0.5), (0.9375, 0.25), (0.875, 0.9375), (0.0625, 0.0)),
+}
+SOLID, CLEAR, CUT = 1, 2, 4  # kinds of triangle (project's `see`: 0, 1, 2) as bits, for Renderer._bins
+
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def upscale(rgb, alpha, depth, ids, out_rgb, out_alpha, out_depth, out_ids):
@@ -420,12 +435,33 @@ def _outside_view(view_proj, cx, cy, cz, radius, near):
 
 
 @njit(cache=True, error_model="numpy")
-def _rotation(q, rot):
-    """Rotation matrix of unit quaternion q (w, x, y, z), into rot (3, 3)."""
-    qw, qx, qy, qz = q[0], q[1], q[2], q[3]
-    rot[0, 0], rot[0, 1], rot[0, 2] = 1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)
-    rot[1, 0], rot[1, 1], rot[1, 2] = 2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)
-    rot[2, 0], rot[2, 1], rot[2, 2] = 2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)
+def stretch(lin):
+    """At most how much the linear map lin (3, 3) lengthens any vector (at least its largest singular value,
+    and exactly that for a rotation times a scale along each axis): how far a bounding sphere's radius grows."""
+    most = 0.0
+    for i in range(3):
+        row = 0.0
+        for j in range(3):  # row i of lin^T lin, whose largest eigenvalue is the square of the answer
+            row += abs(lin[0, i] * lin[0, j] + lin[1, i] * lin[1, j] + lin[2, i] * lin[2, j])
+        most = max(most, row)
+    return np.sqrt(most)
+
+
+@njit(cache=True, error_model="numpy")
+def _normal_matrix(lin, out):
+    """What turns normals when lin (3, 3) turns and stretches points, into out (3, 3): the inverse transpose, up
+    to a positive factor (the cofactors, times the sign of the determinant), which stays finite when lin is
+    singular. Normals it gives need normalizing."""
+    for i in range(3):
+        for j in range(3):
+            a, b = (i + 1) % 3, (i + 2) % 3
+            c, d = (j + 1) % 3, (j + 2) % 3
+            out[i, j] = lin[a, c] * lin[b, d] - lin[a, d] * lin[b, c]
+    det = lin[0, 0] * out[0, 0] + lin[0, 1] * out[0, 1] + lin[0, 2] * out[0, 2]
+    if det < 0.0:
+        for i in range(3):
+            for j in range(3):
+                out[i, j] = -out[i, j]
 
 
 @njit(cache=True, error_model="numpy")
@@ -490,11 +526,15 @@ VERTEX_CHUNK = 1024  # vertices transformed as one piece
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, inst_quat, inst_scale, inst_pos,
-              inst_double, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, chunk_inst,
+def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_double,
+              inst_flip, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, chunk_inst,
               chunk_first, chunk_end, world, visible, whole, cut, off_whole, off_cut):
     """First pass of projecting instances (see project()): vertices in the world, and where each piece
     of work will write its triangles. Returns the number of triangles.
+
+    Instance i shows mesh inst_mesh[i], its points p placed at inst_lin[i] @ p + inst_pos[i] (inst_lin: rotation,
+    scale along each axis, and the same of its parents, as one (3, 3) matrix); inst_flip[i] says the matrix
+    mirrors (a negative determinant), which turns faces inside out, so that which way they face flips too.
 
     visible[i]: whether instance i is at least partly in view (its bounding sphere, spheres[mesh]).
     Vertex chunk j transforms vertices vchunk_first[j]:vchunk_end[j] (counted within the mesh) of
@@ -508,15 +548,13 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
     """
     for inst in prange(inst_mesh.shape[0]):
         m = inst_mesh[inst]
-        scale = inst_scale[inst]
-        rot = np.empty((3, 3))
-        _rotation(inst_quat[inst], rot)
+        lin = inst_lin[inst]
         position = inst_pos[inst]
-        sx, sy, sz = spheres[m, 0] * scale, spheres[m, 1] * scale, spheres[m, 2] * scale
-        cx = rot[0, 0] * sx + rot[0, 1] * sy + rot[0, 2] * sz + position[0]
-        cy = rot[1, 0] * sx + rot[1, 1] * sy + rot[1, 2] * sz + position[1]
-        cz = rot[2, 0] * sx + rot[2, 1] * sy + rot[2, 2] * sz + position[2]
-        radius = spheres[m, 3] * abs(scale)
+        sx, sy, sz = spheres[m, 0], spheres[m, 1], spheres[m, 2]
+        cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
+        cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
+        cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
+        radius = spheres[m, 3] * stretch(lin)
         visible[inst] = (not _outside_view(view_proj, cx, cy, cz, radius, near)
                          and clip[0] * cx + clip[1] * cy + clip[2] * cz + clip[3] > -radius)
     for j in prange(vchunk_inst.shape[0]):
@@ -524,16 +562,19 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         if not visible[inst]:
             continue
         m = inst_mesh[inst]
-        scale = inst_scale[inst]
-        rot = np.empty((3, 3))
-        _rotation(inst_quat[inst], rot)
+        lin = inst_lin[inst]
+        normal = np.empty((3, 3))
+        _normal_matrix(lin, normal)
         position = inst_pos[inst]
         v0, w0 = mesh_vertex[m], inst_vertex[inst]
         for v in range(vchunk_first[j], vchunk_end[j]):
             p, n, out = vertices[v0 + v], vertex_normals[v0 + v], world[w0 + v]
             for i in range(3):
-                out[i] = (rot[i, 0] * p[0] + rot[i, 1] * p[1] + rot[i, 2] * p[2]) * scale + position[i]
-                out[3 + i] = rot[i, 0] * n[0] + rot[i, 1] * n[1] + rot[i, 2] * n[2]
+                out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
+                out[3 + i] = normal[i, 0] * n[0] + normal[i, 1] * n[1] + normal[i, 2] * n[2]
+            length = np.sqrt(out[3] * out[3] + out[4] * out[4] + out[5] * out[5])
+            if length > 0.0:
+                out[3], out[4], out[5] = out[3] / length, out[4] / length, out[5] / length
             for i in range(4):
                 out[6 + i] = view_proj[i, 0] * out[0] + view_proj[i, 1] * out[1] + view_proj[i, 2] * out[2] + view_proj[i, 3]
     for c in prange(chunk_inst.shape[0]):
@@ -544,7 +585,7 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
             base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]  # faces index the packed vertices
             for f in range(chunk_first[c], chunk_end[c]):
                 ahead = _face_ahead(world, faces, f, base, near)
-                if ahead == 0 or not (inst_double[inst] or _facing(world, faces, f, base, eye)):
+                if ahead == 0 or not (inst_double[inst] or _facing(world, faces, f, base, eye) != inst_flip[inst]):
                     continue
                 v0, v1, v2 = base + faces[f, 0], base + faces[f, 1], base + faces[f, 2]
                 d0, d1, d2 = _plane_distance(world, v0, clip), _plane_distance(world, v1, clip), _plane_distance(
@@ -572,8 +613,8 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
-            inst_double, inst_vertex, eye, near, clip, width, height, lod_bias, world, chunk_inst, chunk_first,
-            chunk_end, whole, cut, off_whole, off_cut, xs, ys, inv_w, attrs, tri_inst, chain, lod, see):
+            inst_double, inst_flip, inst_vertex, eye, near, clip, width, height, lod_bias, world, chunk_inst,
+            chunk_first, chunk_end, whole, cut, off_whole, off_cut, xs, ys, inv_w, attrs, tri_inst, chain, lod, see):
     """Every instance's faces as screen-space triangles: culled, clipped against the near plane
     w = near, and projected, from the vertices and plan transform() made.
 
@@ -583,7 +624,7 @@ def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex,
     `face_texels` (F,: texels in the face's texture) and `face_kind` (F,: what its texture's alpha is for,
     see texture.alpha_kind). Instance i shows mesh inst_mesh[i] in colour
     inst_rgb[i] (linear) with opacity inst_alpha[i]; back faces (seen from `eye`) are culled unless
-    inst_double[i]: then they are drawn with flipped normals.
+    inst_double[i]: then they are drawn with flipped normals. inst_flip: see transform().
 
     The triangles go to xs, ys, inv_w (pixel coordinates and 1/w of each corner), attrs (ATTRS
     attributes of each corner), tri_inst (the instance), chain (the face's mipmap chain), lod (its
@@ -608,7 +649,7 @@ def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex,
             if ahead == 0:
                 continue
             sign = 1.0
-            if not _facing(world, faces, f, base, eye):
+            if _facing(world, faces, f, base, eye) == inst_flip[inst]:
                 if not inst_double[inst]:
                     continue
                 sign = -1.0

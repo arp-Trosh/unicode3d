@@ -9,6 +9,8 @@ empty parts of the frame transparent, so the screen's own background shows.
   Sky(zenith, horizon, ground)   by the direction each pixel looks in: it moves as the camera turns
   SkyBox(textures)               six pictures on the inside of a box around the camera, which never gets nearer
 
+Fog, set as Renderer.fog, fades distant surfaces into the background (or into a colour of its own).
+
 Colours are named Colors or (r, g, b) sRGB, as for objects, and blend in linear light.
 """
 from dataclasses import dataclass, field
@@ -70,6 +72,29 @@ class SkyBox:
             chains = [build_mipmaps(_srgb01(t)) for t in self.textures]
             cached = self._packed = (list(self.textures), pack_textures(chains))
         return cached[1]
+
+
+@dataclass
+class Fog:
+    """Fog in the world, for Renderer.fog: surfaces nearer the camera than `start` are clear, and farther ones
+    fade until, at `end` and beyond, they are gone: into `color` (a named Color or (r, g, b)), or, with None,
+    into whatever is behind them, the background (a sky's horizon behind a distant hill), or the terminal's own
+    background if there is none. Distances are in world units, from the eye, so surfaces keep their fog as the
+    camera turns or other things come into view."""
+    start: float = 10.0
+    end: float = 50.0
+    color: object = None
+
+
+def fog_args(fog):
+    """(depth cueing, start, end, linear rgb (3,), into the background) for shading.post_effects, from
+    Renderer.fog: a Fog, or a number (depth cueing), or None."""
+    if isinstance(fog, Fog):
+        clear = fog.color is None
+        rgb = np.zeros(3) if clear else np.asarray(to_linear_rgb(fog.color), np.float64)
+        return 0.0, float(fog.start), max(float(fog.end), 1e-9), rgb, clear
+    cue = float(fog or 0.0)
+    return (cue if np.isfinite(cue) else 0.0), 0.0, 0.0, np.zeros(3), False
 
 
 _NO_TEXTURES = pack_textures([[np.zeros((1, 1, 3))]])

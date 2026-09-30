@@ -21,11 +21,11 @@ import traceback
 
 import numpy as np
 
+from unicode3d.background import Fog
 from unicode3d.examples.room import HALF, Walk
 from unicode3d.keys import Key, MouseEvent
 from unicode3d.scene import Camera, Light, PointLight
 from unicode3d.terminal import Screen, compile_kernels
-from unicode3d.transforms import quat_to_matrix
 
 try:
     import resource
@@ -99,8 +99,8 @@ def close(renders, rng):
     renderer.resize(960, 215, screen.cell_pixels)
     lights = [Light(direction=np.array([0.5, -1.0, -0.35]), shadows=True),
               PointLight(court.lamp_at, range=9.0, shadows=True)]
-    points = np.concatenate([p + (quat_to_matrix(q) @ (s * obj.mesh.vertices.T)).T
-                             for obj in court.objects for p, q, s, _ in [obj.world_transform()]])
+    points = np.concatenate([p + (linear @ obj.mesh.vertices.T).T
+                             for obj in court.objects for linear, p, _ in [obj.world_matrix()]])
     times = []
     for i in range(renders):
         court.animate(float(rng.uniform(0, 100)))
@@ -111,7 +111,12 @@ def close(renders, rng):
         look = rng.normal(size=3)
         camera = Camera(position=eye, target=eye + look, fov=70.0, near=0.05, far=100.0)
         renderer.background = demo.backgrounds[list(demo.backgrounds)[rng.integers(len(demo.backgrounds))]]
-        renderer.fog = float(rng.uniform(0, 0.9))
+        if rng.random() < 0.5:  # depth cueing, or fog in the world (into the background, or a colour)
+            renderer.fog = float(rng.uniform(0, 0.9))
+        else:
+            start = float(rng.uniform(0, 20))
+            renderer.fog = Fog(start, start + float(rng.uniform(0, 40)),
+                               None if rng.random() < 0.5 else tuple(int(c) for c in rng.integers(0, 256, 3)))
         renderer.shadows, renderer.reflections = bool(rng.random() < 0.8), bool(rng.random() < 0.8)
         t = time.perf_counter()
         try:

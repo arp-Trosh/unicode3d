@@ -16,10 +16,10 @@ change the result.
   over bands of pixel rows, and each band goes through all the triangles in order, touching only its own rows.
   Looping in parallel over triangles instead would let two threads update the same pixel at once.
 - No `+=`, min/max or "if nearer, replace" on a shared element from inside a `prange` loop. For a reduction over
-  the whole frame (such as the depth range in `scene._post_effects`), loop serially, or have each iteration write
+  the whole frame (such as the depth range in `shading.post_effects`), loop serially, or have each iteration write
   its own slot and combine the slots serially afterwards.
 - Scratch space written inside a `prange` loop must be either indexed by that iteration (like `sample_rgb[c]` in
-  `scene._resolve`) or allocated inside the loop body, once per iteration of the outer loop (like `feat` in
+  `shading.resolve`) or allocated inside the loop body, once per iteration of the outer loop (like `feat` in
   `glyphs._match`), never shared.
 - Output whose length depends on the work (like the triangles `raster.project` makes, which clipping can
   split) is written in two passes: count what each iteration will write, turn the counts into offsets
@@ -40,6 +40,11 @@ rule by reading them. Add anything a new kernel draws to that test's scenes.
   frame (while `run()` shows "First run compile, please wait..."), so a kernel must see the same types then as in
   every later frame: convert inputs with `np.ascontiguousarray(x, dtype)` before the call (see
   `Renderer._geometry`), and extend `compile_kernels()`'s scene when adding a kernel or a new code path.
+- **Keep `kernel_signatures.py` current.** On a first run, `precompile.py` compiles the kernels
+  `compile_kernels()` calls in several Pythons at once (about 10 s instead of 40), from the argument types listed
+  in `kernel_signatures.py`. After changing a kernel's arguments or adding one, run
+  `python -m unicode3d.precompile --update` (about 40 s); `test_kernel_signatures_are_current` fails until then.
+  A kernel missing from the list still works, compiled on its own after the others.
 - **No per-frame allocation of big arrays.** Frame-sized working arrays come from `Renderer._buffers`, which keeps
   them from frame to frame. Allocating them afresh each frame made frame times double depending on what the
   program did beforehand (page faults from the allocator).
@@ -69,15 +74,28 @@ stop the program: frames may be slower or wrong for a moment, never an exception
 - `run()` writes a line per run and any traceback (and, through faulthandler, any crash of Python itself) to
   `terminal.crash_log_path()`. Ask for that file when a user reports a crash.
 
+## Where things are
+
+`scene.py` holds what a scene is made of (`Camera`, `Node`, `Object3D`) and re-exports the rest; `renderer.py`
+the `Renderer`, which inherits its shadow-map methods from `shadows.ShadowMaps` and its mirror passes from
+`mirrors.Mirrors`; `shading.py` the shading kernels; `raster.py` projection and rasterizing; `lights.py` the
+lights. Instances reach the kernels as `inst` dicts of arrays (`Renderer._instances`): each has a `lin` (3, 3)
+matrix (rotation and per-axis scale, parents included) and `pos`, and `flip` where the matrix mirrors.
+
 ## Checking a change
 
 - `python -m unittest` from the repository root. The tests use the public API. `tests/test_stability.py` covers
   huge terminals, resizing while running, bad numbers, and a real pseudo-terminal (on Unix).
 - Before a release, `python -m benchmarks.stress` (a few minutes): the room demo walked through sizes from one
   cell to 1920x540 while resizing, and drawn from thousands of random close-up cameras.
-- `python -m benchmarks.bench` times each stage of a frame; compare it before and after a change. Its `first`
-  column includes compiling or loading the kernels.
-- For a change meant to keep the picture the same, compare framebuffers (`rgb`, `alpha`, `depth`, `ids`) and
-  `Screen.render_updates()` output before and after, exactly or to within rounding.
+- `python -m benchmarks.bench` times each stage of a frame; compare it before and after a change, run back to
+  back (the machine's speed drifts by 10-20% over a session, so numbers from earlier in the day mislead). It
+  starts with the machine and versions; `compile_kernels()` runs first, so its `first` column is only each
+  scene's first frame.
+- `python -m benchmarks.gallery diff` renders the reference scenes with `HEAD` (in a temporary worktree) and with
+  the working tree, and compares framebuffers (`rgb`, `alpha`, `depth`, `ids`) and terminal cells. A change meant
+  to keep the picture the same should come out "identical" or "within tolerance" for every scene; a change meant
+  to alter it shows where (pictures in the `diff` folder it names). Add a scene for a new feature (built with
+  constructor arguments, so that older revisions without the feature skip it).
 - Editing a module makes Numba recompile its kernels on the next run (the cache is keyed on the source file), so
   the first run after an edit is slow. That is expected.

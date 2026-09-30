@@ -76,6 +76,18 @@ def quat_to_matrix(q):
     ])
 
 
+def quat_slerp(a, b, t):
+    """The rotation a fraction t (0..1) of the way from quaternion a to b, turning at a steady rate about one
+    axis (spherical linear interpolation), the short way round."""
+    a, b = normalize(a), normalize(b)
+    d = float(np.dot(a, b))
+    if d < 0.0:  # q and -q are the same rotation: go the shorter way
+        b, d = -b, -d
+    if d > 0.9995:  # nearly the same: a straight line, normalized, is as good and avoids dividing by ~0
+        return normalize(a + t * (b - a))
+    angle = np.arccos(min(d, 1.0))
+    return (np.sin((1.0 - t) * angle) * a + np.sin(t * angle) * b) / np.sin(angle)
+
 def quat_between(u, v):
     """Shortest rotation taking direction u onto direction v."""
     u, v = normalize(u), normalize(v)
@@ -86,3 +98,13 @@ def quat_between(u, v):
             axis = np.cross(u, [0.0, 1.0, 0.0])
         return quat_axis_angle(axis, np.pi)
     return normalize(np.array([1.0 + d, *np.cross(u, v)]))
+
+
+def scale3(scale):
+    """A scale, one number or one per axis (x, y, z), as three numbers (3,)."""
+    s = np.asarray(scale, dtype=float)
+    if s.shape == ():
+        return np.full(3, float(s))
+    if s.shape != (3,):
+        raise ValueError(f"scale must be a number or three numbers (x, y, z), not {scale!r}")
+    return s

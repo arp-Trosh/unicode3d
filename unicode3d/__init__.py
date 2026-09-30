@@ -8,7 +8,8 @@ terminals alike. Ported in spirit from https://github.com/ShakedAp/ASCII-rendere
 """
 __version__ = "0.4.1"
 
-from .background import Gradient, Sky, SkyBox
+from .animation import Animation, RotationTrack, Track
+from .background import Fog, Gradient, Sky, SkyBox
 from .color import Color
 from .keys import HeldKeys, Key, KeyRelease, MouseEvent
 from .mesh import Mesh, load_obj, make_box

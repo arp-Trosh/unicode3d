@@ -14,6 +14,7 @@ from collections import deque
 import numpy as np
 
 from .hud import StatusBar
+from ..background import Fog
 from ..color import Color
 from ..keys import Key
 from ..mesh import Mesh
@@ -305,7 +306,9 @@ class Maze:
                                  shadows=True)]
         else:
             lights = Light(direction=np.array([0.3, -1.0, -0.6]), ambient=0.4, diffuse=0.5, specular=0.1)
-        self.renderer.fog = self.fog.value
+        # Fog in the world, fading into the dark: thicker further up the slider.
+        v = self.fog.value
+        self.renderer.fog = Fog(start=CELL, end=CELL * (3.0 + 24.0 * (1.0 - v) ** 2)) if v > 0 else 0.0
 
         rows, cols = screen.size()
         self.renderer.resize(cols, max(rows - 2, 1), screen.cell_pixels)

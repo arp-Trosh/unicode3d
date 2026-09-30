@@ -311,11 +311,14 @@ def compile_kernels():
     """Compile everything drawing a frame runs (or load it from Numba's cache), by drawing a small scene off-screen.
 
     Compiling takes about 10 seconds on the first run after installing or
-    upgrading; loading the cache, a fraction of a second. run() calls this
+    upgrading, on several cores at once (precompile.py; about 40 seconds on
+    one); loading the cache, a fraction of a second. run() calls this
     before its first frame, showing COMPILE_MESSAGE while it compiles; programs
     that drive a Screen themselves can call it too, or the first frame waits
     for the compiling instead.
     """
+    from .precompile import precompile
+    precompile()  # the first time, on several cores at once; then drawing loads them from the cache
     screen = Screen(None, glyphs="sextant", color="truecolor", size=(8, 16))
     renderer = Renderer(16, 8, screen.cell_pixels, background=Sky())
     objects = [Object3D(make_box(textures=[np.ones((4, 4))] * 6)),                     # textured

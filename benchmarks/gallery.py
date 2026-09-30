@@ -1,0 +1,521 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2026 arp-Trosh
+"""Reference scenes, for seeing what a change does to the picture: python -m benchmarks.gallery COMMAND
+
+  save DIR               render every scene into DIR: its framebuffer and terminal cells (NAME.npz), and a
+                         picture of the cells as a terminal shows them (NAME.png)
+  compare OLD NEW        compare two sets saved by `save`, scene by scene; pictures of the scenes that changed
+                         (old, new, and the difference brightened) go to NEW/diff
+  diff [REV]             render the scenes with the engine as of git revision REV (default HEAD, in a
+                         temporary worktree) and as it is in this checkout (uncommitted changes included),
+                         and compare them
+
+Options: --scene NAME (repeatable) picks scenes; --tolerance N (for compare and diff, default 1) is how many
+8-bit sRGB levels a colour may move before it counts as changed. compare and diff exit with status 1 if any
+scene changed.
+
+Every scene is drawn from fixed poses at a fixed size (100x36 cells), and frames are the same on any number of
+threads, so two renders of the same engine match exactly. A change meant to keep the picture should come out
+"identical" (or "within tolerance", for rounding); one meant to change it shows where. The engine as of an older
+revision compiles its kernels afresh (about half a minute), and scenes using features it lacks are skipped.
+
+The scenes: a cube; a textured die in each glyph set and colour mode; overlapping glass; sun and lamp shadows;
+cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor running to the horizon
+(mipmapping); many small balls; a finely divided sphere; the room demo's courtyard; and, added after 0.4.1,
+world fog, materials, and shapes stretched unevenly.
+"""
+import argparse
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from unicode3d.background import Gradient, Sky
+from unicode3d.color import Color, linear_to_srgb, xterm_rgb
+from unicode3d.glyphs import GLYPH_SETS
+from unicode3d.mesh import Mesh, make_box
+from unicode3d.scene import Camera, Light, Object3D, PointLight, Renderer
+from unicode3d.shapes import blob_mesh, block_mesh
+from unicode3d.terminal import Screen
+from unicode3d.transforms import quat_axis_angle, quat_mul
+
+SIZE = (100, 36)  # cells, columns x rows
+CELL = (8, 16)    # pixels of a cell in the pictures, wide x high
+UP = (0.0, 1.0, 0.0)
+TERMINAL_FG, TERMINAL_BG = (204, 204, 204), (12, 12, 16)  # the terminal's own colours, in the pictures
+
+
+@dataclass
+class Shot:
+    """A scene as drawn: objects, camera and lights, Renderer settings, and the screen's glyphs and colours."""
+    objects: list
+    camera: Camera
+    lights: object
+    settings: dict = field(default_factory=dict)
+    glyphs: str = "sextant"
+    color: str = "truecolor"
+
+
+def camera(position, target=(0.0, 0.0, 0.0), fov=50.0):
+    return Camera(position=np.array(position, float), target=np.array(target, float), fov=fov)
+
+
+def floor(half, y=0.0, texture=None, repeat=1):
+    """A square floor facing up, 2 * half across, textured `repeat` times across if given a texture."""
+    verts = np.array([(-half, y, half), (half, y, half), (half, y, -half), (-half, y, -half)], float)
+    mesh = Mesh(verts, np.array([(0, 1, 2), (0, 2, 3)]))
+    if texture is not None:
+        mesh.uvs = np.array([[(0, 0), (1, 0), (1, 1)], [(0, 0), (1, 1), (0, 1)]], float)
+        mesh.materials = np.zeros(2, int)
+        mesh.textures = [np.tile(texture, (repeat, repeat, 1))]
+    return mesh
+
+
+def panel(width, height, texture=None):
+    """An upright rectangle facing +z, standing on y = 0, showing all of `texture` if given."""
+    w = width / 2
+    mesh = Mesh(np.array([(-w, 0, 0), (w, 0, 0), (w, height, 0), (-w, height, 0)], float),
+                np.array([(0, 1, 2), (0, 2, 3)]))
+    if texture is not None:
+        mesh.uvs = np.array([[(0, 0), (1, 0), (1, 1)], [(0, 0), (1, 1), (0, 1)]], float)
+        mesh.materials = np.zeros(2, int)
+        mesh.textures = [texture]
+    return mesh
+
+
+def checks(res, n, a=(0.85, 0.83, 0.8), b=(0.25, 0.25, 0.3)):
+    y, x = np.mgrid[0:res, 0:res] * n // res
+    return np.where(((x + y) % 2)[..., None], a, b).astype(float)
+
+
+def turned(angle, axis=UP):
+    return quat_axis_angle(axis, angle)
+
+
+# ----- scenes --------------------------------------------------------------------------------
+
+def cube():
+    box = Object3D(make_box(), rotation=quat_mul(turned(0.6), turned(0.45, (1, 0, 0))), color=(220, 120, 60))
+    return Shot([box], camera((0, 0.3, 3.6)), Light(), {"background": Gradient()})
+
+
+def die(glyphs="sextant", color="truecolor"):
+    from unicode3d.examples.dice import make_die
+    dice = [Object3D(make_die(), np.array([x, 0.0, 0.0]), quat_mul(turned(0.5 + x), turned(0.6, (1, 0, 0))), color=c)
+            for x, c in ((-1.3, (240, 240, 230)), (0.0, Color.RED), (1.3, Color.GREEN))]
+    return Shot(dice, camera((0, 0.8, 4.4), fov=45.0), Light(), {"background": Gradient()}, glyphs, color)
+
+
+def glass():
+    solid = Object3D(blob_mesh((0.6, 0.6, 0.6), (0.0, 0.6, -1.2), rings=24, segments=32), color=(230, 200, 60))
+    panes = [Object3D(block_mesh((x, 0.7, z), (0.9, 1.4, 0.9)), color=c, opacity=0.4)
+             for x, z, c in ((-0.7, 0.0, (255, 90, 90)), (0.0, 0.4, (90, 255, 120)), (0.7, 0.0, (90, 140, 255)))]
+    ball = Object3D(blob_mesh((0.35, 0.35, 0.35), (0.0, 0.35, 1.2), rings=16, segments=24), color=(200, 230, 255),
+                    opacity=0.3)
+    ground = Object3D(floor(4.0), color=(170, 170, 170))
+    sun = Light(direction=np.array([0.4, -1.0, -0.6]), shadows=True)
+    return Shot([ground, solid, *panes, ball], camera((0.3, 2.2, 4.5), (0, 0.5, 0)), sun, {"background": Sky()})
+
+
+def sun_shadows():
+    things = [Object3D(block_mesh((-1.2, 0.5, 0.0), (0.6, 1.0, 0.6)), color=(200, 90, 70)),
+              Object3D(blob_mesh((0.5, 0.5, 0.5), (0.2, 0.5, -0.6), rings=20, segments=28), color=(80, 160, 220)),
+              Object3D(block_mesh((1.3, 0.9, 0.3), (0.25, 1.8, 0.25)), color=(220, 220, 220)),
+              Object3D(block_mesh((0.6, 1.7, 0.3), (1.6, 0.12, 0.5)), color=(150, 110, 70))]
+    sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
+    return Shot([Object3D(floor(5.0), color=(180, 175, 165)), *things], camera((0.5, 3.0, 5.0), (0, 0.5, 0)), sun,
+                {"background": Sky()})
+
+
+def lamp_shadows():
+    room = [Object3D(floor(4.0), color=(170, 160, 150)),
+            Object3D(panel(8.0, 3.0), np.array([0.0, 0.0, -2.5]), color=(150, 150, 170))]
+    pillars = [Object3D(block_mesh((np.cos(a) * 1.4, 0.6, np.sin(a) * 1.4 - 0.3), (0.3, 1.2, 0.3)),
+                        color=(210, 120, 80)) for a in np.linspace(0, 2 * np.pi, 7)[:-1]]
+    bulb = Object3D(blob_mesh((0.08, 0.08, 0.08), (0.0, 0.9, -0.3)), color=(255, 220, 160), emissive=1.0,
+                    cast_shadows=False)
+    lights = [Light(ambient=0.12, diffuse=0.0, specular=0.0),
+              PointLight(np.array([0.0, 0.9, -0.3]), color=(255, 220, 160), diffuse=1.0, range=6.0, shadows=True)]
+    return Shot(room + pillars + [bulb], camera((0.0, 2.6, 3.6), (0, 0.4, -0.3)), lights)
+
+
+def cutouts():
+    rng = np.random.default_rng(3)
+    lattice = np.ones((64, 64, 4))
+    lattice[..., :3] = (0.55, 0.4, 0.25)
+    y, x = np.mgrid[0:64, 0:64]
+    lattice[..., 3] = ((x % 16 < 4) | (y % 16 < 4)).astype(float)
+    stained = np.ones((64, 64, 4))
+    cells = rng.integers(0, 4, (4, 4))
+    palette = np.array([(0.9, 0.2, 0.2), (0.2, 0.5, 0.9), (0.95, 0.8, 0.2), (0.3, 0.8, 0.4)])
+    stained[..., :3] = palette[cells[y // 16, x // 16]]
+    stained[..., 3] = np.where((x % 16 < 2) | (y % 16 < 2), 1.0, 0.45)
+    stained[(x % 16 < 2) | (y % 16 < 2), :3] = 0.1
+    objects = [Object3D(floor(4.0), color=(190, 190, 185)),
+               Object3D(panel(1.6, 1.6, lattice), np.array([-0.9, 0.0, 0.0]), turned(0.3), color=(255, 255, 255)),
+               Object3D(panel(1.6, 1.6, stained), np.array([0.9, 0.0, 0.0]), turned(-0.3), color=(255, 255, 255)),
+               Object3D(block_mesh((0.0, 0.3, -1.2), (2.4, 0.6, 0.4)), color=(120, 130, 150))]
+    sun = Light(direction=np.array([-0.3, -0.8, -1.0]), shadows=True)
+    return Shot(objects, camera((0.0, 1.6, 3.8), (0, 0.6, -0.3)), sun, {"background": Sky()})
+
+
+def mirror():
+    glass_wall = Object3D(panel(3.6, 2.2), np.array([0.0, 0.0, -1.5]), color=(170, 180, 190), reflectivity=0.85)
+    things = [Object3D(blob_mesh((0.4, 0.4, 0.4), (-0.7, 0.4, 0.0), rings=20, segments=28), color=(220, 80, 60)),
+              Object3D(block_mesh((0.0, 0.35, 0.0), (0.5, 0.7, 0.5)), np.array([0.7, 0.0, 0.3]), turned(0.5),
+                       color=(255, 255, 255))]
+    things[1].mesh.face_colors = np.repeat([(255, 255, 255), (255, 200, 60), (255, 255, 255), (255, 255, 255),
+                                            (90, 140, 255), (255, 80, 200)], 2, axis=0)
+    return Shot([Object3D(floor(4.0, texture=checks(64, 8)), color=(255, 255, 255)), glass_wall, *things],
+                camera((1.4, 1.4, 3.2), (0, 0.6, -0.5)), Light(direction=np.array([0.3, -1.0, -0.4]), shadows=True),
+                {"background": Sky()})
+
+
+def facing_mirrors():
+    left = Object3D(panel(4.0, 2.0), np.array([-1.3, 0.0, 0.0]), turned(np.pi / 2), color=(160, 170, 180),
+                    reflectivity=0.8)
+    right = Object3D(panel(4.0, 2.0), np.array([1.3, 0.0, 0.0]), turned(-np.pi / 2), color=(160, 170, 180),
+                     reflectivity=0.8)
+    ball = Object3D(blob_mesh((0.35, 0.35, 0.35), (0.0, 0.5, 0.0), rings=20, segments=28), color=(240, 160, 40))
+    return Shot([Object3D(floor(3.0, texture=checks(64, 8)), color=(255, 255, 255)), left, right, ball],
+                camera((0.5, 1.2, 3.4), (-0.4, 0.5, 0.0)), Light(), {"background": Sky(), "mirror_bounces": 3})
+
+
+def horizon():
+    ground = Object3D(floor(40.0, texture=checks(512, 32)), color=(255, 255, 255))
+    return Shot([ground], camera((0.0, 1.2, 6.0), (0.0, 0.6, -10.0), fov=60.0),
+                Light(direction=np.array([0.2, -1.0, -0.3])), {"background": Sky(), "fog": 0.0})
+
+
+def balls():
+    rng = np.random.default_rng(1)
+    mesh = blob_mesh((1.0, 1.0, 1.0), rings=12, segments=16)
+    objects = [Object3D(mesh, rng.uniform(-4, 4, 3), scale=rng.uniform(0.2, 0.6),
+                        color=tuple(int(c) for c in rng.integers(40, 255, 3))) for _ in range(400)]
+    return Shot(objects, camera((0.0, 2.0, 12.0), fov=45.0), Light())
+
+
+def sphere():
+    ball = Object3D(blob_mesh((1.0, 1.0, 1.0), rings=96, segments=144), color=(200, 80, 60))
+    return Shot([ball], camera((0.0, 0.0, 3.2)), [Light(), PointLight(np.array([-2.0, 1.5, 2.0]), color=Color.CYAN)])
+
+
+def courtyard():
+    from unicode3d.examples.room import Courtyard
+    court = Courtyard(1)
+    court.animate(2.0)
+    lights = [Light(direction=np.array([0.5, -1.0, -0.35]), ambient=0.3, diffuse=0.6, color=(255, 245, 230),
+                    shadows=True),
+              PointLight(court.lamp_at, color=(255, 210, 150), diffuse=0.9, range=9.0, shadows=True)]
+    eye = np.array([1.0, 1.6, 6.5])
+    shot = camera(eye, eye + np.array([-0.35, -0.12, -1.0]), fov=70.0)
+    shot.near = 0.05
+    return Shot(list(court.objects), shot, lights, {"background": Sky()})
+
+
+def fog():
+    """Rows of pillars running into world fog that fades them into the sky (Fog, added after 0.4.1)."""
+    from unicode3d.background import Fog
+    pillars = [Object3D(block_mesh((x, 1.0, -z), (0.5, 2.0, 0.5)), color=(200, 110, 80) if x < 0 else (90, 150, 210))
+               for z in range(0, 60, 4) for x in (-2.0, 2.0)]
+    ground = Object3D(floor(40.0, texture=checks(256, 16)), color=(255, 255, 255))
+    return Shot([ground, *pillars], camera((0.0, 1.6, 5.0), (0.0, 1.2, -10.0), fov=60.0), Light(),
+                {"background": Sky(), "fog": Fog(start=4.0, end=40.0)})
+
+
+def materials():
+    """The same sphere matte, plain, glossy and chrome-tight (Object3D.specular and shininess, added after 0.4.1)."""
+    ball = blob_mesh((0.55, 0.55, 0.55), rings=32, segments=48)
+    spheres = [Object3D(ball, np.array([x, 0.0, 0.0]), color=(60, 110, 200), specular=spec, shininess=shine)
+               for x, spec, shine in ((-1.95, 0.0, None), (-0.65, 1.0, None), (0.65, 2.0, 12.0), (1.95, 2.5, 120.0))]
+    lights = [Light(direction=np.array([-0.5, -0.6, -1.0])), PointLight(np.array([1.5, 2.0, 2.5]), range=8.0)]
+    return Shot(spheres, camera((0.0, 0.4, 4.6)), lights, {"background": Gradient()})
+
+
+def stretched():
+    """Shapes scaled unevenly (scale=(x, y, z), added after 0.4.1): a plank, a tall box, an egg, a mirror-image die,
+    and a group stretched as a whole with a box turned inside it (sheared), lit so that wrong normals would show."""
+    from unicode3d.examples.dice import make_die
+    from unicode3d.scene import Node
+    ball = blob_mesh((1.0, 1.0, 1.0), rings=24, segments=32)
+    group = Node(position=np.array([1.6, 0.0, -0.4]), scale=(1.0, 2.2, 1.0))
+    objects = [Object3D(floor(4.0), color=(170, 170, 170)),
+               Object3D(make_box(), np.array([-1.5, 0.12, 0.6]), turned(0.3), scale=(1.8, 0.24, 0.5),
+                        color=(170, 120, 70)),
+               Object3D(make_box(), np.array([-1.6, 0.9, -0.8]), turned(0.5), scale=(0.5, 1.8, 0.5),
+                        color=(90, 160, 90)),
+               Object3D(ball, np.array([0.0, 0.55, 0.3]), turned(0.4, (0, 0, 1)), scale=(0.35, 0.55, 0.35),
+                        color=(230, 220, 200)),
+               Object3D(make_die(), np.array([0.2, 0.3, 1.5]), turned(0.7), scale=(-0.6, 0.6, 0.6),
+                        color=(240, 240, 230)),
+               Object3D(make_box(), np.array([0.0, 0.25, 0.0]), turned(0.8, (0, 0, 1)), scale=0.4,
+                        color=(200, 90, 160), parent=group)]
+    sun = Light(direction=np.array([0.5, -1.0, -0.5]), shadows=True)
+    return Shot(objects, camera((0.3, 2.4, 4.6), (0, 0.5, 0)), sun, {"background": Sky()})
+
+
+SCENES = {
+    "cube": cube,
+    "die": die,
+    "die-quad": lambda: die("quad"),
+    "die-half": lambda: die("half"),
+    "die-ascii": lambda: die("ascii"),
+    "die-256": lambda: die(color="256"),
+    "die-16": lambda: die(color="16"),
+    "glass": glass,
+    "sun-shadows": sun_shadows,
+    "lamp-shadows": lamp_shadows,
+    "cutouts": cutouts,
+    "mirror": mirror,
+    "facing-mirrors": facing_mirrors,
+    "horizon": horizon,
+    "balls": balls,
+    "sphere": sphere,
+    "courtyard": courtyard,
+    "fog": fog,
+    "materials": materials,
+    "stretched": stretched,
+}
+
+
+# ----- rendering and pictures ----------------------------------------------------------------
+
+def render(shot):
+    """The shot drawn at SIZE: {rgb, alpha, depth, ids (the framebuffer), chars (code points), fg, bg (packed
+    cell colours)}."""
+    cols, rows = SIZE
+    screen = Screen(None, glyphs=shot.glyphs, color=shot.color, size=(rows, cols))
+    renderer = Renderer(cols, rows, screen.cell_pixels, **shot.settings)
+    fb = renderer.render(shot.objects, shot.camera, shot.lights)
+    screen.draw_frame(fb)
+    return {"rgb": fb.rgb.copy(), "alpha": fb.alpha.copy(), "depth": fb.depth.copy(), "ids": fb.ids.copy(),
+            "chars": screen.chars.view(np.uint32).copy(), "fg": screen.fg.copy(), "bg": screen.bg.copy(),
+            "glyphs": np.array(shot.glyphs), "color": np.array(shot.color)}
+
+
+def unpack_colors(packed, default):
+    """sRGB 0..255 (..., 3) of packed cell colours (see color.quantize): truecolor, palette or the default."""
+    out = np.empty(packed.shape + (3,), np.uint8)
+    out[...] = default
+    rgb = packed >= 0
+    truecolor = rgb & (packed & (1 << 25) != 0)
+    for k, shift in enumerate((16, 8, 0)):
+        out[..., k] = np.where(truecolor, (packed >> shift) & 255, out[..., k])
+    indexed = rgb & ~truecolor
+    out[indexed] = xterm_rgb()[packed[indexed] & 255].astype(np.uint8)
+    return out
+
+
+# A 5x7 bitmap of each character of the ASCII ramp, drawn in the middle of the cell.
+ASCII_BITMAPS = {
+    ".": ["", "", "", "", "", "..#..", "..#.."],
+    ":": ["", "..#..", "..#..", "", "..#..", "..#..", ""],
+    "-": ["", "", "", "#####", "", "", ""],
+    "=": ["", "", "#####", "", "#####", "", ""],
+    "+": ["", "..#..", "..#..", "#####", "..#..", "..#..", ""],
+    "*": ["", "#.#.#", ".###.", "#####", ".###.", "#.#.#", ""],
+    "#": [".#.#.", "#####", ".#.#.", ".#.#.", "#####", ".#.#.", ""],
+    "%": ["##..#", "##.#.", "..#..", ".#...", "#..##", "...##", ""],
+    "@": [".###.", "#...#", "#.###", "#.#.#", "#.###", "#....", ".###."],
+}
+
+
+def _cell_masks(glyphs):
+    """{character: (CELL[1], CELL[0]) bool, True where it shows the foreground}."""
+    w, h = CELL
+    if glyphs == "ascii":
+        masks = {" ": np.zeros((h, w), bool)}
+        for c, rows in ASCII_BITMAPS.items():
+            mask = np.zeros((h, w), bool)
+            for y, row in enumerate(rows):
+                for x, bit in enumerate(row):
+                    mask[2 * y + 1:2 * y + 3, x + 1] = bit == "#"
+            masks[c] = mask
+        return masks
+    glyph_set = GLYPH_SETS[glyphs]
+    pw, ph = glyph_set.cell_pixels
+    xs, ys = np.arange(w) * pw // w, np.arange(h) * ph // h
+    sub = ys[:, None] * pw + xs[None, :]  # which of the cell's pixels each picture pixel is in
+    return {c: (bits >> sub & 1).astype(bool) for bits, c in enumerate(glyph_set.chars)}
+
+
+def cells_picture(frame):
+    """What a terminal shows for the saved cells, as (rows * CELL[1], cols * CELL[0], 3) uint8: block glyphs as
+    their shapes, ASCII as small bitmaps."""
+    chars = frame["chars"].view("<U1") if frame["chars"].dtype == np.uint32 else frame["chars"]
+    fg, bg = unpack_colors(frame["fg"], TERMINAL_FG), unpack_colors(frame["bg"], TERMINAL_BG)
+    masks = _cell_masks(str(frame["glyphs"]))
+    rows, cols = chars.shape
+    w, h = CELL
+    out = np.empty((rows * h, cols * w, 3), np.uint8)
+    blank = np.zeros((h, w), bool)
+    for y in range(rows):
+        for x in range(cols):
+            mask = masks.get(chars[y, x], blank)
+            out[y * h:(y + 1) * h, x * w:(x + 1) * w] = np.where(mask[..., None], fg[y, x], bg[y, x])
+    return out
+
+
+def pixels_picture(frame):
+    """The framebuffer's pixels over black, 8-bit sRGB, (H, W, 3)."""
+    return np.rint(linear_to_srgb(np.clip(frame["rgb"], 0.0, 1.0)) * 255).astype(np.uint8)
+
+
+def write_png(path, image):
+    """Save (H, W, 3) uint8 as an 8-bit RGB PNG."""
+    h, w, _ = image.shape
+    raw = b"".join(b"\x00" + image[y].tobytes() for y in range(h))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+# ----- commands ------------------------------------------------------------------------------
+
+def save(directory, names):
+    os.makedirs(directory, exist_ok=True)
+    for name in names:
+        t0 = time.perf_counter()
+        try:
+            frame = render(SCENES[name]())
+        except Exception as e:  # a feature the engine being rendered lacks
+            print(f"  {name:16} skipped: {type(e).__name__}: {e}")
+            continue
+        np.savez_compressed(os.path.join(directory, name + ".npz"), **frame)
+        write_png(os.path.join(directory, name + ".png"), cells_picture(frame))
+        print(f"  {name:16} {time.perf_counter() - t0:6.2f} s")
+
+
+def _load(directory, name):
+    path = os.path.join(directory, name + ".npz")
+    if not os.path.exists(path):
+        return None
+    with np.load(path) as data:
+        return {k: data[k] for k in data.files}
+
+
+def _cell_change(old, new, tolerance):
+    """How many cells differ: another character, or a colour further off than `tolerance` levels (truecolor) or
+    another palette entry."""
+    rgb_old, rgb_new = unpack_colors(old["fg"], TERMINAL_FG), unpack_colors(new["fg"], TERMINAL_FG)
+    bg_old, bg_new = unpack_colors(old["bg"], TERMINAL_BG), unpack_colors(new["bg"], TERMINAL_BG)
+    far = lambda a, b: (np.abs(a.astype(int) - b.astype(int)) > tolerance).any(axis=-1)
+    if str(new["color"]) != "truecolor":
+        far = lambda a, b: (a != b).any(axis=-1)
+    changed = (old["chars"] != new["chars"]) | far(rgb_old, rgb_new) | far(bg_old, bg_new)
+    return int(changed.sum())
+
+
+def compare(old_dir, new_dir, names, tolerance, out_dir=None):
+    """Print how each scene changed from old_dir to new_dir; pictures of the changes go to out_dir. Returns whether
+    any scene changed by more than the tolerance."""
+    out_dir = out_dir or os.path.join(new_dir, "diff")
+    worse = False
+    print(f"{'scene':16} {'status':18} {'max level':>9} {'pixels':>8} {'alpha':>7} {'depth':>8} {'ids':>6} {'cells':>6}")
+    for name in names:
+        old, new = _load(old_dir, name), _load(new_dir, name)
+        if old is None or new is None:
+            where = "in neither" if old is None and new is None else "only in new" if old is None else "only in old"
+            print(f"{name:16} {where}")
+            continue
+        if old["rgb"].shape != new["rgb"].shape or old["chars"].shape != new["chars"].shape:
+            print(f"{name:16} size changed: {old['rgb'].shape[:2]} -> {new['rgb'].shape[:2]}")
+            worse = True
+            continue
+        if all(np.array_equal(old[k], new[k]) for k in ("rgb", "alpha", "depth", "ids", "chars", "fg", "bg")):
+            print(f"{name:16} identical")
+            continue
+        a, b = pixels_picture(old).astype(int), pixels_picture(new).astype(int)
+        levels = np.abs(a - b).max(axis=-1)
+        pixels = int((levels > tolerance).sum())
+        alpha = float(np.abs(old["alpha"] - new["alpha"]).max())
+        depth = float((np.abs(old["depth"] - new["depth"]) / np.maximum(np.abs(old["depth"]), 1e-12)).max())
+        ids = int((old["ids"] != new["ids"]).sum())
+        cells = _cell_change(old, new, tolerance)
+        changed = pixels > 0 or alpha * 255 > tolerance or cells > 0
+        worse |= changed
+        status = "CHANGED" if changed else "within tolerance"
+        print(f"{name:16} {status:18} {int(levels.max()):9d} {pixels:8d} {alpha:7.3f} {depth:8.1e} {ids:6d} {cells:6d}")
+        if changed:
+            os.makedirs(out_dir, exist_ok=True)
+            gap = np.full((a.shape[0], 4, 3), 128, np.uint8)
+            diff = np.clip(np.abs(a - b) * 8, 0, 255).astype(np.uint8)
+            write_png(os.path.join(out_dir, name + "-pixels.png"),
+                      np.concatenate([a.astype(np.uint8), gap, b.astype(np.uint8), gap, diff], axis=1))
+            ca, cb = cells_picture(old), cells_picture(new)
+            gap = np.full((ca.shape[0], 8, 3), 128, np.uint8)
+            write_png(os.path.join(out_dir, name + "-cells.png"), np.concatenate([ca, gap, cb], axis=1))
+    print("\nmax level: the largest change of a pixel's colour, in 8-bit sRGB levels (pixels over black); pixels:\n"
+          f"how many moved more than {tolerance}; alpha: the largest change in coverage; depth: the largest relative\n"
+          "change in depth; ids: pixels showing another object; cells: terminal cells that look different.")
+    if worse:
+        print(f"Pictures of the changes (old | new | difference x8, and the cells old | new): {out_dir}")
+    return worse
+
+
+def _run_save(engine_root, directory, names):
+    """Save the scenes rendered by the engine in engine_root, in a separate Python (so that its unicode3d is the
+    one imported); this file does the rendering, whatever the revision."""
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([engine_root, os.environ.get("PYTHONPATH", "")]))
+    cmd = [sys.executable, os.path.abspath(__file__), "save", directory] + [a for n in names for a in ("--scene", n)]
+    subprocess.run(cmd, cwd=engine_root, env=env, check=True)
+
+
+def diff(rev, names, tolerance):
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=os.path.dirname(os.path.abspath(__file__)),
+                          capture_output=True, text=True, check=True).stdout.strip()
+    commit = subprocess.run(["git", "rev-parse", "--short", rev], cwd=root, capture_output=True, text=True,
+                            check=True).stdout.strip()
+    work = tempfile.mkdtemp(prefix="unicode3d-gallery-")
+    tree = os.path.join(work, "engine")
+    subprocess.run(["git", "worktree", "add", "--detach", "--quiet", tree, commit], cwd=root, check=True)
+    try:
+        print(f"{rev} ({commit}), compiling its kernels first:", flush=True)
+        _run_save(tree, os.path.join(work, "old"), names)
+        print("this checkout:", flush=True)
+        _run_save(root, os.path.join(work, "new"), names)
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", tree], cwd=root, check=False)
+        shutil.rmtree(tree, ignore_errors=True)
+    print()
+    worse = compare(os.path.join(work, "old"), os.path.join(work, "new"), names, tolerance, os.path.join(work, "diff"))
+    print(f"Both sets of scenes: {work}/old and {work}/new")
+    return worse
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    parser.add_argument("command", choices=("save", "compare", "diff"))
+    parser.add_argument("paths", nargs="*", help="save: DIR; compare: OLD NEW; diff: REV (default HEAD)")
+    parser.add_argument("--scene", action="append", choices=SCENES, help="scene to use (default: all)")
+    parser.add_argument("--tolerance", type=int, default=1, help="8-bit sRGB levels a colour may move (default 1)")
+    args = parser.parse_args()
+    names = args.scene or list(SCENES)
+    if args.command == "save":
+        if len(args.paths) != 1:
+            parser.error("save takes one directory")
+        save(args.paths[0], names)
+        return 0
+    if args.command == "compare":
+        if len(args.paths) != 2:
+            parser.error("compare takes two directories")
+        return int(compare(*args.paths, names, args.tolerance))
+    if len(args.paths) > 1:
+        parser.error("diff takes at most one revision")
+    return int(diff(args.paths[0] if args.paths else "HEAD", names, args.tolerance))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

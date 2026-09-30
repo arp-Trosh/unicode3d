@@ -96,6 +96,24 @@ def luminance(linear_rgb):
     return np.asarray(linear_rgb) @ np.array([0.2126, 0.7152, 0.0722])
 
 
+_LINEAR_CACHE = {}
+
+
+def cached_linear_rgb(color):
+    """to_linear_rgb(color), remembered for colours seen before (objects mostly keep theirs)."""
+    if isinstance(color, (int, np.integer)):
+        key = int(color)
+    else:
+        a = np.asarray(color)
+        key = (a.dtype.kind, tuple(a.ravel().tolist()))
+    c = _LINEAR_CACHE.get(key)
+    if c is None:
+        if len(_LINEAR_CACHE) > 4096:
+            _LINEAR_CACHE.clear()
+        c = _LINEAR_CACHE[key] = to_linear_rgb(color)
+    return c
+
+
 # ----- palettes ------------------------------------------------------------------------
 
 def xterm_rgb():

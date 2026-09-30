@@ -6,6 +6,7 @@ Frames may take longer in a huge terminal, but nothing may crash, and memory has
 """
 import importlib
 import os
+import pkgutil
 import select
 import sys
 import tempfile
@@ -14,9 +15,10 @@ import unittest
 import warnings
 
 import numpy as np
+import unicode3d
 from numba.core.registry import CPUDispatcher
 
-from unicode3d.background import Sky, SkyBox
+from unicode3d.background import Fog, Sky, SkyBox
 from unicode3d.examples.room import Walk
 from unicode3d.keys import Key, MouseEvent
 from unicode3d.mesh import Mesh, make_box
@@ -164,7 +166,7 @@ class BadNumberTests(unittest.TestCase):
         # Numba's default raises ZeroDivisionError on a float division by zero (or, in a helper called from
         # a parallel loop, SystemError), which ends the program; with numpy's, it gives inf or NaN.
         kernels = []
-        for name in ("background", "color", "glyphs", "raster", "scene", "terminal", "texture"):
+        for name in (m.name for m in pkgutil.iter_modules(unicode3d.__path__) if not m.ispkg and m.name != "__main__"):
             module = importlib.import_module(f"unicode3d.{name}")
             kernels += [(name, k) for k, v in vars(module).items()
                         if isinstance(v, CPUDispatcher) and v.__module__ == module.__name__]
@@ -218,6 +220,31 @@ class BadNumberTests(unittest.TestCase):
             self.assertTrue((fb.ids == 3).any())  # the good box is drawn
         everything_bad = [o for i, o in enumerate(objects) if i in (4, 5, 6)]
         self.assertFalse(Renderer(40, 20).render(everything_bad, Camera(), Light()).drawn.any())
+
+    def test_bad_fog_materials_and_scales(self):
+        mirror = Mesh(np.array([(-3, -1, -2), (3, -1, -2), (3, 2, -2), (-3, 2, -2)], float),
+                      np.array([(0, 1, 2), (0, 2, 3)]))
+        good = Object3D(make_box(), position=np.array([-1.5, 0.0, 0.0]))
+        objects = [good,
+                   Object3D(make_box(), scale=(0.0, 1.0, 1.0)),  # squashed flat: no inverse for its normals
+                   Object3D(make_box(), scale=(0.0, 0.0, 0.0)),
+                   Object3D(make_box(), scale=(np.inf, 1.0, 1.0)),
+                   Object3D(make_box(), scale=(1e300, 1e-300, 1.0)),
+                   Object3D(make_box(), position=np.array([1.5, 0.0, 0.0]), specular=np.nan, shininess=np.nan),
+                   Object3D(make_box(), position=np.array([0.0, 1.5, 0.0]), specular=np.inf, shininess=-5.0),
+                   Object3D(make_box(), position=np.array([0.0, -1.5, 0.0]), specular=1.0, shininess=1e308),
+                   Object3D(mirror, reflectivity=0.8, scale=(1.0, 1.0, 0.0)),
+                   Object3D(mirror, reflectivity=0.8, scale=(0.0, 1.0, 1.0), position=np.array([0.0, 0.0, -1.0]))]
+        fogs = [Fog(np.nan, np.inf), Fog(10.0, 5.0), Fog(0.0, 0.0), Fog(-np.inf, np.nan), Fog(1.0, np.inf),
+                Fog(-np.inf, 3.0, (255, 0, 0)), np.nan, np.inf]
+        for fog in fogs:
+            screen = Screen(glyphs="sextant", color="256", size=(20, 40))
+            r = Renderer(40, 20, screen.cell_pixels, background=Sky(), fog=fog)
+            fb = r.render(objects, Camera(), [Light(shadows=True), PointLight(np.array([0.0, 2.0, 2.0]), shadows=True)])
+            screen.draw_frame(fb)
+            screen.render_updates()
+            self.assertTrue((fb.ids == 1).any(), fog)  # the good box is drawn
+            self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all(), fog)
 
     def test_camera_at_nan(self):
         screen = Screen(glyphs="quad", color="truecolor", size=(20, 40))
