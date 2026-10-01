@@ -9,11 +9,15 @@
 A Track holds keyframes (time, value) and gives the value at any time between them, blending each pair
 linearly (lerp) after easing the fraction of the way between them; a RotationTrack blends quaternions
 along the arc (quat_slerp) instead. A keyframe's own easing, given as a third item, shapes the stretch
-leading up to it; the track's `easing` shapes the others.
+leading up to it; the track's `easing` shapes the others. A SplineTrack curves through its keyframes
+along tangents given with each (cubic Hermite splines, as glTF models' animations have).
+
+A Clip plays several Animations on one clock: what models.load_model() gives for each animation in a
+glTF file (Model.animations), and a way to group your own.
 """
 import numpy as np
 
-from .transforms import quat_slerp
+from .transforms import normalize, quat_slerp
 
 
 def lerp(a, b, t):
@@ -63,9 +67,29 @@ def ease_out_bounce(t):
     return n * t * t + 0.984375
 
 
-EASINGS = {f.__name__: f for f in (linear, ease_in, ease_out, ease_in_out, ease_out_back, ease_out_bounce)}
+def step(t):
+    """Holds the value of the keyframe before, then jumps to the next one's as it arrives."""
+    return 0.0 if t < 1.0 else 1.0
+
+
+EASINGS = {f.__name__: f for f in (linear, ease_in, ease_out, ease_in_out, ease_out_back, ease_out_bounce, step)}
 
 LOOPS = ("once", "loop", "pingpong")
+
+
+def _check_loop(loop):
+    if loop not in LOOPS:
+        raise ValueError(f"loop must be one of {LOOPS}, not {loop!r}")
+    return loop
+
+
+def _wrap(t, start, end, loop):
+    """Time t brought within start..end, as `loop` says (see Track)."""
+    span = end - start
+    if span <= 0.0 or loop == "once":
+        return min(max(t, start), end)
+    u = (t - start) % (2.0 * span if loop == "pingpong" else span)
+    return start + (2.0 * span - u if u > span else u)
 
 
 class Track:
@@ -79,8 +103,7 @@ class Track:
     def __init__(self, keys, easing=linear, loop="once"):
         if not keys:
             raise ValueError("a track needs at least one keyframe")
-        if loop not in LOOPS:
-            raise ValueError(f"loop must be one of {LOOPS}, not {loop!r}")
+        _check_loop(loop)
         keys = sorted(keys, key=lambda k: k[0])
         self.times = np.array([float(k[0]) for k in keys])
         self.values = [self._value(k[1]) for k in keys]
@@ -110,11 +133,7 @@ class Track:
 
     def _local(self, t):
         """t brought within start..end, as the loop setting says."""
-        span = self.duration
-        if span <= 0.0 or self.loop == "once":
-            return min(max(t, self.start), self.end)
-        u = (t - self.start) % (2.0 * span if self.loop == "pingpong" else span)
-        return self.start + (2.0 * span - u if u > span else u)
+        return _wrap(t, self.start, self.end, self.loop)
 
     def at(self, t):
         """The value at time t."""
@@ -125,6 +144,10 @@ class Track:
             return value.copy() if isinstance(value, np.ndarray) else value
         t0, t1 = self.times[i - 1], self.times[i]
         f = (t - t0) / (t1 - t0) if t1 > t0 else 1.0
+        return self.between(i, f)
+
+    def between(self, i, f):
+        """The value a fraction f of the way from keyframe i - 1 to keyframe i."""
         return self.blend(self.values[i - 1], self.values[i], self.easings[i](f))
 
 
@@ -137,6 +160,32 @@ class RotationTrack(Track):
 
     def blend(self, a, b, t):
         return quat_slerp(a, b, t)
+
+
+class SplineTrack(Track):
+    """Keyframes (time, value, in_tangent, out_tangent), and a smooth curve through them: between two keys it
+    leaves the first along its out_tangent and arrives at the second along its in_tangent (a cubic Hermite
+    spline; tangents are rates of change per second). rotation=True takes the values as quaternions (w first),
+    and keeps what it gives a rotation (unit length). loop as for Track."""
+
+    def __init__(self, keys, loop="once", rotation=False):
+        self.rotation = rotation
+        keys = sorted(keys, key=lambda k: k[0])
+        super().__init__([(k[0], k[1]) for k in keys], loop=loop)
+        self.tangents = [(self._value(k[2]), self._value(k[3])) for k in keys]
+
+    def between(self, i, f):
+        span = self.times[i] - self.times[i - 1]
+        f2, f3 = f * f, f * f * f
+        value = ((2 * f3 - 3 * f2 + 1) * self.values[i - 1] + (f3 - 2 * f2 + f) * span * self.tangents[i - 1][1]
+                 + (-2 * f3 + 3 * f2) * self.values[i] + (f3 - f2) * span * self.tangents[i][0])
+        if self.rotation:
+            return normalize(value)
+        return value if isinstance(value, np.ndarray) else float(value)
+
+    def at(self, t):
+        value = super().at(t)
+        return normalize(value) if self.rotation and isinstance(value, np.ndarray) else value
 
 
 class Animation:
@@ -166,6 +215,52 @@ class Animation:
         for name, track in self.tracks.items():
             value = track.at(self.time)
             setattr(self.target, name, value.copy() if isinstance(value, np.ndarray) else value)
+
+    def update(self, dt):
+        """Move on by dt seconds (times speed) and apply; returns whether it is still playing."""
+        self.apply(self.time + dt * self.speed)
+        return not self.done()
+
+
+class Clip:
+    """Animations played together on one clock, from time 0 to the end of the longest: an animation clip, like
+    those a glTF model carries (a door opening, a robot waving its arm), moving several parts at once.
+
+        wave = model.animations["Wave"]
+        wave.loop = "loop"
+        ...
+        wave.update(dt)          # each frame; or wave.apply(t)
+
+    loop: "once" holds the last pose once it ends, "loop" starts again, "pingpong" plays it back and forth
+    (each Animation's own tracks are best left "once": the clip does the looping). speed scales time.
+    """
+
+    def __init__(self, animations, name="", loop="once", speed=1.0):
+        self.animations = list(animations)
+        self.name = name
+        self.loop = _check_loop(loop)
+        self.speed = speed
+        self.time = 0.0
+
+    @property
+    def duration(self):
+        """When the last track of its animations ends (they start at time 0)."""
+        return max((track.end for a in self.animations for track in a.tracks.values()), default=0.0)
+
+    @property
+    def targets(self):
+        """What it moves: each animation's target."""
+        return [a.target for a in self.animations]
+
+    def done(self):
+        return self.loop == "once" and self.time >= self.duration
+
+    def apply(self, t):
+        """Put every target where the clip has it at time t (looped, if it loops)."""
+        self.time = float(t)
+        local = _wrap(self.time, 0.0, self.duration, _check_loop(self.loop))
+        for animation in self.animations:
+            animation.apply(local)
 
     def update(self, dt):
         """Move on by dt seconds (times speed) and apply; returns whether it is still playing."""

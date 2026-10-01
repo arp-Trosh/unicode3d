@@ -9,6 +9,7 @@ import unittest
 import numba
 import numpy as np
 
+from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
 from unicode3d.background import Fog, Gradient, Sky, SkyBox
@@ -1265,14 +1266,26 @@ class DemoTests(unittest.TestCase):
 
     def test_dice_demo(self):
         from unicode3d.examples.demo import DiceDemo
-        self.run_demo(DiceDemo(3, seed=1), [ord(" "), ord("+"), Key.F3, ord("g"), ord("m"), Key.F6], ord("q"))
+        demo = DiceDemo(3, seed=1)
+        self.run_demo(demo, [ord(" "), ord("+"), Key.F3, ord("g"), ord("m"), Key.F6, ord("f"), ord("f")], ord("q"))
+        self.assertEqual(demo.finish, "chrome")  # f went plastic, rubber, chrome
+        self.assertTrue(all(die.reflectivity == 0.7 and die.shininess == 40.0 for die in demo.dice))
 
     def test_viewer(self):
         from unicode3d.examples.viewer import Viewer
         root = Node()
         model = Model(root, [Object3D(make_die(), parent=root), Object3D(make_box(), parent=root, reflectivity=0.3)])
-        self.run_demo(Viewer(model), [ord("w"), Key.LEFT, ord("e"), ord("c")], Key.ESC)
+        lift = Animation(model.objects[1], position=Track([(0.0, (0.0, 0.0, 0.0)), (1.0, (0.0, 1.0, 0.0))]))
+        model.animations = {"lift": Clip([lift], name="lift")}
+        viewer = Viewer(model)
+        screen = self.run_demo(viewer, [ord("w"), Key.LEFT, ord("e"), ord("c")], Key.ESC)
         self.assertEqual(model.objects[1].reflectivity, 0.85)
+        self.assertGreater(model.objects[1].position[1], 0.0)  # playing, looped
+        wide = Screen(glyphs="quad", color="256", size=(30, 240))
+        viewer.frame(wide, 0.1, [])
+        self.assertIn("animation: lift (1/1)", "".join(wide.chars[-1]))
+        viewer.frame(screen, 0.1, [ord("n")])
+        self.assertIsNone(viewer.playing)
 
     def test_balls(self):
         from unicode3d.examples.balls import Balls
@@ -1281,10 +1294,43 @@ class DemoTests(unittest.TestCase):
                              ord("x"), ord("m")], ord("q"))
         self.assertEqual(len(demo.balls), 32)  # "]" and then the focused slider's Right added one each
 
+    def test_balls_squash_on_bumps(self):
+        from unicode3d.examples.balls import Balls, FINISHES, MAX_SQUASH
+        demo = Balls(2, seed=1)
+        demo.collide.value, demo.mixed.value = False, True
+        screen = Screen(glyphs="quad", color="256", size=(30, 100))
+        demo.frame(screen, 1 / 30, [])
+        half = demo.room_size.value / 2
+        demo.pos[:] = [(half - 0.5, 0.0, 0.0), (0.0, 0.0, 0.0)]  # the first about to hit the +x wall, head on
+        demo.vel[:] = [(1.0, 0.0, 0.0), (0.0, 0.0, 1e-3)]
+        for _ in range(10):
+            demo.frame(screen, 1 / 30, [])
+            if demo.squash_amount[0]:
+                break
+        self.assertGreater(demo.squash_amount[0], 0.1)
+        self.assertLessEqual(demo.squash_amount[0], MAX_SQUASH)
+        np.testing.assert_allclose(np.abs(demo.squash_dir[0]), (1, 0, 0), atol=1e-9)  # along the wall's normal
+        self.assertEqual(demo.squash_amount[1], 0.0)  # the other drifted, unbumped
+        ball = demo.balls[0]
+        self.assertEqual(np.shape(ball.scale), (3,))  # flattened along x (turned onto it) and bulging the other ways
+        world = np.abs(ball.world_matrix()[0])
+        self.assertLess(world[0, 0], world[1, 1])
+        self.assertEqual(demo.balls[1].scale, demo.size.value * demo.radius_factor[1])  # round
+        self.assertEqual({(b.specular, b.shininess, b.reflectivity) for b in demo.balls} <= set(FINISHES), True)
+        for _ in range(40):  # wobbles back to round
+            demo.frame(screen, 1 / 30, [])
+        self.assertEqual(np.ndim(ball.scale), 0)
+
     def test_maze(self):
         from unicode3d.examples.maze import Maze
         demo = Maze(5, seed=1)
-        self.run_demo(demo, [ord("t"), ord("m"), ord("r"), ord("n"), ord("l"), ord("p")], ord("q"))
+        self.run_demo(demo, [ord("t"), ord("m"), ord("r"), ord("n"), ord("l"), ord("p"), ord("f")], ord("q"))
+        self.assertEqual(demo.renderer.fog.color, (60, 62, 66))  # haze, with the headlamp off (l)
+        heights = set()
+        for _ in range(10):  # the gems bob
+            demo.frame(Screen(glyphs="quad", color="256", size=(30, 100)), 0.1, [])
+            heights.add(round(demo.start_marker.position[1], 6))
+        self.assertGreater(len(heights), 5)
         demo.speed.value = 5.0
         screen = Screen(glyphs="quad", color="256", size=(30, 100))
         first = demo.walls  # held, so a new maze can't reuse its memory (and id)

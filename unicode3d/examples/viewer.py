@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Model viewer, after the original C renderer: python -m unicode3d.examples.viewer [model.obj]
+"""Model viewer, after the original C renderer: python -m unicode3d.examples.viewer [model.obj|.gltf|.glb]
 
-Shows a Wavefront .obj model with its materials and textures (from the .mtl files it names). WASD moves the
-camera, arrow keys look around, q/e slow down / speed up the spin, c makes the model chrome (reflecting a
-sky), Esc or Ctrl-C quits.
+Shows a Wavefront .obj model with its materials and textures (from the .mtl files it names), or a glTF model
+with its own, playing its animations. WASD moves the camera, arrow keys look around, q/e slow down / speed up
+the spin, c makes the model chrome (reflecting a sky), n plays the model's next animation, Esc or Ctrl-C quits.
 """
 import argparse
 import sys
@@ -33,6 +33,11 @@ class Viewer:
         self.spin = 0.6  # radians per second
         self.axis = np.array([1.0, 1.0, 0.3])
         self.bar = StatusBar(self.renderer)
+        # Its animations, looping, the first playing; n moves to the next, and after the last to none.
+        self.clips = list(model.animations.values())
+        for clip in self.clips:
+            clip.loop = "loop"
+        self.playing = 0 if self.clips else None
 
     def frame(self, screen, dt, keys):
         fwd = np.array([np.sin(self.yaw) * np.cos(self.pitch), np.sin(self.pitch), -np.cos(self.yaw) * np.cos(self.pitch)])
@@ -57,6 +62,11 @@ class Viewer:
                 self.spin /= 2
             elif k == ord("e"):
                 self.spin = min(self.spin * 2, 20.0)
+            elif k == ord("n") and self.clips:
+                self.playing = None if self.playing == len(self.clips) - 1 else (
+                    0 if self.playing is None else self.playing + 1)
+                if self.playing is not None:
+                    self.clips[self.playing].apply(0.0)
             elif k == ord("c"):  # chrome, with a sky to reflect
                 chrome = self.renderer.background is None
                 for obj, own in zip(self.model, self.reflectivity):
@@ -65,6 +75,8 @@ class Viewer:
         self.camera.target = self.camera.position + fwd
         root = self.model.root
         root.rotation = quat_mul(quat_axis_angle(self.axis, self.spin * dt), root.rotation)
+        if self.playing is not None:
+            self.clips[self.playing].update(dt)
 
         rows, cols = screen.size()
         self.renderer.resize(cols, max(rows - 1, 1), screen.cell_pixels)
@@ -72,7 +84,11 @@ class Viewer:
         screen.erase()
         screen.draw_frame(fb)
         p = self.camera.position
-        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [c] chrome  [esc] quit   "
+        playing = ""
+        if self.clips:
+            name = "none" if self.playing is None else self.clips[self.playing].name
+            playing = f"[n] animation: {name} ({0 if self.playing is None else self.playing + 1}/{len(self.clips)})   "
+        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [c] chrome  {playing}[esc] quit   "
                               f"{sum(len(obj.mesh.faces) for obj in self.model)} tris   "
                               f"cam {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}   spin {self.spin:.2f}")
         screen.refresh()
@@ -81,7 +97,8 @@ class Viewer:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("model", nargs="?", help="Wavefront .obj file (default: a die)")
+    parser.add_argument("model", nargs="?", help="a Wavefront .obj or glTF .gltf/.glb file (default: a die)")
+    parser.add_argument("--still", action="store_true", help="don't spin the model")
     parser.add_argument("--double-sided", action="store_true", help="draw back faces (for meshes with bad winding)")
     parser.add_argument("--groups", action="store_true", help="load each group of the model as a part of its own")
     parser.add_argument("--fps", type=int, default=30)
@@ -98,7 +115,10 @@ def main():
         root = Node()
         model = Model(root, [Object3D(make_die(1.5), parent=root, double_sided=args.double_sided)])
     try:
-        run(Viewer(model).frame, args.fps, mouse=True, title="unicode3d viewer",
+        viewer = Viewer(model)
+        if args.still:
+            viewer.spin = 0.0
+        run(viewer.frame, args.fps, mouse=True, title="unicode3d viewer",
             **display_options(args))
     except KeyboardInterrupt:
         pass

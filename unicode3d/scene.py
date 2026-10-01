@@ -124,15 +124,21 @@ class Model:
     turning, scaling or hiding root does that to the whole model. render() takes the parts, and a Model unpacks
     into them: renderer.render([*model, floor], camera, lights).
 
-    names: the parts by the names the file gives them (a list for each name: its groups' and materials'); materials:
-    the materials the file defines, by name (models.Material); warnings: what in the file could not be loaded (a
-    texture that isn't there, say), which was left out rather than stopping the loading.
+    names: the parts by the names the file gives them (a list for each name: its groups', nodes', meshes' and
+    materials'); materials: the materials the file defines, by name (models.Material); warnings: what in the file
+    could not be loaded (a texture that isn't there, say), which was left out rather than stopping the loading.
+
+    From glTF files also nodes: the file's nodes by name, each a Node, or the part itself where a node has one
+    part (move, turn or hide one and what hangs from it goes too: a door, a wheel, an arm); and animations: its
+    animations by name, each an animation.Clip moving those nodes (call its update(dt) each frame).
     """
     root: Node
     objects: list
     names: dict = field(default_factory=dict)
     materials: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
+    nodes: dict = field(default_factory=dict)
+    animations: dict = field(default_factory=dict)
 
     def __iter__(self):
         return iter(self.objects)

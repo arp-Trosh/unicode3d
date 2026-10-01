@@ -339,6 +339,127 @@ def model():
                 {"background": Sky()})
 
 
+def _write_gltf(path):
+    """A glTF model (.glb) written to `path`: a textured crate, a smooth gold ball, a glowing lamp on an arm turned by
+    its node (child of a turned, scaled post: the node hierarchy), a cut-out fence (alphaMode MASK) and a see-through
+    pane (BLEND), and an animation swinging the arm (its rotation, CUBICSPLINE) and lifting the ball (STEP)."""
+    import io
+    import json
+    import struct
+    from PIL import Image
+    from unicode3d.mesh import make_box
+    from unicode3d.shapes import blob_mesh
+    from unicode3d.transforms import quat_axis_angle
+    blob, info = bytearray(), {"asset": {"version": "2.0"}, "bufferViews": [], "accessors": [], "meshes": [],
+                               "materials": [], "images": [], "textures": [], "nodes": []}
+
+    def add(kind, item):
+        info.setdefault(kind, []).append(item)
+        return len(info[kind]) - 1
+
+    def view(data):
+        blob.extend(b"\0" * (-len(blob) % 4))
+        blob.extend(data)
+        return add("bufferViews", {"buffer": 0, "byteOffset": len(blob) - len(data), "byteLength": len(data)})
+
+    def accessor(values, integer=False):
+        values = np.asarray(values)
+        kind = "SCALAR" if values.ndim == 1 else f"VEC{values.shape[1]}"
+        data = np.ascontiguousarray(values, "<u4" if integer else "<f4")
+        return add("accessors", {"bufferView": view(data.tobytes()), "componentType": 5125 if integer else 5126,
+                                 "count": len(values), "type": kind})
+
+    def image(pixels):
+        out = io.BytesIO()
+        Image.fromarray(np.asarray(pixels, np.uint8)).save(out, "PNG")
+        return add("textures", {"source": add("images", {"bufferView": view(out.getvalue()), "mimeType": "image/png"})})
+
+    def mesh(m, material, uv=None):
+        attributes = {"POSITION": accessor(m.vertices), "NORMAL": accessor(m.vertex_normals())}
+        if uv is not None:
+            attributes["TEXCOORD_0"] = accessor(uv)
+        return add("meshes", {"primitives": [{"attributes": attributes, "indices": accessor(m.faces.reshape(-1), True),
+                                              "material": material}]})
+
+    def quat(axis, angle):  # glTF's order: x, y, z, w
+        q = quat_axis_angle(axis, angle)
+        return [*q[1:], q[0]]
+
+    box = make_box(1.0)
+    box_uv = np.zeros((len(box.vertices), 2))
+    corners = np.array([(0, 1), (1, 1), (1, 0), (0, 0)], float)  # glTF's v runs down the image
+    box_uv[:] = np.tile(corners, (len(box.vertices) // 4, 1))
+    crate = (checks(32, 4, (0.75, 0.55, 0.3), (0.45, 0.3, 0.15)) * 255).astype(np.uint8)
+    y, x = np.mgrid[0:32, 0:32]
+    fence = np.zeros((32, 32, 4), np.uint8)
+    fence[...] = (90, 115, 75, 0)
+    fence[((x % 8) < 2) | ((y % 8) < 2), 3] = 255
+    pane = type(box)(np.array([(-0.5, 0, 0), (0.5, 0, 0), (0.5, 1, 0), (-0.5, 1, 0)], float),
+                     np.array([(0, 1, 2), (0, 2, 3)]))
+    mats = [{"name": "crate", "pbrMetallicRoughness": {"baseColorTexture": {"index": image(crate)},
+                                                       "metallicFactor": 0.0, "roughnessFactor": 0.8}},
+            {"name": "gold", "pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.6, 0.15, 1.0],
+                                                      "metallicFactor": 1.0, "roughnessFactor": 0.35}},
+            {"name": "post", "pbrMetallicRoughness": {"baseColorFactor": [0.2, 0.2, 0.25, 1.0], "metallicFactor": 0.0}},
+            {"name": "glow", "emissiveFactor": [1.0, 0.8, 0.4],
+             "pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.8, 0.4, 1.0], "metallicFactor": 0.0}},
+            {"name": "fence", "alphaMode": "MASK", "doubleSided": True,
+             "pbrMetallicRoughness": {"baseColorTexture": {"index": image(fence)}, "metallicFactor": 0.0}},
+            {"name": "glass", "alphaMode": "BLEND", "doubleSided": True,
+             "pbrMetallicRoughness": {"baseColorFactor": [0.3, 0.6, 1.0, 0.4], "metallicFactor": 0.0,
+                                      "roughnessFactor": 0.2}}]
+    for m in mats:
+        add("materials", m)
+    pane_uv = np.array([(0, 2), (3, 2), (3, 0), (0, 0)], float)
+    add("nodes", {"name": "Crate", "mesh": mesh(box, 0, box_uv), "translation": [0.5, 0.5, -0.4],
+                  "rotation": quat([0, 1, 0], 0.4)})
+    add("nodes", {"name": "Ball", "mesh": mesh(blob_mesh((0.35, 0.35, 0.35), rings=10, segments=16), 1),
+                  "translation": [-0.5, 0.35, 0.3]})
+    add("nodes", {"name": "Lamp", "mesh": mesh(blob_mesh((0.15, 0.15, 0.15), rings=6, segments=10), 3),
+                  "translation": [0.0, 0.0, 0.8]})
+    add("nodes", {"name": "Arm", "mesh": mesh(make_box(1.0), 2), "scale": [0.08, 0.08, 0.8],
+                  "translation": [0.0, 0.0, 0.4]})
+    add("nodes", {"name": "Swing", "children": [2, 3], "translation": [0.0, 1.6, 0.0]})
+    add("nodes", {"name": "Post", "mesh": mesh(make_box(1.0), 2), "scale": [0.12, 1.6, 0.12],
+                  "translation": [0.0, 0.8, 0.0]})
+    add("nodes", {"name": "Stand", "children": [4, 5], "translation": [-1.4, 0.0, -0.6], "rotation": quat([0, 1, 0], 0.8)})
+    add("nodes", {"name": "Fence", "mesh": mesh(pane, 4, pane_uv), "translation": [1.4, 0.0, 0.5],
+                  "rotation": quat([0, 1, 0], -0.5), "scale": [1.2, 1.1, 1.0]})
+    add("nodes", {"name": "Pane", "mesh": mesh(pane, 5), "translation": [0.2, 0.0, 1.0]})
+    info["scenes"], info["scene"] = [{"nodes": [0, 1, 6, 7, 8]}], 0
+    times = accessor(np.array([0.0, 1.0, 2.0]))
+    swing = np.array([quat([0, 1, 0], a) for a in (-0.6, 0.6, -0.6) for _ in range(3)])
+    swing[0::3] = swing[2::3] = 0.0  # tangents
+    info["animations"] = [{"name": "Swing", "samplers": [
+        {"input": times, "output": accessor(swing), "interpolation": "CUBICSPLINE"},
+        {"input": times, "output": accessor(np.array([(-0.5, 0.35, 0.3), (-0.5, 0.75, 0.3), (-0.5, 0.35, 0.3)])),
+         "interpolation": "STEP"}],
+        "channels": [{"sampler": 0, "target": {"node": 4, "path": "rotation"}},
+                     {"sampler": 1, "target": {"node": 1, "path": "translation"}}]}]
+    blob.extend(b"\0" * (-len(blob) % 4))
+    info["buffers"] = [{"byteLength": len(blob)}]
+    text = json.dumps(info).encode()
+    text += b" " * (-len(text) % 4)
+    body = struct.pack("<II", len(text), 0x4E4F534A) + text + struct.pack("<II", len(blob), 0x004E4942) + bytes(blob)
+    with open(path, "wb") as f:
+        f.write(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+    return path
+
+
+def gltf():
+    """A glTF model (gltf.load_gltf, added after 0.6.0): textures, PBR materials as unicode3d's (gold reflecting the
+    sky), cut-out and see-through parts, a node hierarchy, and its animation posed partway through."""
+    from unicode3d.models import load_model
+    with tempfile.TemporaryDirectory() as folder:
+        loaded = load_model(_write_gltf(os.path.join(folder, "scene.glb")))
+    loaded.animations["Swing"].apply(1.5)
+    ground = floor(6.0, texture=checks(64, 4))
+    sun = Light(direction=np.array([0.5, -1.0, -0.6]), shadows=True)
+    return Shot([Object3D(ground, color=(255, 255, 255)), *loaded], camera((0.4, 2.2, 4.4), (0.0, 0.6, 0.0)),
+                [sun, PointLight(loaded.nodes["Lamp"].to_world(np.zeros(3)), color=(255, 200, 140), range=3.0)],
+                {"background": Sky()})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -362,6 +483,7 @@ SCENES = {
     "materials": materials,
     "stretched": stretched,
     "model": model,
+    "gltf": gltf,
 }
 
 

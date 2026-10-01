@@ -5,8 +5,9 @@
 The camera walks through a random maze from the blue marker to the gold one,
 keeping a hand on the right-hand wall (or taking the shortest way), spins round
 at the exit and starts a new maze. The panel sets the maze's size, the walking
-speed and the fog, and switches the headlamp, the textures (off: flat colours
-per face), a polished floor that mirrors the maze, and a map.
+speed and the fog (fading into the dark, or into haze lit by the headlamp), and
+switches the headlamp, the textures (off: flat colours per face), a polished
+floor that mirrors the maze, and a map.
 """
 import argparse
 from collections import deque
@@ -14,6 +15,7 @@ from collections import deque
 import numpy as np
 
 from .hud import StatusBar
+from ..animation import Track
 from ..background import Fog
 from ..color import Color
 from ..keys import Key
@@ -28,6 +30,11 @@ BLOCK = 6  # cells a side in each piece of the maze's mesh, so pieces out of vie
 N, E, S, W = range(4)
 DX, DZ = (0, 1, 0, -1), (-1, 0, 1, 0)  # north is -z, east +x
 WALL_COLOR, FLOOR_COLOR, CEILING_COLOR = (150, 70, 50), (110, 110, 115), (205, 200, 185)
+LANTERN = (255, 240, 215)  # the headlamp's colour
+# Haze: fog lit by the headlamp, its colour dimmed (or, with the headlamp off, a faint grey of daylight).
+HAZE, DAY_HAZE = tuple(round(c * 0.4) for c in LANTERN), (60, 62, 66)
+# The gems bob up and down between these heights, easing at each end; the exit's half a beat behind the start's.
+BOB = Track([(0.0, EYE - 0.12), (0.9, EYE + 0.12)], easing="ease_in_out", loop="pingpong")
 
 
 # ----- the maze --------------------------------------------------------------------------
@@ -187,17 +194,18 @@ class Maze:
         self.size = Slider("Size", size, 3, 40, keys="[]", length=10, on_change=lambda v: self.new_maze())
         self.speed = Slider("Speed", 1.5, 0.5, 5.0, step=0.5, keys="-=", length=10, fmt=lambda v: f"{v:.1f}")
         self.fog = Slider("Fog", 0.45, 0.0, 0.9, step=0.05, keys=",.", length=8, fmt=lambda v: f"{v:.2f}")
+        self.fog_into = Choice("Into (f)", ("dark", "haze"), key="f")
         self.headlamp = Toggle("Headlamp (l)", True, key="l")
         self.textured = Toggle("Textures (t)", True, key="t")
         self.polished = Toggle("Polished floor (p)", False, key="p")
         self.show_map = Toggle("Map (m)", True, key="m")
         self.route = Choice("Route (r)", ("right-hand wall", "shortest way"), key="r", on_change=lambda v: self.new_maze())
-        self.panel = Panel([self.size, self.speed, self.fog, self.headlamp, self.textured, self.polished, self.show_map,
+        self.panel = Panel([self.size, self.speed, self.fog, self.fog_into, self.headlamp, self.textured, self.polished, self.show_map,
                             self.route])
         # Glowing, see-through gems: the corridor shows through them.
         self.start_marker = Object3D(gem_mesh(), color=(60, 120, 255), emissive=0.8, scale=0.3, opacity=0.35)
         self.exit_marker = Object3D(gem_mesh(), color=(255, 200, 40), emissive=0.8, scale=0.3, opacity=0.35)
-        self.paused = False
+        self.paused, self.clock = False, 0.0
         self.new_maze()
 
     def new_maze(self):
@@ -290,6 +298,7 @@ class Maze:
             elif ev == ord("n"):
                 self.new_maze()
         position, yaw = self.advance(0.0 if self.paused else dt)
+        self.clock += 0.0 if self.paused else dt
         forward = np.array([np.sin(yaw), 0.0, -np.cos(yaw)])
         camera = Camera(position=position, target=position + forward, fov=70.0, near=0.05, far=200.0)
 
@@ -298,17 +307,19 @@ class Maze:
         self.floor.reflectivity = 0.35 if self.polished.value else 0.0
         spin = quat_axis_angle((0, 1, 0), 2.0 * (self.t + 0.37 * len(self.visited)))
         self.start_marker.rotation = self.exit_marker.rotation = spin
+        self.start_marker.position[1] = BOB.at(self.clock)
+        self.exit_marker.position[1] = BOB.at(self.clock + BOB.duration / 2)
         if self.headlamp.value:
             # Carried a little to the right of and below the eye, so that its shadows show beside what casts them.
             lantern = position + 0.3 * np.array([np.cos(yaw), 0.0, np.sin(yaw)]) + np.array([0.0, -0.25, 0.0])
             lights = [Light(direction=np.array([0.3, -1.0, -0.6]), ambient=0.12, diffuse=0.25, specular=0.0),
-                      PointLight(lantern, color=(255, 240, 215), diffuse=0.85, specular=0.2, range=5 * CELL,
-                                 shadows=True)]
+                      PointLight(lantern, color=LANTERN, diffuse=0.85, specular=0.2, range=5 * CELL, shadows=True)]
         else:
             lights = Light(direction=np.array([0.3, -1.0, -0.6]), ambient=0.4, diffuse=0.5, specular=0.1)
-        # Fog in the world, fading into the dark: thicker further up the slider.
+        # Fog in the world, fading into the dark or into haze: thicker further up the slider.
         v = self.fog.value
-        self.renderer.fog = Fog(start=CELL, end=CELL * (3.0 + 24.0 * (1.0 - v) ** 2)) if v > 0 else 0.0
+        haze = None if self.fog_into.value == "dark" else HAZE if self.headlamp.value else DAY_HAZE
+        self.renderer.fog = Fog(start=CELL, end=CELL * (3.0 + 24.0 * (1.0 - v) ** 2), color=haze) if v > 0 else 0.0
 
         rows, cols = screen.size()
         self.renderer.resize(cols, max(rows - 2, 1), screen.cell_pixels)

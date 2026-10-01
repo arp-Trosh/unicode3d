@@ -8,14 +8,20 @@ terminals alike. Ported in spirit from https://github.com/ShakedAp/ASCII-rendere
 """
 __version__ = "0.6.0"
 
-from .animation import Animation, RotationTrack, Track
+from .animation import Animation, Clip, RotationTrack, SplineTrack, Track
 from .background import Fog, Gradient, Sky, SkyBox
 from .color import Color
 from .keys import HeldKeys, Key, KeyRelease, MouseEvent
 from .mesh import Mesh, make_box
+from .gltf import load_gltf
 from .models import Material, load_model, load_mtl, load_obj
 from .raster import FrameBuffer
 from .scene import Camera, Light, Model, Node, Object3D, Pick, PointLight, Renderer
 from .terminal import Screen, add_display_args, compile_kernels, display_options, frame_to_text, run
 from .texture import load_image
 from .ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
+
+from .kernel_cache import refresh as _refresh_kernel_cache
+
+_refresh_kernel_cache()  # drop cached kernels that were compiled with helpers since changed (see kernel_cache.py)
+del _refresh_kernel_cache

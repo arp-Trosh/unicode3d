@@ -79,8 +79,10 @@ stop the program: frames may be slower or wrong for a moment, never an exception
 `scene.py` holds what a scene is made of (`Camera`, `Node`, `Object3D`) and re-exports the rest; `renderer.py`
 the `Renderer`, which inherits its shadow-map methods from `shadows.ShadowMaps` and its mirror passes from
 `mirrors.Mirrors`; `shading.py` the shading kernels; `raster.py` projection and rasterizing; `lights.py` the
-lights. Instances reach the kernels as `inst` dicts of arrays (`Renderer._instances`): each has a `lin` (3, 3)
-matrix (rotation and per-axis scale, parents included) and `pos`, and `flip` where the matrix mirrors.
+lights; `models.py` and `gltf.py` loading models (OBJ and glTF; no kernels); `kernel_cache.py` keeps Numba's
+cache in step with helpers in other modules. Instances reach the kernels as `inst` dicts of arrays
+(`Renderer._instances`): each has a `lin` (3, 3) matrix (rotation and per-axis scale, parents included) and `pos`,
+and `flip` where the matrix mirrors.
 
 ## Checking a change
 
@@ -98,6 +100,9 @@ matrix (rotation and per-axis scale, parents included) and `pos`, and `flip` whe
   to alter it shows where (pictures in the `diff` folder it names). Add a scene for a new feature (built with
   constructor arguments, so that older revisions without the feature skip it).
 - Editing a module makes Numba recompile its kernels on the next run (the cache is keyed on the source file), so
-  the first run after an edit is slow. That is expected. Kernels in *other* modules that call a helper you edited
-  (`texture.sample` from `shading.py`, say) are not recompiled, and keep running the old helper: after editing a
-  helper used elsewhere, delete `unicode3d/__pycache__/*.nbi` and `*.nbc`.
+  the first run after an edit is slow. That is expected. Numba alone wouldn't recompile kernels in *other* modules
+  that call a helper you edited (`texture.sample` from `shading.py`, say); `kernel_cache.refresh()`, run when
+  `unicode3d` is imported, does: it fingerprints the modules each kernel module calls into (and the numbers and
+  arrays it imports) in `__pycache__/<module>.deps`, and drops that module's cache when they change. A kernel
+  module must reach its helpers through names it imports (`from .texture import sample`, or `from . import
+  texture`), which is how `refresh()` finds them. `test_kernel_cache.py` shows the stale case and the fix.

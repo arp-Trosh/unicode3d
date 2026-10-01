@@ -76,6 +76,25 @@ def quat_to_matrix(q):
     ])
 
 
+def quat_from_matrix(m):
+    """The rotation quaternion (w first) of a 3x3 rotation matrix (orthonormal, determinant 1)."""
+    m = np.asarray(m, dtype=float)
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0.0:
+        s = 2.0 * np.sqrt(trace + 1.0)
+        q = [0.25 * s, (m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s]
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2.0 * np.sqrt(max(1.0 + m[0, 0] - m[1, 1] - m[2, 2], 1e-12))
+        q = [(m[2, 1] - m[1, 2]) / s, 0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s]
+    elif m[1, 1] > m[2, 2]:
+        s = 2.0 * np.sqrt(max(1.0 + m[1, 1] - m[0, 0] - m[2, 2], 1e-12))
+        q = [(m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s]
+    else:
+        s = 2.0 * np.sqrt(max(1.0 + m[2, 2] - m[0, 0] - m[1, 1], 1e-12))
+        q = [(m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s]
+    return normalize(np.array(q))
+
+
 def quat_slerp(a, b, t):
     """The rotation a fraction t (0..1) of the way from quaternion a to b, turning at a steady rate about one
     axis (spherical linear interpolation), the short way round."""

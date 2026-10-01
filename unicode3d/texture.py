@@ -11,6 +11,8 @@ Textures with an alpha channel (opacity) are kept with their colour premultiplie
 by it, so that shrinking them averages the colour of what is there, not of the
 clear parts: a leaf's edge stays green rather than fading to black.
 """
+import io
+
 import numpy as np
 from numba import njit
 from PIL import Image
@@ -24,9 +26,11 @@ MAX_TEXTURE = 1024     # load_image's default limit on a texture's width and hei
 
 def load_image(path, max_size=MAX_TEXTURE):
     """An image file (PNG, JPEG, or anything else Pillow reads) as a texture: (H, W, 3) colours, 0..1 sRGB, or
-    (H, W, 4) with alpha where the image has transparency. Images wider or taller than max_size (None: no
-    limit) are shrunk to fit: a terminal shows few pixels, and a 4096x4096 texture would take about a
-    gigabyte once mipmapped in floats."""
+    (H, W, 4) with alpha where the image has transparency. path is a file name, an open binary file, or the
+    file's contents (bytes). Images wider or taller than max_size (None: no limit) are shrunk to fit: a terminal
+    shows few pixels, and a 4096x4096 texture would take about a gigabyte once mipmapped in floats."""
+    if isinstance(path, (bytes, bytearray, memoryview)):
+        path = io.BytesIO(path)
     with Image.open(path) as image:
         image.load()
         alpha = image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info

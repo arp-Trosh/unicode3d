@@ -7,6 +7,7 @@ import numpy as np
 
 from .dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from .hud import StatusBar
+from ..background import Sky
 from ..scene import Camera, Light, Object3D, Renderer
 from ..mesh import Mesh
 from ..color import Color
@@ -21,6 +22,16 @@ HUD_ROWS = 2
 TABLE_COLOR = (112, 78, 52)  # a wooden table top
 GLASS_OPACITY = 0.45  # of the dice, made of glass
 TABLE_POLISH = 0.35   # the table's reflectivity, polished
+# Around the table, seen only in what the dice reflect (the table fills the view): a dim ceiling, bright walls at eye
+# level and a wooden floor.
+ROOM = Sky(zenith=(35, 32, 30), horizon=(230, 220, 200), ground=(80, 55, 35))
+# What the dice are made of (f cycles through them): Object3D material settings.
+FINISHES = {
+    "plastic": dict(specular=1.5, shininess=10.0, reflectivity=0.0),
+    "rubber": dict(specular=0.0, shininess=None, reflectivity=0.0),
+    "chrome": dict(specular=3.0, shininess=40.0, reflectivity=0.7),  # reflecting the room (ROOM)
+    "pearl": dict(specular=0.8, shininess=4.0, reflectivity=0.15),
+}
 CAMERA_DIR = normalize([0.0, 0.8, 0.6])  # from the table towards the camera
 
 
@@ -28,7 +39,7 @@ class DiceDemo:
     def __init__(self, count, seed=None):
         self.rng = np.random.default_rng(seed)
         self.mesh = make_die()
-        self.renderer = Renderer(1, 1)
+        self.renderer = Renderer(1, 1, background=ROOM)
         self.camera = Camera(target=np.array([0.0, 0.4, 0.0]), fov=35.0)
         self.light = Light(shadows=True)
         # The table top the dice land on (at y = 0), wide enough for the longest row and their bounces: flat,
@@ -39,6 +50,7 @@ class DiceDemo:
         self.table = Object3D(top, color=TABLE_COLOR)
         self.bar = StatusBar(self.renderer)
         self.glass = False  # see-through dice
+        self.finish = "plastic"
         self.set_count(count)
 
     def set_count(self, n):
@@ -78,8 +90,13 @@ class DiceDemo:
                 self.glass = not self.glass
             elif k in (ord("m"), ord("M")):
                 self.table.reflectivity = 0.0 if self.table.reflectivity else TABLE_POLISH
+            elif k in (ord("f"), ord("F")):
+                names = list(FINISHES)
+                self.finish = names[(names.index(self.finish) + 1) % len(names)]
         for die in self.dice:
             die.opacity = GLASS_OPACITY if self.glass else 1.0
+            for name, value in FINISHES[self.finish].items():
+                setattr(die, name, value)
 
         self.t += dt
         for die, anim in zip(self.dice, self.anims):
@@ -98,8 +115,8 @@ class DiceDemo:
         else:
             status = "Showing: " + "  ".join(str(DIE_VALUES[top_face(d.rotation)]) for d in self.dice)
         screen.text(rows - 2, 1, status, bold=True)
-        self.bar.draw(screen, f"[space] roll   [+/-] dice ({len(self.dice)})   [g] glass   [m] polished table   "
-                              "[q] quit")
+        self.bar.draw(screen, f"[space] roll   [+/-] dice ({len(self.dice)})   [f] finish ({self.finish})   [g] glass   "
+                              "[m] polished table   [q] quit")
         screen.refresh()
         return True
 

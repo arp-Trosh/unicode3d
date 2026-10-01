@@ -156,11 +156,12 @@ class LoadModelTests(ModelFiles):
         model.root.visible = False
         self.assertFalse(Renderer(40, 20).render([*model], Camera(), Light()).drawn.any())
 
-    def test_only_obj_files(self):
+    def test_only_obj_and_gltf_files(self):
         with self.assertRaises(ValueError):
-            load_model(self.path("crate.glb"))
-        with self.assertRaises(OSError):
-            load_model(self.path("nothing.obj"))
+            load_model(self.path("crate.fbx"))
+        for name in ("nothing.obj", "nothing.glb"):
+            with self.assertRaises(OSError):
+                load_model(self.path(name))
 
     def test_missing_mtllib_still_loads(self):
         self.write("lost.obj", "mtllib lost.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl red\nf 1 2 3\n")

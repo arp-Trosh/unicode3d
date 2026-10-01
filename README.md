@@ -64,7 +64,7 @@ The first run compiles the renderer, which takes about 10 seconds (see [First ru
 
 ```sh
 python3 -m unicode3d [-n DICE] [--seed N]                # dice roll demo: space rolls, +/- dice count, q quits
-python3 -m unicode3d.examples.viewer [model.obj]         # model viewer, materials and textures too (WASD/arrows, q/e spin, Esc)
+python3 -m unicode3d.examples.viewer [model]             # model viewer: .obj, .gltf or .glb, with animations (WASD/arrows, q/e spin, Esc)
 python3 -m unicode3d.examples.balls [-n BALLS]           # balls bouncing around a room, with a settings panel
 python3 -m unicode3d.examples.maze [--size N]            # the Windows 98 maze screensaver
 python3 -m unicode3d.examples.room                       # walk around a courtyard of things to look at (WASD)
@@ -77,26 +77,31 @@ settings at the bottom right: F2 cycles the glyph set, F3 the colours, F4 the ta
 clicked too. A small font and a large terminal give the most detail.
 
 - **dice** (`python3 -m unicode3d`): textured dice that tumble onto a table, casting shadows, and
-  land on a chosen face; g makes them glass, m polishes the table so that it mirrors them.
-- **viewer**: spins an OBJ model, or a die when given none; c makes it chrome, reflecting a sky;
-  `--double-sided` draws back faces for meshes with inconsistent winding.
+  land on a chosen face; f changes what they are made of (plastic, rubber, chrome, pearl), g makes
+  them glass, m polishes the table so that it mirrors them.
+- **viewer**: spins a model (OBJ or glTF, with its materials and textures), or a die when given none,
+  and plays a glTF model's animations (n moves to the next); c makes it chrome, reflecting a sky;
+  `--still` stops the spin, `--double-sided` draws back faces for meshes with inconsistent winding.
 - **balls**: up to 500 balls of many colours drift and bounce around a room seen from outside (the
   near walls are see-through, since only the insides of the walls are drawn). The panel on the left
   sets the number of balls, their size, the room's size and their speed, and switches collisions,
-  gravity, glass (every third ball see-through), a mirror floor, a lamp (a point light and a glowing
-  bulb) and the camera's orbit; the sun and the lamp both cast shadows, tinted through the glass.
+  gravity, squashing (a ball squashes along each bump and wobbles back to round), mixed materials
+  (rubber, plastic, metal, pearl), glass (every third ball see-through), a mirror floor, a lamp (a
+  point light and a glowing bulb) and the camera's orbit; the sun and the lamp both cast shadows,
+  tinted through the glass.
   Drag the sliders, click the toggles, use their keys (shown in the panel), or Tab through them.
   Click a ball to make it glow (picking). Balls small on screen use meshes with fewer triangles, so
   hundreds stay fast. Shows: many objects, shadows, transparency, a mirror, point lights, emissive
-  objects, picking, widgets.
+  objects, picking, widgets, scaling along each axis, materials.
 - **maze**: the camera walks a random maze, keeping a hand on the right-hand wall (or taking the
-  shortest way), from the blue marker to the gold one (glowing see-through gems), spins round at the
-  exit and starts a new maze. The panel sets the size (3 to 40 cells a side), the speed and the
-  thickness of the fog, and switches the headlamp (a lantern carried beside the camera, casting
-  shadows), the textures (off: flat colours per face), a polished floor that mirrors the maze, and a
-  map. Space pauses, n starts a new maze. Shows: textures, a point light moving with the camera,
-  shadows, transparency, a mirror, fog fading into the dark, per-face colours, parts of the maze out
-  of view skipped whole.
+  shortest way), from the blue marker to the gold one (glowing see-through gems, bobbing), spins
+  round at the exit and starts a new maze. The panel sets the size (3 to 40 cells a side), the speed
+  and the thickness of the fog and what it fades into (the dark, or a haze lit by the headlamp), and
+  switches the headlamp (a lantern carried beside the camera, casting shadows), the textures (off:
+  flat colours per face), a polished floor that mirrors the maze, and a map. Space pauses, n starts
+  a new maze. Shows: textures, a point light moving with the camera, shadows, transparency, a
+  mirror, fog fading into the dark or a colour, per-face colours, animation tracks, parts of the maze
+  out of view skipped whole.
 - **room**: an engine showcase to walk around: an open courtyard, WASD to walk, Q/E or Left/Right to
   turn, Up/Down to look up and down. Inside are dice turning on a pedestal in a glass case, an
   orrery (a planet and its moon circling a glowing sun, built as a scene graph), a table with
@@ -182,14 +187,15 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   48x48 face texture a dozen pixels across stays steady instead of shimmering as a die turns, and a
   floor is crisp close by and smooth towards the horizon. Textures repeat (tile) where texture
   coordinates go beyond 0..1.
-- **Models:** Wavefront OBJ files with their MTL materials (colour, highlights, glow, opacity,
-  textures and cut-outs), loaded as a part for each material under one node.
+- **Models:** glTF 2.0 files (`.gltf`, `.glb`) with their node hierarchy, PBR materials (mapped
+  onto unicode3d's), textures and animations; Wavefront OBJ files with their MTL materials (colour,
+  highlights, glow, opacity, textures and cut-outs).
 - **Fog and depth cues:** fog by distance in the world, fading far surfaces into the sky or
   background (or a colour), or simple depth cueing; and where one surface passes in front of another
   the far side gets a dark outline.
 - **Shapes and motion:** a scene graph of nodes and objects, scaling along each axis separately,
   mesh builders (extruded text, ellipsoids, boxes, cushions), and animation along keyframes with
-  easing.
+  easing, steps or splines, in clips that move many parts at once.
 - **Backgrounds:** behind the scene, a colour, a vertical gradient, a sky that follows the camera
   (zenith, horizon and ground colours), or a sky box of six pictures.
 - **Output:** the screen is a grid of cells, and each refresh sends only the cells that changed, as
@@ -403,20 +409,62 @@ by size).
 <details>
 <summary><h3 id="models">Models</h3></summary>
 
-`load_model(path)` loads a Wavefront `.obj` file, with the `.mtl` files it names and their
-textures, as a `Model`: an `Object3D` for each material, all with `model.root` (a `Node`) as their
-parent, so that moving, turning, scaling or hiding the root does it to the whole model. Pass the
-parts to `render()`; a model unpacks into them:
+`load_model(path)` loads a glTF 2.0 file (`.gltf` with its `.bin` and images, or a single `.glb`),
+or a Wavefront `.obj` file with the `.mtl` files it names and their textures, as a `Model`: its
+parts (`Object3D`s), all under `model.root` (a `Node`), so that moving, turning, scaling or hiding
+the root does it to the whole model. Pass the parts to `render()`; a model unpacks into them:
 
 ```python
 from unicode3d import load_model
 
-ship = load_model("models/ship.obj").fit(2.0)    # centred, and 2 units across at its widest
+ship = load_model("models/ship.glb").fit(2.0)    # centred, and 2 units across at its widest
 ship.root.position = np.array([0.0, 1.0, 0.0])
 for warning in ship.warnings:                    # a texture that isn't there, say: left out
     print(warning)
 fb = renderer.render([*ship, ground], camera, lights)
 ```
+
+glTF is the format to prefer: it is Blender's own export, loads fast (its arrays go straight into
+numpy), and keeps a model's parts, their hierarchy and its animations:
+
+- **Nodes:** each node of the file's scene becomes a `Node`, or the `Object3D` itself where it has
+  a mesh of one part, placed by its translation, rotation and scale (or its matrix) under its
+  parent. `model.nodes` has them by name: move, turn or hide `model.nodes["Door"]` and what hangs
+  from it goes too. `model.names` lists the parts by node, mesh and material name.
+- **Meshes:** positions, normals (flat where a mesh has none, as glTF asks), texture coordinates,
+  vertex colours, triangles, strips and fans, sparse and quantized data, and morph targets at their
+  default weights. Skinned meshes load in the pose their joints give them. Points and lines are
+  skipped. Two nodes using one mesh share it.
+- **Materials** are physically based in glTF, and map approximately onto unicode3d's: the base colour
+  (and its texture) is the colour; rough surfaces get no highlights, smooth ones tight bright ones
+  (`specular`, `shininess`); metal reflects (`reflectivity`), much less when rough, since reflections
+  here take no tint from the metal; `emissiveFactor` gives `emissive`; `alphaMode` `OPAQUE`, `MASK`
+  (cut out at `alphaCutoff`) and `BLEND` (see-through) are solid, cut-out and see-through; and
+  `doubleSided` draws back faces. Extensions read: `KHR_texture_transform`,
+  `KHR_materials_emissive_strength`, `KHR_materials_unlit`, `KHR_mesh_quantization` and
+  `EXT_texture_webp`. Normal, occlusion and metallic-roughness maps are ignored (a terminal's pixels
+  would show little of them), and textures repeat whatever their sampler says.
+- **Animations** come as `model.animations`, by name: each a `Clip` (see [Animation](#animation))
+  moving the nodes along their translation, rotation and scale keyframes, with linear, step or
+  cubic-spline interpolation. Skinned and morph-target animation aren't supported: those meshes
+  stay in the pose they loaded in, and `model.warnings` says so.
+- **Refused:** a file that needs Draco or meshopt compression or KTX2 textures raises `ValueError`
+  saying which, rather than loading wrong; so does one that isn't glTF 2 or is broken in its
+  structure. Smaller problems (a missing image, a broken accessor) leave that piece out, with a
+  warning. Cameras and lights in the file aren't loaded.
+
+```python
+robot = load_model("robot.glb").fit(2.0)
+wave = robot.animations["Wave"]
+wave.loop = "loop"
+
+def frame(screen, dt, keys):
+    wave.update(dt)
+    robot.nodes["Head"].rotation = quat_axis_angle((0, 1, 0), head_turn)  # parts move by hand too
+    ...
+```
+
+From an OBJ file, `load_model` makes an `Object3D` for each material:
 
 - **From the OBJ:** positions (and colours, where each `v` line has r g b after x y z), texture
   coordinates, normals, polygons (split into triangles), negative indices, `usemtl` and `mtllib`,
@@ -430,7 +478,10 @@ fb = renderer.render([*ship, ground], camera, lights)
   model was made on, are found by the file's name.
 - `split_groups=True` makes a part for each group (`o` or `g`) and material, so that parts can move
   on their own (a door, a wheel); `model.names` lists the parts by group and material name.
-- `double_sided=True` draws the backs of faces, for models whose faces don't all wind the same way.
+- `double_sided=True` draws the backs of faces, for models whose faces don't all wind the same way
+  (OBJ or glTF).
+- Texture files (OBJ or glTF) are also looked for by name beside the model, and in the folder above
+  it (a kit's models often share a `Textures` folder).
 - Textures are shrunk to at most 1024 texels across (`max_texture`): a terminal shows few pixels,
   and a 4096x4096 texture would take about a gigabyte once mipmapped.
 
@@ -675,14 +726,21 @@ colour fades surfaces into it.
   `lerp(a, b, t)` blends numbers or arrays.
 - Easing curves map 0..1 onto 0..1 to shape a move: `linear`, `ease_in`, `ease_out`, `ease_in_out`,
   `ease_out_back` (overshoots and settles, like a door against its stop), `ease_out_bounce` (lands
-  and bounces); `EASINGS` has them by name.
+  and bounces), `step` (holds, then jumps at the next keyframe); `EASINGS` has them by name.
 - `Track(keys, easing=linear, loop="once")` holds keyframes `(time, value)`, values numbers or arrays
   (a position, a scale, a colour), and `track.at(t)` blends between them. A keyframe given as `(time,
   value, easing)` eases the stretch leading up to it. `loop` is `"once"` (hold the ends), `"loop"` or
   `"pingpong"`. `RotationTrack` does the same for quaternions, with `quat_slerp`.
+- `SplineTrack(keys, loop="once", rotation=False)` curves through keyframes `(time, value,
+  in_tangent, out_tangent)` (cubic Hermite splines, as glTF animations use); `rotation=True` for
+  quaternions.
 - `Animation(obj, position=None, rotation=None, scale=None, speed=1)` moves an `Object3D` or `Node`
   along tracks: call `anim.update(dt)` every frame (it returns whether it is still playing), or
   `anim.apply(t)` for a time of your own.
+- `Clip(animations, name="", loop="once", speed=1)` plays several `Animation`s on one clock, from 0
+  to the end of the longest, and does the looping for them all (`"once"`, `"loop"`, `"pingpong"`):
+  a loaded glTF model's animations are clips, and they group your own as well. It has `update(dt)`,
+  `apply(t)`, `done()`, `duration` and `targets`.
 
 ```python
 from unicode3d.animation import Animation, RotationTrack, Track
@@ -858,7 +916,9 @@ takes about 40 seconds, so `compile_kernels()` compiles them in several Python p
 (up to six, each using about 300 MB while it works), which takes about 10 seconds on a 6-core
 machine. The result is cached (in `__pycache__` beside the code, or a user cache folder if that
 can't be written), so later runs start in a fraction of a second. Upgrading unicode3d or Numba, or
-moving to another CPU, compiles it again.
+moving to another CPU, compiles it again. (Numba checks each kernel against its own file only; on
+import, unicode3d also checks the files of the helpers each kernel calls, and drops a kernel compiled
+with older ones, so an upgrade never runs stale code.)
 
 `run()` compiles before the first frame and shows "First run compile, please wait..." while it does;
 programs that drive a `Screen` themselves can call `compile_kernels()` at a moment of their
@@ -907,11 +967,12 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `mirrors.py`    | mirrors: the extra passes that draw what flat reflective objects show |
 | `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), projection of all objects at once with view culling and near-plane clipping, multi-sample z-buffered rasterizer |
 | `mesh.py`       | `Mesh` with vertex normals (its own or worked out), per-vertex or per-face colours, bounding sphere and cached mipmaps, textured `make_box` |
-| `models.py`     | loading models: OBJ files with their MTL materials and textures (`load_model`, `load_obj`) |
+| `models.py`     | loading models (`load_model`): OBJ files with their MTL materials and textures (`load_obj` as one mesh) |
+| `gltf.py`       | loading glTF 2.0 models (`load_gltf`): nodes, meshes, PBR materials as unicode3d's, textures, animations as clips |
 | `texture.py`    | loading images, mipmap chains, trilinear sampling, repeating textures |
 | `transforms.py` | projection and view matrices, quaternions, `quat_slerp` |
 | `background.py` | what is drawn behind the scene: `Gradient`, `Sky`, `SkyBox`; and `Fog` |
-| `animation.py`  | easing curves, keyframe `Track`s and `RotationTrack`s, and `Animation`, which moves an object along them |
+| `animation.py`  | easing curves, keyframe `Track`s, `RotationTrack`s and `SplineTrack`s, `Animation`, which moves an object along them, and `Clip`, which plays several together |
 | `shapes.py`     | mesh builders: `text_mesh` (extruded text in any bitmap font), `bitmap_mesh`, `blob_mesh` (ellipsoid), `block_mesh`, `pillow_mesh` (a 2D shape puffed into a cushion), `merge_meshes` |
 | `color.py`      | sRGB/linear conversion, named `Color`s, OKLab palette matching, dithering, SGR colour codes |
 | `glyphs.py`     | glyph sets (half, quad, sextant, ascii) and matching pixels to cells |
@@ -920,6 +981,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
 | `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections on F2-F6) |
 | `precompile.py` | compiling the kernels on several cores at once on the first run (their argument types are in `kernel_signatures.py`) |
+| `kernel_cache.py` | dropping cached kernels compiled with helpers (in other modules) that have since changed |
 | `examples/dice.py`   | pip-textured die, `orientation_showing`, `top_face`, `RollAnimation` (result chosen first, then animated to land on it); Zombie Dice builds its dice on it |
 | `examples/hud.py`    | the status line the demos share: help text and `DisplayControls` |
 | `examples/demo.py`   | the dice roll demo (`python3 -m unicode3d`) |

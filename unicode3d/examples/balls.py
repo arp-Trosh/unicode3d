@@ -5,8 +5,8 @@
 Balls of many colours drift around a room seen from outside (the walls nearest
 the camera are see-through, since only their insides are drawn). The panel on
 the left sets how many balls there are, their size, the room's size and their
-speed, and switches collisions, gravity, glass balls, a mirror floor, the lamp and the camera's orbit
-(F5 switches shadows, F6 reflections).
+speed, and switches collisions, gravity, squashing on bounces, mixed materials, glass balls, a mirror
+floor, the lamp and the camera's orbit (F5 switches shadows, F6 reflections).
 Click a ball to make it glow. Tab moves through the panel; arrows then change
 the focused setting, otherwise they turn the camera.
 """
@@ -23,11 +23,23 @@ from ..mesh import Mesh, make_box
 from ..scene import Camera, Light, Object3D, PointLight, Renderer
 from ..shapes import blob_mesh
 from ..terminal import add_display_args, display_options, run
+from ..transforms import quat_identity
 from ..ui import Panel, Slider, Toggle
 
 GLASS_OPACITY = 0.3  # of the glass balls
+# Squash and stretch (s): a bump that changes a ball's velocity by dv (units a second) squashes it along dv, by
+# SQUASH * |dv| (at most MAX_SQUASH; bumps under MIN_BUMP, like resting on the floor, are ignored), and it wobbles
+# back to round in about half a second.
+SQUASH, MAX_SQUASH, MIN_BUMP = 0.12, 0.4, 0.6
+WOBBLE_DECAY, WOBBLE_RATE = 7.0, 22.0  # per second; radians a second
+# Mixed materials (t): (specular, shininess, reflectivity), one of these picked at random for each ball.
+FINISHES = ((0.0, None, 0.0),   # rubber
+            (1.0, None, 0.0),   # plastic
+            (2.5, 60.0, 0.5),   # metal, reflecting the gradient behind the room
+            (0.8, 4.0, 0.1))    # pearl
 MAX_BALLS = 500   # about 15 ms a frame at 180x50 cells on a 6-core machine: room to push, not to freeze
 BASE_SPEED = 1.5  # units a second at speed 1
+IDENTITY = quat_identity()
 
 
 def grid_texture(res, base, line, cells=8):
@@ -107,15 +119,20 @@ class Balls:
         self.speed = Slider("Speed", 1.0, 0.0, 3.0, step=0.1, keys=";'", length=14, fmt=lambda v: f"{v:.1f}")
         self.collide = Toggle("Collisions (c)", True, key="c")
         self.gravity = Toggle("Gravity (g)", False, key="g")
+        self.squash = Toggle("Squash (s)", True, key="s")
+        self.mixed = Toggle("Materials (t)", False, key="t")
         self.mirror = Toggle("Mirror floor (m)", False, key="m")
         self.glass = Toggle("Glass (x)", False, key="x")
         self.lamp = Toggle("Lamp (l)", True, key="l")
         self.orbit = Toggle("Orbit (o)", True, key="o")
         self.panel = Panel([self.count, self.size, self.room_size, self.speed, self.collide, self.gravity,
-                            self.glass, self.mirror, self.lamp, self.orbit], vertical=True)
+                            self.squash, self.mixed, self.glass, self.mirror, self.lamp, self.orbit], vertical=True)
         self.pos = np.zeros((0, 3))
         self.vel = np.zeros((0, 3))
         self.radius_factor = np.zeros(0)
+        self.finish = np.zeros(0, np.int64)  # an index into FINISHES, for mixed materials
+        # Each ball's latest squash: along which direction (unit), how much at first, and how long ago.
+        self.squash_dir, self.squash_amount, self.squash_age = np.zeros((0, 3)), np.zeros(0), np.zeros(0)
         self.balls = []
         self.yaw, self.pitch, self.paused = 0.6, 0.45, False
 
@@ -127,6 +144,8 @@ class Balls:
         if n < have:
             del self.balls[n:]
             self.pos, self.vel, self.radius_factor = self.pos[:n], self.vel[:n], self.radius_factor[:n]
+            self.finish, self.squash_dir = self.finish[:n], self.squash_dir[:n]
+            self.squash_amount, self.squash_age = self.squash_amount[:n], self.squash_age[:n]
         elif n > have:
             k = n - have
             half = self.room_size.value / 2
@@ -135,6 +154,9 @@ class Balls:
             direction /= np.linalg.norm(direction, axis=1, keepdims=True)
             self.vel = np.r_[self.vel, direction * self.rng.uniform(0.5, 1.0, (k, 1))]
             self.radius_factor = np.r_[self.radius_factor, self.rng.uniform(0.7, 1.3, k)]
+            self.finish = np.r_[self.finish, self.rng.integers(len(FINISHES), size=k)]
+            self.squash_dir = np.r_[self.squash_dir, np.tile([1.0, 0.0, 0.0], (k, 1))]
+            self.squash_amount, self.squash_age = np.r_[self.squash_amount, np.zeros(k)], np.r_[self.squash_age, np.zeros(k)]
             for _ in range(k):
                 r, g, b = colorsys.hsv_to_rgb(self.rng.uniform(), self.rng.uniform(0.55, 0.95), self.rng.uniform(0.75, 1.0))
                 self.balls.append(Object3D(self.lods[-1][1], color=(r, g, b)))
@@ -144,6 +166,7 @@ class Balls:
         half = self.room_size.value / 2
         if self.gravity.value:
             self.vel[:, 1] -= 4.0 * dt / max(self.speed.value, 0.1)
+        before = self.vel.copy()
         self.pos += self.vel * (BASE_SPEED * self.speed.value * dt)
         # Walls: reflect whatever has gone through one, and turn it back inwards.
         room = np.maximum(half - radii, 0.0)[:, None]
@@ -153,6 +176,33 @@ class Balls:
         self.vel = np.where(over, -np.abs(self.vel), np.where(under, np.abs(self.vel), self.vel))
         if self.collide.value and len(self.pos) > 1:
             collide(self.pos, self.vel, radii)
+        # Bumps (off a wall or another ball) squash the ball along the change in its velocity.
+        bump = self.vel - before
+        size = np.linalg.norm(bump, axis=1)
+        hard = size * (BASE_SPEED * self.speed.value)  # in units a second
+        hit = hard > MIN_BUMP
+        self.squash_age += dt
+        if hit.any():
+            self.squash_dir[hit] = bump[hit] / size[hit, None]
+            self.squash_amount[hit] = np.minimum(SQUASH * hard[hit], MAX_SQUASH)
+            self.squash_age[hit] = 0.0
+
+    def squashes(self):
+        """How much each ball is squashed now along its squash_dir (negative: stretched), wobbling back to 0."""
+        age = self.squash_age
+        return self.squash_amount * np.exp(-WOBBLE_DECAY * age) * np.cos(WOBBLE_RATE * age)
+
+    def shape(self, ball, position, radius, squash, direction):
+        """Place a ball: round, or squashed by `squash` along `direction` and bulging the other ways, its centre
+        moved back the way it was squashed so that it stays touching what it hit."""
+        if abs(squash) < 0.01:
+            ball.position, ball.rotation, ball.scale = position, IDENTITY, radius
+            return
+        d = direction if direction[0] >= 0 else -direction  # (squashing is the same either way along it)
+        q = np.array([1.0 + d[0], 0.0, -d[2], d[1]])         # turns x onto d
+        ball.rotation = q / np.linalg.norm(q)
+        ball.scale = radius * np.array([1.0 - squash, 1.0 + squash / 2, 1.0 + squash / 2])
+        ball.position = position - direction * radius * max(squash, 0.0)
 
     # ----- a frame -----------------------------------------------------------------------
 
@@ -189,9 +239,11 @@ class Balls:
         self.room.scale = self.floor.scale = s
         self.floor.reflectivity = 0.55 if self.mirror.value else 0.0
         radii = self.size.value * self.radius_factor
+        squashes = self.squashes() if self.squash.value else np.zeros(len(self.balls))
         for i, (ball, p, r) in enumerate(zip(self.balls, self.pos, radii)):
-            ball.position, ball.scale = p, r
+            self.shape(ball, p, r, squashes[i], self.squash_dir[i])
             ball.opacity = GLASS_OPACITY if self.glass.value and i % 3 == 0 else 1.0  # every third one glass
+            ball.specular, ball.shininess, ball.reflectivity = FINISHES[self.finish[i] if self.mixed.value else 1]
         lights = [Light(direction=np.array([0.4, -1.0, -0.3]), ambient=0.25, diffuse=0.45 if self.lamp.value else 0.7,
                         shadows=True)]
         objects = [self.room, self.floor, *self.balls]

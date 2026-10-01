@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Loading models from files: Wavefront OBJ, with its MTL materials and their textures.
+"""Loading models from files: Wavefront OBJ, with its MTL materials and their textures, and glTF 2.0 (gltf.py).
 
 load_model() gives a Model (scene.py): an Object3D for each material, all under one Node, with the material's
 colour, texture, highlights, glow and opacity. load_obj() gives the whole file as one Mesh, keeping the colours
@@ -78,12 +78,13 @@ def _map_statement(args):
 def _find_file(name, folder):
     """The file a material or model refers to, relative to `folder`; None if it can't be found. Files made on
     Windows often use backslashes, and some name a path that only existed where they were made: then the file
-    is looked for by its name alone, in the folder."""
+    is looked for by its name alone, in the folder, and relative to the folder above (a kit's models often share
+    a Textures folder beside theirs)."""
     name = name.strip().strip('"')
     if not name:
         return None
     candidates = [name, name.replace("\\", "/")]
-    candidates.append(os.path.basename(candidates[-1]))
+    candidates += [os.path.basename(candidates[-1]), os.path.join("..", candidates[-1])]
     for c in candidates:
         path = c if os.path.isabs(c) else os.path.join(folder, c)
         if os.path.isfile(path):
@@ -326,21 +327,29 @@ def _submesh(parsed, faces):
 
 
 def load_model(path, split_groups=False, max_texture=MAX_TEXTURE, double_sided=False):
-    """A model file as a Model (scene.py): an Object3D for each material, with the material's colour, texture,
-    highlights, glow, opacity and reflectivity (see the module's notes on what is read), all with the Model's
-    root as their parent. Each part's mesh keeps the model's own coordinates, so the parts fit together.
+    """A model file as a Model (scene.py): Wavefront .obj, or glTF 2.0 (.gltf or .glb, see gltf.load_gltf, which
+    also gives the file's nodes and animations).
 
-    split_groups: an Object3D for each group (`o` or `g`) and material, rather than for each material (so the
+    From an OBJ: an Object3D for each material, with the material's colour, texture, highlights, glow, opacity
+    and reflectivity (see the module's notes on what is read), all with the Model's root as their parent. Each
+    part's mesh keeps the model's own coordinates, so the parts fit together.
+
+    split_groups (OBJ): an Object3D for each group (`o` or `g`) and material, rather than for each material (so the
     parts can move on their own: a door, a wheel), named by their group in Model.names. A file with thousands
-    of groups is slower to draw split.
+    of groups is slower to draw split. (A glTF file is in parts already: its nodes.)
     max_texture: textures are shrunk to at most this many texels across (None: as they are).
     double_sided: draw the back of every face too (for models whose faces don't all wind the same way).
 
-    Only Wavefront .obj files for now. Problems that leave part of the model out (a missing texture, a bad
-    line) are listed in Model.warnings; a file that can't be read at all raises OSError.
+    Problems that leave part of the model out (a missing texture, a bad line) are listed in Model.warnings; a
+    file that can't be read at all raises OSError, and one in another format (or needing glTF extensions that
+    aren't supported) ValueError.
     """
-    if os.path.splitext(path)[1].lower() != ".obj":
-        raise ValueError(f"{path}: only Wavefront .obj models can be loaded")
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".gltf", ".glb"):
+        from .gltf import load_gltf
+        return load_gltf(path, max_texture=max_texture, double_sided=double_sided)
+    if ext != ".obj":
+        raise ValueError(f"{path}: only Wavefront .obj and glTF (.gltf, .glb) models can be loaded")
     parsed = _parse(path, max_texture, split_groups)
     root = Node()
     model = Model(root, [], {}, parsed.materials, parsed.warnings)
