@@ -368,7 +368,7 @@ class Courtyard:
                            (0.55, 2.36, (1.36, 0.12, 0.16))):
             self.add(Object3D(box, DOOR_AT + (x, y, 0.0), scale=size, color=(95, 70, 50), specular=0.3), "a door frame",
                      (DOOR_AT[0] + x, DOOR_AT[2], 0.12) if y < 2 else None)
-        self.add(Object3D(box, np.array([0.55, 1.1, 0.0]), scale=(1.08, 2.18, 0.07), color=(150, 95, 55), specular=0.6,
+        self.add(Object3D(box, np.array([0.55, 1.15, 0.0]), scale=(1.08, 2.28, 0.07), color=(150, 95, 55), specular=0.6,
                           shininess=20.0, parent=hinge), "a door (to nowhere)")
         for side in (-1, 1):
             self.add(Object3D(blob_mesh((0.05, 0.05, 0.05)), np.array([0.95, 1.05, side * 0.08]), color=(230, 180, 80),

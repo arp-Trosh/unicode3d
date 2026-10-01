@@ -12,8 +12,10 @@ from .animation import Animation, RotationTrack, Track
 from .background import Fog, Gradient, Sky, SkyBox
 from .color import Color
 from .keys import HeldKeys, Key, KeyRelease, MouseEvent
-from .mesh import Mesh, load_obj, make_box
+from .mesh import Mesh, make_box
+from .models import Material, load_model, load_mtl, load_obj
 from .raster import FrameBuffer
-from .scene import Camera, Light, Node, Object3D, Pick, PointLight, Renderer
+from .scene import Camera, Light, Model, Node, Object3D, Pick, PointLight, Renderer
 from .terminal import Screen, add_display_args, compile_kernels, display_options, frame_to_text, run
+from .texture import load_image
 from .ui import Button, Choice, DisplayControls, Panel, Slider, Toggle

@@ -22,7 +22,8 @@ revision compiles its kernels afresh (about half a minute), and scenes using fea
 The scenes: a cube; a textured die in each glyph set and colour mode; overlapping glass; sun and lamp shadows;
 cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor running to the horizon
 (mipmapping); many small balls; a finely divided sphere; the room demo's courtyard; and, added after 0.4.1,
-world fog, materials, and shapes stretched unevenly.
+world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
+floor whose texture repeats, and fog over a starry sky box.
 """
 import argparse
 import os
@@ -230,6 +231,24 @@ def fog():
                 {"background": Sky(), "fog": Fog(start=4.0, end=40.0)})
 
 
+def fog_stars():
+    """World fog fading pillars into a starry sky box (SkyBox): into the sky blurred, so no star shows through a
+    fogged pillar (fixed after 0.5.0)."""
+    from unicode3d.background import Fog, SkyBox
+    rng = np.random.default_rng(4)
+    faces = []
+    for k in range(6):
+        night = np.full((64, 64, 3), (0.03, 0.04, 0.1))
+        night[rng.integers(0, 64, 80), rng.integers(0, 64, 80)] = 1.0
+        faces.append(night if k != 3 else np.full((64, 64, 3), 0.03))
+    pillars = [Object3D(block_mesh((x, 1.5, -z), (1.0, 3.0, 1.0)), color=(170, 160, 150))
+               for z in range(0, 40, 5) for x in (-2.5, 2.5)]
+    return Shot([Object3D(floor(30.0), color=(90, 90, 100)), *pillars], camera((0.0, 1.4, 5.0), (0.0, 1.6, -10.0),
+                                                                                    fov=60.0),
+                Light(direction=np.array([0.3, -1.0, -0.5]), ambient=0.25), {"background": SkyBox(faces),
+                                                                               "fog": Fog(start=3.0, end=35.0)})
+
+
 def materials():
     """The same sphere matte, plain, glossy and chrome-tight (Object3D.specular and shininess, added after 0.4.1)."""
     ball = blob_mesh((0.55, 0.55, 0.55), rings=32, segments=48)
@@ -261,6 +280,65 @@ def stretched():
     return Shot(objects, camera((0.3, 2.4, 4.6), (0, 0.5, 0)), sun, {"background": Sky()})
 
 
+def _write_model(folder):
+    """An OBJ model with its MTL and textures, written into `folder`: a column (its own normals, smooth across the
+    seam where its texture wraps round), a crate whose texture repeats twice across each face (map_Kd -s), a
+    glowing cap and a cut-out fence (map_d). Returns the OBJ's path."""
+    from PIL import Image
+    os.makedirs(os.path.join(folder, "textures"), exist_ok=True)
+    stripes = np.zeros((32, 64, 3), np.uint8)
+    stripes[:] = (200, 190, 170)
+    stripes[:, ::8] = stripes[:, 1::8] = (90, 60, 40)
+    Image.fromarray(stripes).save(os.path.join(folder, "textures", "stripes.png"))
+    Image.fromarray((checks(32, 4, (0.75, 0.55, 0.3), (0.45, 0.3, 0.15)) * 255).astype(np.uint8)).save(
+        os.path.join(folder, "textures", "crate.png"))
+    y, x = np.mgrid[0:32, 0:32]
+    Image.fromarray((((x % 8) < 2) | ((y % 8) < 2)).astype(np.uint8) * 255).save(
+        os.path.join(folder, "textures", "fence.png"))
+    with open(os.path.join(folder, "model.mtl"), "w") as f:
+        f.write("newmtl stone\nKd 1 1 1\nKs 0.3 0.3 0.3\nNs 30\nmap_Kd textures/stripes.png\n"
+                "newmtl crate\nKd 1 1 1\nKs 0.1 0.1 0.1\nmap_Kd -s 2 2 1 textures\\crate.png\n"
+                "newmtl glow\nKd 1 0.8 0.4\nKe 1 0.8 0.4\nillum 1\n"
+                "newmtl fence\nKd 0.35 0.45 0.3\nmap_d textures/fence.png\n")
+    lines, n = ["mtllib model.mtl", "o column", "usemtl stone"], 24
+    for i in range(n + 1):  # a ring of vertices at the bottom and the top, the first and last at the seam
+        a = 2 * np.pi * i / n
+        lines += [f"v {0.4 * np.cos(a) - 1.2:.5f} {h:.5f} {0.4 * np.sin(a):.5f}" for h in (0.0, 1.6)]
+        lines += [f"vt {i / n:.5f} {h:.5f}" for h in (0.0, 1.0)]
+        lines += [f"vn {np.cos(a):.5f} 0 {np.sin(a):.5f}"]
+    for i in range(n):
+        b, t, b2, t2 = 2 * i + 1, 2 * i + 2, 2 * i + 3, 2 * i + 4
+        lines.append(f"f {b}/{b}/{i + 1} {t}/{t}/{i + 1} {t2}/{t2}/{i + 2} {b2}/{b2}/{i + 2}")
+    lines += ["usemtl glow", "s off"]
+    top = [2 * i + 2 for i in range(n)]
+    lines.append("f " + " ".join(str(v) for v in reversed(top)))
+    base, uv = 2 * (n + 1), 2 * (n + 1)
+    lines += ["o crate", "usemtl crate", "s off", "vt 0 0", "vt 1 0", "vt 1 1", "vt 0 1"]
+    corners = [(x, y, z) for x in (-0.5, 0.5) for y in (0.0, 1.0) for z in (-0.5, 0.5)]
+    lines += [f"v {x + 0.4} {y} {z - 0.3}" for x, y, z in corners]
+    for quad in ((0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1), (2, 3, 7, 6), (1, 5, 7, 3), (0, 2, 6, 4)):
+        lines.append("f " + " ".join(f"{base + q + 1}/{uv + k + 1}" for k, q in enumerate(quad)))
+    lines += ["o fence", "usemtl fence", "v 0.9 0 0.8", "v 2.1 0 0.2", "v 2.1 1.1 0.2", "v 0.9 1.1 0.8",
+              "vt 0 0", "vt 3 0", "vt 3 2", "vt 0 2", "f -4/-4 -3/-3 -2/-2 -1/-1"]
+    with open(os.path.join(folder, "model.obj"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return os.path.join(folder, "model.obj")
+
+
+def model():
+    """A model loaded from an OBJ file with materials and textures (models.load_model, added after 0.5.0), on a
+    floor whose texture repeats beyond 0..1 (uv up to 24), and is sampled at a mip level per pixel."""
+    from unicode3d.models import load_model
+    with tempfile.TemporaryDirectory() as folder:
+        loaded = load_model(_write_model(folder), double_sided=True)
+    ground = floor(30.0, texture=checks(64, 2))
+    ground.uvs = ground.uvs * 24.0
+    sun = Light(direction=np.array([0.5, -1.0, -0.6]), shadows=True)
+    return Shot([Object3D(ground, color=(255, 255, 255)), *loaded], camera((0.6, 1.9, 4.2), (0.2, 0.5, 0.0)),
+                [sun, PointLight(np.array([-1.2, 2.2, 0.6]), color=(255, 200, 140), range=4.0)],
+                {"background": Sky()})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -280,8 +358,10 @@ SCENES = {
     "sphere": sphere,
     "courtyard": courtyard,
     "fog": fog,
+    "fog-stars": fog_stars,
     "materials": materials,
     "stretched": stretched,
+    "model": model,
 }
 
 

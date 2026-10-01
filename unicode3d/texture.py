@@ -13,11 +13,32 @@ clear parts: a leaf's edge stays green rather than fading to black.
 """
 import numpy as np
 from numba import njit
+from PIL import Image
 
 from .color import srgb_to_linear
 
 
 CUTOUT, BLEND = 1, 2  # kinds of alpha in a texture (see alpha_kind); 0 is none (solid)
+MAX_TEXTURE = 1024     # load_image's default limit on a texture's width and height, in texels
+
+
+def load_image(path, max_size=MAX_TEXTURE):
+    """An image file (PNG, JPEG, or anything else Pillow reads) as a texture: (H, W, 3) colours, 0..1 sRGB, or
+    (H, W, 4) with alpha where the image has transparency. Images wider or taller than max_size (None: no
+    limit) are shrunk to fit: a terminal shows few pixels, and a 4096x4096 texture would take about a
+    gigabyte once mipmapped in floats."""
+    with Image.open(path) as image:
+        image.load()
+        alpha = image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info
+        if image.mode in ("I", "I;16", "I;16B", "I;16L", "F"):  # 16-bit or float greyscale: scale to 8 bits
+            grey = np.asarray(image, dtype=float)
+            image = Image.fromarray(np.clip(grey * (255.0 / max(grey.max(), 1.0)), 0, 255).astype(np.uint8))
+        image = image.convert("RGBA" if alpha else "RGB")
+        if max_size and max(image.size) > max_size:
+            scale = max_size / max(image.size)
+            image = image.resize((max(round(image.width * scale), 1), max(round(image.height * scale), 1)),
+                                 Image.Resampling.BOX)
+        return np.asarray(image, dtype=float) / 255.0
 
 
 def build_mipmaps(texture):
@@ -95,8 +116,21 @@ def clamp_index(v, n):
 
 
 @njit(cache=True, error_model="numpy")
+def repeat(u):
+    """A texture coordinate beyond 0..1 brought back into it, so that textures repeat (tile) over faces whose uv
+    go further (a floor tiled ten times: u from 0 to 10). Coordinates within 0..1 are kept as they are, so
+    textures meant to fit a face exactly are clamped at its edges, not blended with the opposite edge. NaN and
+    infinities become 0, so that a texel is still picked (and the colour stays a number)."""
+    if u >= 0.0 and u <= 1.0:
+        return u
+    f = u - np.floor(u)
+    return f if f >= 0.0 else 0.0  # (an infinity gives NaN, which fails the comparison too)
+
+
+@njit(cache=True, error_model="numpy")
 def _bilinear(texels, levels, level, u, v):
     offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
+    u, v = repeat(u), repeat(v)
     x = u * w - 0.5
     y = (1.0 - v) * h - 0.5  # texture row 0 is the top (v = 1)
     fx, fy = x - np.floor(x), y - np.floor(y)
@@ -151,6 +185,7 @@ def sample_alpha(texels, levels, first, chain, u, v, lod):
     n = first[chain + 1] - first[chain]
     level = first[chain] + clamp_index(np.floor(lod + 0.5), n)
     offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
+    u, v = repeat(u), repeat(v)
     x = u * w - 0.5
     y = (1.0 - v) * h - 0.5
     fx, fy = x - np.floor(x), y - np.floor(y)

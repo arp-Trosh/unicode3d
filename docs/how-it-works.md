@@ -173,7 +173,7 @@ the samples only measure coverage. Shading is the expensive part, so this keeps 
 
 On a terminal a textured face is often only a few pixels across. A 48x48 die face drawn a dozen pixels
 wide, point-sampled, picks a few arbitrary texels, and the picture shimmers as the die turns. Textures
-therefore carry mipmaps (copies halved again and again), and each triangle picks the level where a
+therefore carry mipmaps (copies halved again and again), and each pixel picks the level where a
 texel is about a pixel, blending the two nearest levels (trilinear filtering). Textures with alpha are
 kept premultiplied, so shrinking a leaf averages the colour of the leaf, not of the holes around it.
 
@@ -182,9 +182,13 @@ kept premultiplied, so shrinking a leaf averages the colour of the leaf, not of 
 *A finely checked floor without mipmaps (top: always the finest level) and with them (bottom): far
 away, the checks average to grey instead of breaking into noise.*
 
-The level is chosen per triangle, from the ratio of its texture area to its screen area. That is
-cheap, and right for small triangles, but a big floor made of two triangles gets one level for its
-near and far parts alike. That floor is the one known case where the textures still alias.
+The level is worked out for each pixel, from how fast the texture coordinates change across the
+screen there. Texture coordinates aren't linear on screen, but u/w, v/w and 1/w are (the same fact
+that makes perspective-correct interpolation work), so their rates of change are exact and cheap, and
+those of u and v follow from them. The level comes from the direction in which a pixel spans more
+texels, as graphics hardware does. A big floor made of two triangles is then crisp close by and
+smooth towards the horizon; with one level for each triangle, as the renderer once had, it was
+blurred near the camera and broke into noise far away.
 
 ## Light and shadow
 
@@ -269,7 +273,10 @@ background (sky, sky box or gradient) in the reflected view direction, which is 
 Fog is measured in the world: surfaces fade between a start and an end distance from the eye, into the
 sky or background behind them, or into a colour. Fading into "whatever is behind" is done by lowering a
 pixel's coverage rather than mixing in a colour. The background fill that runs afterwards then puts
-the right sky in, or, with no background at all, the terminal's own background shows through.
+the right sky in, or, with no background at all, the terminal's own background shows through. A sky
+box is the exception: its stars would show through a fogged wall as if it were glass, so there fog
+mixes in the sky box blurred (a coarse mip level, about four texels across a face) in the pixel's
+direction, which keeps the night's colour and loses the stars, as haze does.
 
 ![Rows of pillars fading into the sky](images/fog.png)
 

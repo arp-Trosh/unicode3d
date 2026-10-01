@@ -23,6 +23,7 @@ from .transforms import normalize, perspective, scale3
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
+HAZE_TEXELS = 4       # how many texels across a sky box face fog fades into (see shading.post_effects)
 
 
 @dataclass
@@ -36,7 +37,7 @@ class Pick:
 def _mesh_key(mesh):
     """What a packed mesh depends on, compared by identity (see Renderer._scene_state)."""
     return (mesh, mesh.vertices, mesh.faces, mesh.uvs, mesh.materials, mesh.vertex_colors, mesh.face_colors,
-            *mesh.textures)
+            mesh.normals, *mesh.textures)
 
 
 def _flat_plane(vertices, faces, radius):
@@ -457,13 +458,15 @@ class Renderer(ShadowMaps, Mirrors):
         self._forward = normalize(np.asarray(camera.target, float) - self._eye)
         tan_y = float(np.tan(np.radians(camera.fov) / 2))
         self._view_tan = (tan_y * aspect, tan_y)  # for fog: the direction each pixel looks in
-        kind, colors, _, texels, levels, first, lod = bg_args
+        kind, colors, basis, texels, levels, first, lod = bg_args
         # What shiny surfaces reflect: the background (kind -1 when reflections are off).
         self._sky = (int(kind) if self.reflections else -1, colors, SKYBOX_FACES, texels, levels, first, float(lod))
+        # What fog fades into, behind a sky box: the sky blurred to about HAZE_TEXELS across a face.
+        haze_lod = float(np.log2(max(levels[0, 1] / HAZE_TEXELS, 1.0)))
+        self._haze = (int(kind), colors, basis, SKYBOX_FACES, texels, levels, first, haze_lod)
         scene = self._geometry(inst, camera, lights) if inst is not None else None
         if scene is not None:
             self._shade_scene(scene)
-        kind, colors, basis, texels, levels, first, lod = bg_args
         fill_background(fb.rgb, fb.alpha, kind, colors, basis, SKYBOX_FACES, texels, levels, first, lod)
         out = self.framebuffer
         if fb is not out:  # drawn smaller, within max_pixels: stretched to the size the screen needs
@@ -498,7 +501,7 @@ class Renderer(ShadowMaps, Mirrors):
             self._reflect(scene, base, every, every, fb.rgb.reshape(-1, 3), 0, 1.0)
         if layers is not None:
             self._blend_layers(scene, layers, n)
-        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, self.outline)
+        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, self.outline, *self._haze)
 
     def _bins(self, xs, ys, select, want, height, prefix, span=None):
         """The triangles whose kind (select: 0 solid, 1 see-through, 2 cut-out) is among `want` (SOLID, CLEAR
@@ -594,7 +597,7 @@ class Renderer(ShadowMaps, Mirrors):
         attrs = buf.get(prefix + "attrs", (k, 3, ATTRS))
         tri_inst, chain = buf.get(prefix + "tri_inst", (k,), np.int32), buf.get(prefix + "chain", (k,), np.int64)
         lod, see = buf.get(prefix + "lod", (k,)), buf.get(prefix + "see", (k,), np.int8)
-        project(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"], pack["face_kind"],
+        project(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_kind"],
                 pack["mesh_vertex"], inst["mesh"], inst["rgb"], inst["alpha"], inst["double"], inst["flip"],
                 inst_vertex, eye, near, clip, fb.width, fb.height, float(self.lod_bias), world, chunk_inst,
                 chunk_first, chunk_end, whole, cut, off_whole, off_cut, xs, ys, inv_w, attrs, tri_inst, chain, lod,

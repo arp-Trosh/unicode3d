@@ -13,7 +13,7 @@ from .mesh import Mesh
 from .renderer import Pick, Renderer
 from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3
 
-__all__ = ["Camera", "Light", "Node", "Object3D", "Pick", "PointLight", "Renderer"]
+__all__ = ["Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer"]
 
 
 @dataclass
@@ -116,3 +116,57 @@ class Object3D(_Placed):
                             # (cloth, rubber, stone), more than 1 for glossier ones than the lights are set for
     shininess: float = None  # how tight its highlights are (the Blinn-Phong exponent): about 5 is broad and soft,
                              # 100 a pin-point, as on chrome; None takes each light's `shininess`
+
+
+@dataclass
+class Model:
+    """A model loaded from a file (models.load_model): Object3Ds for its parts, all under `root`, so that placing,
+    turning, scaling or hiding root does that to the whole model. render() takes the parts, and a Model unpacks
+    into them: renderer.render([*model, floor], camera, lights).
+
+    names: the parts by the names the file gives them (a list for each name: its groups' and materials'); materials:
+    the materials the file defines, by name (models.Material); warnings: what in the file could not be loaded (a
+    texture that isn't there, say), which was left out rather than stopping the loading.
+    """
+    root: Node
+    objects: list
+    names: dict = field(default_factory=dict)
+    materials: dict = field(default_factory=dict)
+    warnings: list = field(default_factory=list)
+
+    def __iter__(self):
+        return iter(self.objects)
+
+    def __len__(self):
+        return len(self.objects)
+
+    def bounds(self):
+        """The corners (low (3,), high (3,)) of the box around the model's parts, in root's own space (as if root
+        were at the origin, unturned and unscaled)."""
+        lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
+        for obj in self.objects:
+            linear, position = np.eye(3), np.zeros(3)
+            node = obj
+            while node is not None and node is not self.root:
+                turn = quat_to_matrix(node.rotation) * scale3(node.scale)
+                position = np.asarray(node.position, dtype=float) + turn @ position
+                linear = turn @ linear
+                node = node.parent
+            v = np.asarray(obj.mesh.vertices, dtype=float).reshape(-1, 3)
+            v = v[np.isfinite(v).all(axis=1)]
+            if len(v):
+                v = v @ linear.T + position
+                lo, hi = np.minimum(lo, v.min(axis=0)), np.maximum(hi, v.max(axis=0))
+        if not (lo <= hi).all():
+            return np.zeros(3), np.zeros(3)
+        return lo, hi
+
+    def fit(self, size=2.0):
+        """Scale root so the model's largest extent is `size`, and place it so that its centre is at root's
+        parent's origin (the world's, if it has none). Returns self."""
+        lo, hi = self.bounds()
+        extent = float((hi - lo).max()) or 1.0
+        self.root.scale = size / extent
+        linear = quat_to_matrix(self.root.rotation) * scale3(self.root.scale)
+        self.root.position = -(linear @ ((lo + hi) / 2.0))
+        return self

@@ -98,4 +98,6 @@ matrix (rotation and per-axis scale, parents included) and `pos`, and `flip` whe
   to alter it shows where (pictures in the `diff` folder it names). Add a scene for a new feature (built with
   constructor arguments, so that older revisions without the feature skip it).
 - Editing a module makes Numba recompile its kernels on the next run (the cache is keyed on the source file), so
-  the first run after an edit is slow. That is expected.
+  the first run after an edit is slow. That is expected. Kernels in *other* modules that call a helper you edited
+  (`texture.sample` from `shading.py`, say) are not recompiled, and keep running the old helper: after editing a
+  helper used elsewhere, delete `unicode3d/__pycache__/*.nbi` and `*.nbc`.

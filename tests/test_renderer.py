@@ -18,7 +18,7 @@ from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
 from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
-from unicode3d.scene import Camera, Light, Node, Object3D, PointLight, Renderer
+from unicode3d.scene import Camera, Light, Model, Node, Object3D, PointLight, Renderer
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
 from unicode3d.kernel_signatures import KERNELS
 from unicode3d.precompile import missing_kernels, share_out
@@ -211,6 +211,12 @@ class RenderTests(unittest.TestCase):
         stained = np.full((16, 16, 4), 0.5)
         crowd += [Object3D(textured_quad(1.5, 1.5, t), rng.uniform(-1, 1, 3), quat_axis_angle(rng.normal(size=3), 1.0),
                            color=(255, 255, 255)) for t in (holes, stained)]
+        # A floor whose textures repeat (uv beyond 0..1), with holes too, and authored normals.
+        floor = textured_quad(4.0, 3.0, holes)
+        floor.uvs = floor.uvs * 5.0 - 1.0
+        floor.normals = rng.normal(size=(4, 3))
+        crowd += [Object3D(floor, np.array([0.0, -1.0, -0.5]), quat_axis_angle((1, 0, 0), -1.3), color=(255, 255, 255),
+                           double_sided=True)]
         # Mirrors (seeing each other: two bounces), and something shiny.
         crowd += [Object3D(flat_quad(2.0, 1.5), np.array([x, 0.0, -1.2]), quat_axis_angle((0, 1, 0), turn),
                            color=(150, 150, 150), reflectivity=0.8) for x, turn in ((-0.8, 0.6), (0.8, -0.6))]
@@ -803,6 +809,26 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(fb.alpha[inside(3)].max(), 0.0)
         self.assertTrue((fb.alpha[inside(2)] < 1.0).all() and (fb.alpha[inside(2)] > 0.0).all())
 
+    def test_fog_hides_a_sky_box_detail(self):
+        # Fogged into a starry sky box, a wall fades into the sky blurred, not into the stars right behind it: they
+        # used to show through the fog as if the wall were glass.
+        rng = np.random.default_rng(2)
+        dark = [np.full((64, 64, 3), 0.05) for _ in range(6)]
+        starry = [face.copy() for face in dark]
+        for face in starry:
+            face[rng.integers(0, 64, 60), rng.integers(0, 64, 60)] = 1.0  # stars: single bright texels
+        wall = Object3D(flat_quad(40.0, 20.0), position=np.array([0.0, 0.0, -8.0]), color=(120, 120, 120))
+        camera, light = Camera(position=np.array([0.0, 0.0, 5.0])), Light(direction=np.array([0.0, 0.0, -1.0]))
+
+        def draw(faces, fog):
+            return Renderer(80, 30, fog=fog, outline=0, background=SkyBox(faces)).render([wall], camera, light).copy()
+
+        fog = Fog(start=2.0, end=20.0)
+        fb = draw(starry, fog)
+        self.assertTrue((fb.ids == 1).all() and (fb.alpha == 1).all())
+        self.assertLess(np.abs(lum(fb) - lum(draw(dark, fog))).max(), 0.02)  # no stars on it
+        self.assertLess(lum(fb).mean(), lum(draw(starry, 0)).mean())       # but fogged, towards the dark sky
+
     def test_materials(self):
         # Object3D.specular scales each light's highlight; shininess sets how tight it is.
         ball = blob_mesh((1.0, 1.0, 1.0), rings=32, segments=48)
@@ -1243,7 +1269,10 @@ class DemoTests(unittest.TestCase):
 
     def test_viewer(self):
         from unicode3d.examples.viewer import Viewer
-        self.run_demo(Viewer(make_die(), False), [ord("w"), Key.LEFT, ord("e"), ord("c")], Key.ESC)
+        root = Node()
+        model = Model(root, [Object3D(make_die(), parent=root), Object3D(make_box(), parent=root, reflectivity=0.3)])
+        self.run_demo(Viewer(model), [ord("w"), Key.LEFT, ord("e"), ord("c")], Key.ESC)
+        self.assertEqual(model.objects[1].reflectivity, 0.85)
 
     def test_balls(self):
         from unicode3d.examples.balls import Balls

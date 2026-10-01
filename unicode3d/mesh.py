@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Triangle meshes: OBJ loading and textured boxes."""
+"""Triangle meshes, and textured boxes. (Loading models from files is in models.py.)"""
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -29,23 +29,40 @@ class Mesh:
                                                   # or (H, W, 4) with alpha: holes (cut-outs) or see-through parts
     vertex_colors: np.ndarray | None = None  # (V, 3 or 4) a colour at each vertex, blended smoothly across faces
     face_colors: np.ndarray | None = None    # (F, 3 or 4) one colour for each face (used if vertex_colors is None)
+    normals: np.ndarray | None = None        # (V, 3) the surface's normal at each vertex, as a model was made with
+                                             # (need not be unit length); None works them out (vertex_normals)
 
     def vertex_normals(self):
-        """Area-weighted average of the normals of the faces around each vertex.
+        """The unit normal at each vertex (V, 3): `normals` where given, otherwise the area-weighted average of the
+        normals of the faces around the vertex. Rows of `normals` that are zero or not finite are worked out too.
 
-        Faces that share vertices shade smoothly across their seam; faces with
-        their own vertices (like the sides of make_box) stay flat.
+        Worked out, faces that share vertices shade smoothly across their seam, and faces with their own vertices
+        (like the sides of make_box) stay flat. Cached, and worked out afresh when the arrays are replaced.
         """
         cached = self.__dict__.get("_normals")
-        if cached is not None and cached[0] is self.vertices:
-            return cached[1]
-        tri = self.vertices[self.faces]
-        face_n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])  # length is twice the area
-        normals = np.zeros_like(self.vertices, dtype=float)
-        for k in range(3):
-            np.add.at(normals, self.faces[:, k], face_n)
-        normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
-        self._normals = (self.vertices, normals)
+        if cached is not None and cached[0] is self.vertices and cached[1] is self.normals:
+            return cached[2]
+        vertices = np.asarray(self.vertices, dtype=float).reshape(-1, 3)
+        faces = np.asarray(self.faces, dtype=np.int64).reshape(-1, 3)
+        given = None
+        if self.normals is not None:
+            given = np.asarray(self.normals, dtype=float).reshape(-1, 3)
+            if len(given) != len(vertices):
+                raise ValueError(f"Mesh.normals has {len(given)} rows for {len(vertices)} vertices")
+            length = np.linalg.norm(given, axis=1)
+            usable = np.isfinite(length) & (length > 1e-12)
+        if given is not None and usable.all():
+            normals = given / length[:, None]
+        else:
+            tri = vertices[faces]
+            face_n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])  # length is twice the area
+            normals = np.zeros_like(vertices)
+            for k in range(3):
+                np.add.at(normals, faces[:, k], face_n)
+            normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+            if given is not None:
+                normals[usable] = given[usable] / length[usable, None]
+        self._normals = (self.vertices, self.normals, normals)
         return normals
 
     def corner_colors(self):
@@ -101,27 +118,14 @@ class Mesh:
         lo, hi = self.vertices.min(axis=0), self.vertices.max(axis=0)
         extent = float((hi - lo).max()) or 1.0
         verts = (self.vertices - (lo + hi) / 2.0) * (size / extent)
-        return Mesh(verts, self.faces, self.uvs, self.materials, self.textures, self.vertex_colors, self.face_colors)
+        return Mesh(verts, self.faces, self.uvs, self.materials, self.textures, self.vertex_colors, self.face_colors,
+                    self.normals)
 
 
-def load_obj(path):
-    """Load vertex positions and faces from a Wavefront OBJ, fan-triangulating polygons."""
-    verts, faces = [], []
-    with open(path) as f:
-        for line in f:
-            parts = line.split()
-            if not parts:
-                continue
-            if parts[0] == "v":
-                verts.append([float(p) for p in parts[1:4]])
-            elif parts[0] == "f":
-                idx = []
-                for p in parts[1:]:
-                    i = int(p.split("/")[0])
-                    idx.append(i - 1 if i > 0 else len(verts) + i)
-                for k in range(1, len(idx) - 1):
-                    faces.append((idx[0], idx[k], idx[k + 1]))
-    return Mesh(np.array(verts, dtype=float).reshape(-1, 3), np.array(faces, dtype=int).reshape(-1, 3))
+def load_obj(path, **options):
+    """A Wavefront OBJ file as one Mesh: models.load_obj, kept here where it used to be."""
+    from .models import load_obj as load  # (models.py builds on scene.py, which needs this module first)
+    return load(path, **options)
 
 
 # Outward normal and in-face (u, v) axes of each box face, with u x v = normal.

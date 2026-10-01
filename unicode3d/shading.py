@@ -5,8 +5,8 @@ see-through layers over the solid picture (blend), and fog and outlines (post_ef
 import numpy as np
 from numba import njit, prange
 
-from .background import sky_colour
-from .raster import barycentric, bit_count
+from .background import SKYBOX, sky_colour
+from .raster import barycentric, bit_count, texture_lod
 from .shadows import shadow_lookup
 from .texture import sample as sample_texture
 
@@ -18,12 +18,15 @@ def _decode(level):
 
 
 @njit(cache=True, error_model="numpy")
-def _shade(t, b0, b1, b2, inv_w, attrs, chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans,
-           shadow_mats, shadow_params, pixel_size, eye, emissive, specular, shininess, out, split, spec_out):
+def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first, lights, shadow_texels,
+           shadow_trans, shadow_mats, shadow_params, pixel_size, eye, emissive, specular, shininess, out, split,
+           spec_out):
     """Linear RGB, into out (3,), of triangle t at barycentric weights b: Blinn-Phong lighting from
     every light (rows of lights.light_rows()), plus `emissive`, on a surface of the colour interpolated
-    from its corners, textured if the triangle has a mipmap chain. Highlights take the light's colour, their
-    strength times `specular` and their exponent `shininess` (the surface's material; 0: the light's own).
+    from its corners, textured if the triangle has a mipmap chain (at the mip level raster.texture_lod gives
+    for this pixel, from the triangle's corners on screen, xs and ys, plus its bias lod[t]). Highlights take
+    the light's colour, their strength times `specular` and their exponent `shininess` (the surface's
+    material; 0: the light's own).
     Lights with a shadow map light only what they reach (see shadows.shadow_lookup), tinted by see-through things in
     the way; their ambient light is everywhere. pixel_size is the width of a pixel one unit from the
     eye, in the world. With split, out gets the surface's own lit colour and spec_out (3,) the
@@ -85,7 +88,8 @@ def _shade(t, b0, b1, b2, inv_w, attrs, chain, lod, texels, levels, first, light
                                       spec_b + light[9] * spec * tb)
     r, g, b, a = lerp(8), lerp(9), lerp(10), lerp(11)
     if chain[t] >= 0:
-        tr, tg, tb, ta = sample_texture(texels, levels, first, chain[t], lerp(6), lerp(7), lod[t])
+        level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t]) + lod[t]
+        tr, tg, tb, ta = sample_texture(texels, levels, first, chain[t], lerp(6), lerp(7), level)
         r, g, b, a = r * tr, g * tg, b * tb, a * ta
     # Light levels are perceived brightness (0.5 looks half as bright), as artists tune them, so they
     # are decoded like any sRGB value; everything after this point works in linear light.
@@ -141,9 +145,9 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
             else:
                 b0, b1, b2 = barycentric(xs, ys, t, cx, cy)
                 gloss = shine[tri_inst[t]]
-                _, _, rx, ry, rz = _shade(t, b0, b1, b2, inv_w, attrs, chain, lod, texels, levels, first, lights,
-                                          shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size, eye,
-                                          emissive[tri_inst[t]], specular[tri_inst[t]], shininess[tri_inst[t]],
+                _, _, rx, ry, rz = _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first,
+                                          lights, shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size,
+                                          eye, emissive[tri_inst[t]], specular[tri_inst[t]], shininess[tri_inst[t]],
                                           sample_rgb[c, s], gloss > 0.0, spec_rgb[c])
                 if gloss > 0.0:  # polished: part the background reflected in it, and its highlight on top
                     sr, sg, sb = sky_colour(sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod,
@@ -217,8 +221,8 @@ def blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, l
         for layer in range(n - 1, -1, -1):
             t = layer_tri[c, layer]
             b0, b1, b2 = barycentric(xs, ys, t, cx, cy)
-            clear, facing, rx, ry, rz = _shade(t, b0, b1, b2, inv_w, attrs, chain, lod, texels, levels, first,
-                                               lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
+            clear, facing, rx, ry, rz = _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels,
+                                               first, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
                                                pixel_size, eye, emissive[tri_inst[t]], specular[tri_inst[t]],
                                                shininess[tri_inst[t]], scratch[p, 0:3], True, scratch[p, 3:6])
             scratch[p, 6], scratch[p, 7], scratch[p, 8] = sky_colour(sky, sky_colors, sky_faces, sky_texels,
@@ -253,7 +257,8 @@ def blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, l
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear, tan_x, tan_y, outline):
+def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear, tan_x, tan_y, outline, sky,
+                 sky_colors, sky_basis, sky_faces, sky_texels, sky_levels, sky_first, haze_lod):
     """Outlines, then fog, applied in place to a framebuffer's arrays (see Renderer for both).
 
     fog_end > 0: fog in the world (background.Fog): each surface fades from fog_start to fog_end, by its
@@ -261,6 +266,11 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
     pixel's direction), into fog_rgb (linear), or, with fog_clear, into whatever is behind it (it loses its
     coverage, so the background, or the terminal's own, shows through). Otherwise `fog` dims surfaces by how far
     back they sit within the picture's depth range (depth cueing).
+
+    Behind a sky box (sky == SKYBOX: the background's kind, colours, basis and textures as fill_background takes
+    them), fog_clear fades surfaces instead into the sky box blurred (sampled at mip level haze_lod) in the
+    direction they are seen in, and they keep their coverage: haze hides the sky's fine detail (stars, say),
+    which would otherwise show through a fogged wall as if it were glass.
     """
     h, w = depth.shape
     if outline:
@@ -292,7 +302,17 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
                 f = min(max((distance - fog_start) / span, 0.0), 1.0)
                 if not f > 0.0:
                     continue
-                if fog_clear:
+                if fog_clear and sky == SKYBOX:
+                    sx, sy = (x + 0.5) / w * 2.0 - 1.0, 1.0 - (y + 0.5) / h * 2.0
+                    dx = sky_basis[0, 0] + sx * sky_basis[1, 0] + sy * sky_basis[2, 0]
+                    dy = sky_basis[0, 1] + sx * sky_basis[1, 1] + sy * sky_basis[2, 1]
+                    dz = sky_basis[0, 2] + sx * sky_basis[1, 2] + sy * sky_basis[2, 2]
+                    dl = max(np.sqrt(dx * dx + dy * dy + dz * dz), 1e-12)
+                    hr, hg, hb = sky_colour(sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, haze_lod,
+                                            dx / dl, dy / dl, dz / dl)
+                    for k, haze in ((0, hr), (1, hg), (2, hb)):
+                        rgb[y, x, k] = rgb[y, x, k] * (1.0 - f) + f * a * haze
+                elif fog_clear:
                     alpha[y, x] = a * (1.0 - f)
                     for k in range(3):
                         rgb[y, x, k] *= 1.0 - f

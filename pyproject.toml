@@ -11,7 +11,7 @@ license = "LGPL-3.0-or-later"
 license-files = ["COPYING", "COPYING.LESSER"]
 authors = [{ name = "arp-Trosh" }]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.26", "numba>=0.61"]
+dependencies = ["numpy>=1.26", "numba>=0.61", "pillow>=10.1"]
 keywords = ["terminal", "3d", "renderer", "unicode", "ascii-art", "game-engine"]
 classifiers = [
     "Programming Language :: Python :: 3",

@@ -37,7 +37,7 @@ Click a heading below to open that section.
 <details>
 <summary><h2 id="install">Install</h2></summary>
 
-Python 3.10 or later; numpy and Numba come with it. In a game, pin a released version (a git tag)
+Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it. In a game, pin a released version (a git tag)
 in `requirements.txt`:
 
 ```text
@@ -64,7 +64,7 @@ The first run compiles the renderer, which takes about 10 seconds (see [First ru
 
 ```sh
 python3 -m unicode3d [-n DICE] [--seed N]                # dice roll demo: space rolls, +/- dice count, q quits
-python3 -m unicode3d.examples.viewer [model.obj]         # spinning model viewer (WASD/arrows, q/e spin, Esc)
+python3 -m unicode3d.examples.viewer [model.obj]         # model viewer, materials and textures too (WASD/arrows, q/e spin, Esc)
 python3 -m unicode3d.examples.balls [-n BALLS]           # balls bouncing around a room, with a settings panel
 python3 -m unicode3d.examples.maze [--size N]            # the Windows 98 maze screensaver
 python3 -m unicode3d.examples.room                       # walk around a courtyard of things to look at (WASD)
@@ -178,8 +178,12 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   near-horizontal edges get four coverage steps instead of two. Pixels whose samples disagree
   (silhouettes, creases, overlaps) get 8 more. Each pixel is shaded once per triangle, as GPUs do
   with multisampling, and partly covered pixels blend by coverage in linear light.
-- **Textures:** mipmapped with trilinear filtering, so a 48x48 face texture a dozen pixels across
-  stays steady instead of shimmering as a die turns.
+- **Textures:** mipmapped with trilinear filtering, at a mip level worked out for each pixel, so a
+  48x48 face texture a dozen pixels across stays steady instead of shimmering as a die turns, and a
+  floor is crisp close by and smooth towards the horizon. Textures repeat (tile) where texture
+  coordinates go beyond 0..1.
+- **Models:** Wavefront OBJ files with their MTL materials (colour, highlights, glow, opacity,
+  textures and cut-outs), loaded as a part for each material under one node.
 - **Fog and depth cues:** fog by distance in the world, fading far surfaces into the sky or
   background (or a colour), or simple depth cueing; and where one surface passes in front of another
   the far side gets a dark outline.
@@ -230,13 +234,16 @@ run(frame, fps=30)
 ```
 
 `Camera(position, target, up, fov=50, near=0.1, far=100)` looks from `position` at `target`.
-Objects take a `Mesh` (build one from `vertices` and `faces`, load one with `load_obj`, or use
-`make_box` or the [shapes](#shapes)), and a pose: `position`, `rotation` (a quaternion, w first;
-`transforms.quat_axis_angle(axis, angle)` makes one) and `scale`.
+Objects take a `Mesh` (build one from `vertices` and `faces`, or use `make_box` or the
+[shapes](#shapes); `load_model` loads a whole [model](#models) with its materials), and a pose:
+`position`, `rotation` (a quaternion, w first; `transforms.quat_axis_angle(axis, angle)` makes one)
+and `scale`.
 
 Textures (for `make_box`, or any mesh with `uvs` and `materials`) are 2D arrays of brightness
 multipliers or `(H, W, 3)` colour arrays, both 0..1 in sRGB, where 1.0 leaves the object's colour
 unchanged and 0.0 is black; `(H, W, 4)` adds opacity (see [Transparency](#transparency)).
+`load_image(path)` reads a PNG, JPEG or any other image Pillow knows as one. Texture coordinates
+beyond 0..1 repeat the texture: 0 to 10 across a floor tiles it ten times.
 
 The [Engine reference](#engine-reference) below covers each part in detail, and the programs in
 `unicode3d/examples/` show them in use.
@@ -389,8 +396,48 @@ by size).
 - `merge_meshes(meshes, colors=None)` joins meshes into one, keeping their colours or giving each
   part the colour listed for it.
 
-`unicode3d.mesh` has `Mesh`, `make_box(size, textures=None)` and `load_obj(path)` (positions and
-faces only, for now).
+`unicode3d.mesh` has `Mesh` and `make_box(size, textures=None)`.
+
+</details>
+
+<details>
+<summary><h3 id="models">Models</h3></summary>
+
+`load_model(path)` loads a Wavefront `.obj` file, with the `.mtl` files it names and their
+textures, as a `Model`: an `Object3D` for each material, all with `model.root` (a `Node`) as their
+parent, so that moving, turning, scaling or hiding the root does it to the whole model. Pass the
+parts to `render()`; a model unpacks into them:
+
+```python
+from unicode3d import load_model
+
+ship = load_model("models/ship.obj").fit(2.0)    # centred, and 2 units across at its widest
+ship.root.position = np.array([0.0, 1.0, 0.0])
+for warning in ship.warnings:                    # a texture that isn't there, say: left out
+    print(warning)
+fb = renderer.render([*ship, ground], camera, lights)
+```
+
+- **From the OBJ:** positions (and colours, where each `v` line has r g b after x y z), texture
+  coordinates, normals, polygons (split into triangles), negative indices, `usemtl` and `mtllib`,
+  groups and smoothing groups (without normals in the file, faces in no smoothing group are flat).
+- **From the MTL:** `Kd` is the colour, `Ks` (its average) the highlight strength (`specular`),
+  `Ns` the `shininess`, `Ke` (its brightest channel) `emissive`, `d` or `Tr` the `opacity`, and
+  `illum` 0 or 1 turns highlights off. `map_Kd` is the texture (`-s` and `-o` scale and move it),
+  `map_d` its alpha: holes or see-through parts. From the PBR extension, `Pm` (metal) gives
+  `reflectivity`, less for a rough one (`Pr`), and `Pr` sets the shininess if `Ns` doesn't.
+  Texture paths are relative to the MTL file; Windows backslashes, and paths from the machine the
+  model was made on, are found by the file's name.
+- `split_groups=True` makes a part for each group (`o` or `g`) and material, so that parts can move
+  on their own (a door, a wheel); `model.names` lists the parts by group and material name.
+- `double_sided=True` draws the backs of faces, for models whose faces don't all wind the same way.
+- Textures are shrunk to at most 1024 texels across (`max_texture`): a terminal shows few pixels,
+  and a 4096x4096 texture would take about a gigabyte once mipmapped.
+
+`load_obj(path)` loads the same file as one `Mesh`, with the materials' colours and textures but
+not their other settings. Meshes take normals from a file, or from you: `mesh.normals` (one per
+vertex) replaces the ones worked out from the faces, so that a model's texture seams (where it has
+separate vertices) needn't show as creases.
 
 </details>
 
@@ -580,8 +627,9 @@ renderer = Renderer(80, 24, background=Sky(), mirror_bounces=2)
 `Renderer(fog=Fog(start, end, color=None))`, or `renderer.fog = Fog(...)` at any time: surfaces
 nearer the camera than `start` (in world units) are clear, and farther ones fade until, at `end` and
 beyond, they are gone. With `color=None` they fade into whatever is behind them: the sky's horizon
-behind a distant hill, a sky box, a gradient, or, with no background, the terminal's own (they give
-up their coverage, so it shows through). A colour (a named `Color` or `(r, g, b)`) fades them into
+behind a distant hill, a gradient, or, with no background, the terminal's own (they give up their
+coverage, so it shows through). Behind a sky box they fade into the sky blurred, so that its fine
+detail (stars, say) doesn't show through a fogged wall. A colour (a named `Color` or `(r, g, b)`) fades them into
 that instead: white mist, black night. Distance is measured from the eye, so a surface keeps its fog
 as the camera turns or as other things come into view or leave it. `pick()` still finds what the fog
 hides.
@@ -831,7 +879,7 @@ out identical whatever the thread count.
 <details>
 <summary><h3 id="windows">Windows</h3></summary>
 
-Needs Windows 10 or later (for VT sequences in the console), numpy and Numba. Windows Terminal is
+Needs Windows 10 or later (for VT sequences in the console), numpy, Numba and Pillow. Windows Terminal is
 recommended, and gets sextants by default; the classic console works too, with quadrants (its
 default fonts may lack sextants).
 
@@ -851,15 +899,16 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 
 | module          | role |
 |-----------------|------|
-| `scene.py`      | `Camera`, `Node`, `Object3D` (and, from their own modules, `Light`, `PointLight`, `Renderer`, `Pick`) |
+| `scene.py`      | `Camera`, `Node`, `Object3D`, `Model` (and, from their own modules, `Light`, `PointLight`, `Renderer`, `Pick`) |
 | `lights.py`     | `Light`, `PointLight`, and their packing for the kernels |
 | `renderer.py`   | `Renderer`: packs the scene, projects and culls it, multisampling with extra edge samples, see-through layers, fog, outlines, background, picking |
 | `shading.py`    | shading kernels: lighting and materials, resolving samples into pixels, blending see-through layers, fog and outlines |
 | `shadows.py`    | shadow maps: drawing them (for directional and point lights) and looking them up while shading |
 | `mirrors.py`    | mirrors: the extra passes that draw what flat reflective objects show |
 | `raster.py`     | `FrameBuffer` (linear RGB premultiplied by coverage, alpha, depth, object ids), projection of all objects at once with view culling and near-plane clipping, multi-sample z-buffered rasterizer |
-| `mesh.py`       | `Mesh` with vertex normals, per-vertex or per-face colours, bounding sphere and cached mipmaps, OBJ loader, textured `make_box` |
-| `texture.py`    | mipmap chains and trilinear sampling |
+| `mesh.py`       | `Mesh` with vertex normals (its own or worked out), per-vertex or per-face colours, bounding sphere and cached mipmaps, textured `make_box` |
+| `models.py`     | loading models: OBJ files with their MTL materials and textures (`load_model`, `load_obj`) |
+| `texture.py`    | loading images, mipmap chains, trilinear sampling, repeating textures |
 | `transforms.py` | projection and view matrices, quaternions, `quat_slerp` |
 | `background.py` | what is drawn behind the scene: `Gradient`, `Sky`, `SkyBox`; and `Fog` |
 | `animation.py`  | easing curves, keyframe `Track`s and `RotationTrack`s, and `Animation`, which moves an object along them |

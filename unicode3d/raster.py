@@ -221,9 +221,9 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
     taking its triangles in order.
 
     Cut-outs (see[t] == 2: textures with holes, see project()) cover only the sample positions where
-    their texture's alpha (from mip level lod[t] of mipmap chain chain[t], at the uv in attrs) is above
-    (s + 0.5) / S for sample s of S: partly clear texels cover some of a pixel's samples (alpha to
-    coverage), so the edges of holes are smoothed like the edges of shapes.
+    their texture's alpha (from mipmap chain chain[t], at the uv in attrs, at the mip level texture_lod gives
+    there plus lod[t]) is above (s + 0.5) / S for sample s of S: partly clear texels cover some of a pixel's
+    samples (alpha to coverage), so the edges of holes are smoothed like the edges of shapes.
     """
     n_samples = offsets.shape[0]
     oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
@@ -269,7 +269,9 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
                             if holes:  # perspective-correct uv, then the texture's alpha there
                                 u = (b0 * w0 * attrs[t, 0, 6] + b1 * w1 * attrs[t, 1, 6] + b2 * w2 * attrs[t, 2, 6]) / z
                                 v = (b0 * w0 * attrs[t, 0, 7] + b1 * w1 * attrs[t, 1, 7] + b2 * w2 * attrs[t, 2, 7]) / z
-                                if sample_alpha(texels, levels, first, chain[t], u, v, lod[t]) <= (s + 0.5) / n_samples:
+                                level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t])
+                                if (sample_alpha(texels, levels, first, chain[t], u, v, level + lod[t])
+                                        <= (s + 0.5) / n_samples):
                                     continue
                             depth[col, s] = z
                             tris[col, s] = t
@@ -402,6 +404,41 @@ def barycentric(xs, ys, t, cx, cy):
 
 
 ATTRS = 12  # per-corner attributes of a screen triangle: world xyz | normal xyz | uv | linear rgb | alpha
+
+
+@njit(cache=True, error_model="numpy")
+def texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain):
+    """The mip level to sample triangle t's texture (mipmap chain `chain`) at, at barycentric weights b: log2 of
+    how many texels of its finest level a pixel spans there, along whichever of the screen's x and y it spans
+    more of (as graphics hardware does).
+
+    u/w, v/w and 1/w are linear across the screen, so uv's rates of change there are exact at any point: a
+    floor's texture is sampled finely where it is near and coarsely towards the horizon, where one level for
+    the whole triangle would be too fine in the distance (shimmering) or too coarse close by (blurred). NaN for
+    a degenerate triangle (sample() takes that as the finest level).
+    """
+    x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
+    y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
+    area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+    # Rates of change of the barycentric weights along x and y, times each corner's 1/w.
+    w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+    ax0, ax1, ax2 = -(y2 - y1) / area * w0, -(y0 - y2) / area * w1, -(y1 - y0) / area * w2
+    ay0, ay1, ay2 = (x2 - x1) / area * w0, (x0 - x2) / area * w1, (x1 - x0) / area * w2
+    u0, u1, u2 = attrs[t, 0, 6], attrs[t, 1, 6], attrs[t, 2, 6]
+    v0, v1, v2 = attrs[t, 0, 7], attrs[t, 1, 7], attrs[t, 2, 7]
+    d = b0 * w0 + b1 * w1 + b2 * w2  # 1/w here; u = (u/w) / (1/w), so u' = ((u/w)' - u (1/w)') / (1/w)
+    u = (b0 * w0 * u0 + b1 * w1 * u1 + b2 * w2 * u2) / d
+    v = (b0 * w0 * v0 + b1 * w1 * v1 + b2 * w2 * v2) / d
+    dx, dy = ax0 + ax1 + ax2, ay0 + ay1 + ay2
+    dudx = (ax0 * u0 + ax1 * u1 + ax2 * u2 - u * dx) / d
+    dvdx = (ax0 * v0 + ax1 * v1 + ax2 * v2 - v * dx) / d
+    dudy = (ay0 * u0 + ay1 * u1 + ay2 * u2 - u * dy) / d
+    dvdy = (ay0 * v0 + ay1 * v1 + ay2 * v2 - v * dy) / d
+    level = first[chain]
+    h, w = levels[level, 1], levels[level, 2]
+    along_x = (dudx * w) ** 2 + (dvdx * h) ** 2
+    along_y = (dudy * w) ** 2 + (dvdy * h) ** 2
+    return 0.5 * np.log2(max(along_x, along_y, 1e-18))
 
 
 @njit(cache=True, error_model="numpy")
@@ -612,8 +649,7 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
-            inst_double, inst_flip, inst_vertex, eye, near, clip, width, height, lod_bias, world, chunk_inst,
+def project(faces, uvs, colors, face_chain, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha, inst_double, inst_flip, inst_vertex, eye, near, clip, width, height, lod_bias, world, chunk_inst,
             chunk_first, chunk_end, whole, cut, off_whole, off_cut, xs, ys, inv_w, attrs, tri_inst, chain, lod, see):
     """Every instance's faces as screen-space triangles: culled, clipped against the near plane
     w = near, and projected, from the vertices and plan transform() made.
@@ -621,14 +657,13 @@ def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex,
     The meshes are packed together: mesh m has vertices mesh_vertex[m]:mesh_vertex[m + 1], and
     faces index the packed vertices. Per face: `faces` (F, 3), `uvs` (F, 3, 2), `colors` (F, 3, 4:
     linear rgb and alpha of each corner), `face_chain` (F,: mipmap chain, or -1 if untextured) and
-    `face_texels` (F,: texels in the face's texture) and `face_kind` (F,: what its texture's alpha is for,
-    see texture.alpha_kind). Instance i shows mesh inst_mesh[i] in colour
+    `face_kind` (F,: what its texture's alpha is for, see texture.alpha_kind). Instance i shows mesh inst_mesh[i] in colour
     inst_rgb[i] (linear) with opacity inst_alpha[i]; back faces (seen from `eye`) are culled unless
     inst_double[i]: then they are drawn with flipped normals. inst_flip: see transform().
 
     The triangles go to xs, ys, inv_w (pixel coordinates and 1/w of each corner), attrs (ATTRS
-    attributes of each corner), tri_inst (the instance), chain (the face's mipmap chain), lod (its
-    mip level, lod_bias included) and see (its kind: 1 if it can be seen through, as a corner's alpha
+    attributes of each corner), tri_inst (the instance), chain (the face's mipmap chain), lod (lod_bias:
+    added to the mip level texture_lod() gives each pixel) and see (its kind: 1 if it can be seen through, as a corner's alpha
     is below 1 or its texture is partly see-through; else 2 if its texture has holes (cut-outs);
     else 0, solid), each face chunk's at the rows transform() gave it. Attributes of clipped faces are
     interpolated linearly, which is correct in clip space.
@@ -697,7 +732,7 @@ def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex,
                 _emit(tri, k_cut, width, height, xs, ys, inv_w, attrs)
                 chain[k_cut] = f
                 k_cut += 1
-        # Each triangle's instance, mipmap chain and mip level: log2 of how many texels span a pixel across it.
+        # Each triangle's instance, mipmap chain and mip level bias.
         for part in range(2):
             t0, t1 = (off_whole[c], k_whole) if part == 0 else (off_cut[c], k_cut)
             for t in range(t0, t1):
@@ -708,14 +743,7 @@ def project(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex,
                 else:
                     see[t] = 2 if face_kind[f] == 1 else 0
                 chain[t] = face_chain[f]
-                if face_chain[f] < 0:
-                    lod[t] = 0.0
-                    continue
-                px_area = abs((xs[t, 1] - xs[t, 0]) * (ys[t, 2] - ys[t, 0]) - (ys[t, 1] - ys[t, 0]) * (xs[t, 2] - xs[t, 0]))
-                d1u, d1v = attrs[t, 1, 6] - attrs[t, 0, 6], attrs[t, 1, 7] - attrs[t, 0, 7]
-                d2u, d2v = attrs[t, 2, 6] - attrs[t, 0, 6], attrs[t, 2, 7] - attrs[t, 0, 7]
-                ratio = abs(d1u * d2v - d1v * d2u) * face_texels[f] / max(px_area, 1e-9)
-                lod[t] = 0.5 * np.log2(max(ratio, 1e-9)) + lod_bias
+                lod[t] = lod_bias
 
 
 SURFACE = 7  # per corner of a shadow map's triangle: linear rgb | alpha | u / w, v / w, 1 / w (for its texture)

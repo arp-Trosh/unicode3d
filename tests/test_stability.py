@@ -246,6 +246,29 @@ class BadNumberTests(unittest.TestCase):
             self.assertTrue((fb.ids == 1).any(), fog)  # the good box is drawn
             self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all(), fog)
 
+    def test_bad_texture_coordinates_and_normals(self):
+        # Mip levels come from how fast uv change across the screen, and textures repeat beyond 0..1: neither may
+        # turn NaN, infinite or huge coordinates into an index outside the texture.
+        holes = np.ones((8, 8, 4))
+        holes[::2, :, 3] = 0.0
+        objects = []
+        for i, bad in enumerate((np.nan, np.inf, -np.inf, 1e300, -1e300, 1e-300)):
+            box = make_box(textures=[holes if i % 2 else np.ones((8, 8, 3))] * 6)
+            box.uvs = box.uvs.copy()
+            box.uvs[::3, 1] = bad
+            box.normals = np.full((len(box.vertices), 3), bad)
+            box.normals[::2] = (0.0, 1.0, 0.0)
+            objects.append(Object3D(box, position=np.array([1.2 * i - 3.0, 0.0, 0.0]), opacity=1.0 - 0.3 * (i % 3 == 2)))
+        good = Object3D(make_box(), position=np.array([0.0, 1.5, 0.0]))
+        screen = Screen(glyphs="sextant", color="256", size=(20, 40))
+        fb = Renderer(40, 20, screen.cell_pixels, background=Sky()).render(
+            [good, *objects], Camera(position=np.array([0.0, 0.0, 6.0])), [Light(shadows=True), PointLight(
+                np.array([0.0, 2.0, 2.0]), shadows=True)])
+        screen.draw_frame(fb)
+        screen.render_updates()
+        self.assertTrue((fb.ids == 1).any())
+        self.assertTrue(np.isfinite(fb.rgb).all())
+
     def test_camera_at_nan(self):
         screen = Screen(glyphs="quad", color="truecolor", size=(20, 40))
         fb = Renderer(40, 20, screen.cell_pixels, background=Sky()).render(
