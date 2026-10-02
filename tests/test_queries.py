@@ -2,6 +2,8 @@
 # Copyright (C) 2026 arp-Trosh
 """Ray and overlap queries (Colliders)."""
 import unittest
+import warnings
+import weakref
 
 import numpy as np
 
@@ -140,6 +142,62 @@ class RayTests(unittest.TestCase):
         self.assertAlmostEqual(a.raycast((0, 0, 5), (0, 0, -1)).distance, 4.0)
         a.invalidate()
         self.assertAlmostEqual(a.raycast((0, 0, 5), (0, 0, -1)).distance, 3.0)
+        # Invalidated every frame (a mesh deformed in place), the mesh is watched once, not once a call (each
+        # call added a weakref.finalize, kept until the mesh was gone).
+        watching = len(weakref.finalize._registry)
+        for _ in range(100):
+            mesh.vertices *= 1.001
+            a.invalidate()
+        self.assertEqual(len(weakref.finalize._registry), watching)
+        self.assertAlmostEqual(a.raycast((0, 0, 5), (0, 0, -1)).distance, 5.0 - 2.0 * 1.001 ** 100)
+
+    def test_triangles_without_area_are_never_hit(self):
+        # Two corners in one place, or all three on a line, as triangle strips and polygon fans leave: a ray at one
+        # found a distance made of rounding errors, with a normal of zero, and a sphere on one had no way out.
+        rng = np.random.default_rng(5)
+        v = np.vstack([rng.normal(size=(9, 3)), [(10.0, 0.0, 0.0), (11.0, 0.0, 0.0), (10.0, 1.0, 0.0)]])
+        v[8] = v[6] + 0.37 * (v[7] - v[6])
+        faces = np.array([(0, 1, 1), (2, 3, 3), (4, 4, 5), (6, 7, 8), (9, 10, 11)])  # and one real triangle
+        obj = Object3D(Mesh(v, faces), rng.normal(size=3), quat_axis_angle((1, 2, 3), 0.7), scale=(1.3, 0.8, 1.1))
+        solid = Colliders([obj])
+        world = v @ obj.world_matrix()[0].T + obj.world_matrix()[1]
+        for a, b in ((0, 1), (2, 3), (4, 5), (6, 7)):
+            for t in np.linspace(0.05, 0.95, 40):
+                target = world[a] + t * (world[b] - world[a])
+                origin = target + rng.normal(size=3) * 3
+                self.assertIsNone(solid.raycast(origin, target - origin))
+                self.assertEqual(solid.raycast(origin, target - origin, all=True), [])
+                self.assertIsNone(solid.raycast_many(origin, target - origin)[0][0])
+        self.assertEqual(solid.overlap_sphere(world[0], 0.2), [])
+        target = world[9:].mean(axis=0)  # the real one keeps its row of the faces
+        hit = solid.raycast(target + (0.0, 0.0, 2.0), (0.0, 0.0, -1.0))
+        self.assertEqual(hit.face, 4)
+        np.testing.assert_allclose(hit.position, target, atol=1e-9)
+
+    def test_a_hit_right_at_max_distance_counts(self):
+        # Asked again with max_distance its own distance, a ray finds the same hit, whatever the rounding (the
+        # boxes around a flat floor have no thickness, and 28% were lost).
+        n = 6
+        x, z = np.meshgrid(np.linspace(-2, 2, n), np.linspace(-2, 2, n))
+        grid = Mesh(np.stack([x.ravel(), np.zeros(n * n), z.ravel()], 1),
+                    np.array([f for i in range(n - 1) for j in range(n - 1) for a in [i * n + j]
+                              for f in ((a, a + n, a + 1), (a + 1, a + n, a + n + 1))]))
+        solid = Colliders([Object3D(grid, np.array([0.3, -1.0, -4.0]), quat_axis_angle((1, 0.2, 0), 0.5),
+                                    scale=(1.5, 1.0, 0.7)), Object3D(grid, np.array([0.0, 0.0, -4.0]))])
+        rng = np.random.default_rng(1)
+        hits = 0
+        for _ in range(300):
+            origin = rng.normal(size=3) * 0.5
+            direction = np.array([0.0, 0.0, -4.0]) + rng.normal(size=3) * 1.5 - origin
+            hit = solid.raycast(origin, direction)
+            if hit is None:
+                continue
+            hits += 1
+            again = solid.raycast(origin, direction, max_distance=hit.distance)
+            self.assertEqual((again.object, again.distance), (hit.object, hit.distance))
+            self.assertEqual(len(solid.raycast(origin, direction, max_distance=hit.distance, all=True)), 1)
+            self.assertIs(solid.raycast_many(origin, direction, max_distance=hit.distance)[0][0], hit.object)
+        self.assertGreater(hits, 100)
 
     def test_large_mesh(self):
         mesh = blob_mesh((1.0, 1.0, 1.0), rings=200, segments=160)  # 64,000 triangles
@@ -253,6 +311,38 @@ class StabilityTests(unittest.TestCase):
             Colliders([Object3D(Mesh(np.zeros((3, 3)), np.array([[0, 1, 3]])))])  # a face beyond the vertices
         with self.assertRaises(ValueError):
             Colliders([Object3D(make_box())]).raycast((0, 0), (0, 0, -1))
+
+    def test_arguments_in_any_reasonable_form(self):
+        box = Object3D(make_box(), np.array([0.0, 0.0, -3.0]))
+        solid = Colliders(box)  # one object, not a list
+        self.assertIsNone(solid.raycast((0, 0, 0), (0, 0, -1), ignore=box))  # ignore one object
+        self.assertAlmostEqual(solid.raycast((0, 0, 0), (0, 0, -1), max_distance=None).distance, 2.5)  # no limit
+        self.assertEqual(solid.raycast_many((0, 0, 0), (0, 0, -1), max_distance=None)[1][0], 2.5)
+        objects, distances, positions, normals, faces = solid.raycast_many(np.zeros((0, 3)), (0, 0, -1))  # no rays
+        self.assertEqual((objects, distances.shape, positions.shape, normals.shape, faces.shape),
+                         ([], (0,), (0, 3), (0, 3), (0,)))
+        self.assertEqual(len(solid.raycast_many((0, 0, 0), [(0, 0, -1), (0, 0, 1)])[0]), 2)  # one origin, two rays
+        for iterations in (np.nan, np.inf, -3):
+            np.testing.assert_allclose(solid.push_out((0.0, 0.0, -2.3), 0.5, iterations=iterations), [0, 0, 0.3])
+        # Taken out of the list of objects (which compares them) and gone after an update.
+        solid = Colliders([Object3D(make_box(), np.array([0.0, 0.0, -6.0])), box])
+        solid.objects.remove(box)
+        solid.update()
+        self.assertAlmostEqual(solid.raycast((0, 0, 0), (0, 0, -1)).distance, 5.5)
+
+    def test_bad_numbers_are_not_warned_about(self):
+        # A warning would be printed over the picture (as Renderer.render() keeps quiet too).
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            huge = Mesh(np.array([(-1e308, 0, 0), (1e308, 0, 0), (0, 1e308, 0), (0, 0, 1e308)]),
+                        np.array([(0, 1, 2), (0, 2, 3)]))
+            parent = Node(scale=np.inf)
+            solid = Colliders([Object3D(huge), Object3D(make_box(), parent=parent), Object3D(make_box(), scale=1e300)])
+            solid.raycast((0, 0, 0), (1e308, 1e308, -1e308))
+            solid.raycast((0, 0, 0), (1e308, 1e308, -1e308), all=True)
+            solid.raycast_many([(0, 0, 0)], [(1e308, 1e308, -1e308)])
+            solid.overlap_box((0, 0, 0), 1e308, rotation=(1e300, 1e300, 0, 0))
+            solid.push_out((1e308, 0, 0), 1e308)
 
 
 if __name__ == "__main__":

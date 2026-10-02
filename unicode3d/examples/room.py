@@ -415,10 +415,11 @@ class Courtyard:
                 if box is None:
                     continue
                 lo, hi, members = box[0], box[1], [obj]
-                for thing in [t for t in things if (t[0] - TAG_GAP <= hi).all() and (lo <= t[1] + TAG_GAP).all()]:
-                    things.remove(thing)
+                near = [(t[0] - TAG_GAP <= hi).all() and (lo <= t[1] + TAG_GAP).all() for t in things]
+                for thing in [t for t, n in zip(things, near) if n]:
                     lo, hi, members = np.minimum(lo, thing[0]), np.maximum(hi, thing[1]), thing[2] + members
-                things.append([lo, hi, members])
+                # (kept by position: things.remove() would compare their arrays)
+                things = [t for t, n in zip(things, near) if not n] + [[lo, hi, members]]
             for lo, hi, members in things:
                 top = np.array([(lo[0] + hi[0]) / 2, hi[1] + TAG_LIFT, (lo[2] + hi[2]) / 2])
                 if np.linalg.norm(top - eye) < reach:

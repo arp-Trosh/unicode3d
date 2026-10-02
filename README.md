@@ -453,7 +453,8 @@ time a set holding it updates (0.07 s for 140,000 triangles) and shared by every
 that uses the mesh, so a big level is indexed once. A query then costs about 10 µs from Python,
 and `update()` about 7 µs an object. After editing a mesh's arrays in place, call
 `colliders.invalidate()`. An object with a pose that isn't finite, or scaled to nothing, is never
-hit, and faces with a corner at NaN are left out.
+hit, and faces with a corner at NaN, or with no area (their corners on a line, as triangle strips and
+polygon fans leave), are left out.
 
 </details>
 
@@ -469,6 +470,9 @@ list; their parents are followed automatically.
   `linear @ p + position`.
 - `obj.to_world(point)` places a point given in the object's own space.
 - `obj.world_transform()` gives `(position, rotation, scale, visible)`.
+
+Each `Object3D`, `Node`, `Model` and `Mesh` is equal only to itself, so lists of them work with `in`
+and `remove()` (`hit.object in enemies`), and they can be set members and dict keys.
 
 `scale` is one number, or three (`(x, y, z)`) that stretch the mesh along its own axes before it is
 turned: `make_box()` with `scale=(2, 0.1, 1)` is a plank, a sphere with `(1, 1.5, 1)` an egg, and a

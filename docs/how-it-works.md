@@ -332,6 +332,12 @@ its own rays' answers. Overlaps go the other way: the shape's box is taken into 
 down the tree, and the triangles left are tested in the world, where a sphere is still a sphere. Contacts
 pushing out nearly the same way are merged, so a dense mesh gives a few, not thousands.
 
+Rounding needs some care there too. A triangle with no area (two corners in one place, or three on a line, as
+triangle strips and polygon fans leave) is left out of the trees, and a ray running along a triangle's plane
+misses it: the distance a ray test finds for either is made of rounding errors, anywhere along the ray. A ray
+passes over a box or sphere around triangles only where it starts a billionth beyond the distance looked to,
+so a hit lying right at a ray's `max_distance` (the floor exactly a step below) is found whatever the rounding.
+
 ## Getting it onto the screen
 
 The screen is a grid of cells (character, foreground, background). Each refresh compares the grid to

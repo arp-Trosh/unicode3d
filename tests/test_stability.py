@@ -22,7 +22,7 @@ from unicode3d.background import Fog, Gradient, Sky, SkyBox
 from unicode3d.examples.room import Walk
 from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.mesh import Mesh, make_box
-from unicode3d.scene import Camera, Light, Object3D, PointLight, Renderer
+from unicode3d.scene import Camera, Light, Model, Node, Object3D, PointLight, Renderer
 from unicode3d.terminal import Screen, crash_log_path
 from unicode3d.transforms import quat_axis_angle
 from unicode3d.ui import Choice, DisplayControls, Panel, Slider, Toggle
@@ -246,6 +246,61 @@ class BadNumberTests(unittest.TestCase):
             screen.render_updates()
             self.assertTrue((fb.ids == 1).any(), fog)  # the good box is drawn
             self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all(), fog)
+
+    def test_corners_whose_sum_overflows(self):
+        # Finite, but too large to add up: looking for a mirror's plane, an SVD of the infinities that left never
+        # returned, and the program froze. (In a process of its own: a frozen render() would keep the kernel lock,
+        # and every later test would wait for it.)
+        import subprocess
+        program = ("import numpy as np\n"
+                   "from unicode3d import Camera, Light, Mesh, Object3D, Renderer\n"
+                   "far = Mesh(np.array([(-1e308, 0, 0), (-1e308, 1, 0), (-1e308, 1, 1), (-1e308, 0, 1)]),\n"
+                   "           np.array([(0, 1, 2), (0, 2, 3)]))\n"
+                   "Renderer(20, 8).render([Object3D(far, reflectivity=0.5)], Camera(), Light())\n"
+                   "print('drawn')\n")
+        result = subprocess.run([sys.executable, "-c", program], cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.stdout, "drawn\n", result.stderr)
+
+    def test_normals_too_large_to_work_out(self):
+        # A face so large its normal overflows (from finite corners) leaves NaN normals at its corners, which
+        # see-through surfaces passed on: NaN colour and coverage over all that the mesh covered.
+        v = np.array([(2.5, 0.0, -2.0), (1.0, 10.0, 0.75), (0.9, 0.3, -1e308), (-1.5, -0.3, -1.0), (1.0, -1.4, 0.6)])
+        faces, clear = np.array([(0, 1, 2), (0, 3, 4)]), np.array([(255, 255, 255, 128)] * 2)
+        for mesh in (Mesh(v, faces, face_colors=clear), Mesh(v, faces)):
+            for options in ({}, {"opacity": 0.5, "reflectivity": 0.5}):
+                fb = Renderer(30, 10, background=Sky()).render([Object3D(mesh, **options)],
+                                                               Camera(position=np.array([0.0, 1.0, 4.0])), Light())
+                self.assertTrue((fb.ids == 1).any())
+                self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all())
+
+    def test_text_labels_and_bars_at_bad_numbers(self):
+        # Rows, columns and sizes worked out as floats, NaN or infinite: written where they round down to, or not
+        # at all, and a bar far wider than the screen costs no more than one as wide.
+        screen = Screen(glyphs="quad", color="truecolor", size=(10, 30))
+        renderer = Renderer(30, 10, screen.cell_pixels)
+        renderer.render([Object3D(make_box())], Camera(), Light())
+        screen.text(2.7, 3.2, "float")
+        self.assertEqual("".join(screen.chars[2, 3:8]), "float")
+        for v in (np.nan, np.inf, -np.inf):
+            screen.text(v, 0, "x"), screen.text(0, v, "x")
+            screen.bar(v, 0, 5, 0.5), screen.bar(0, v, 5, 0.5), screen.bar(0, 0, v, 0.5)
+            self.assertIsNone(screen.label(renderer, (0.0, 0.0, 0.0), "x", dy=v))
+            self.assertIsNone(screen.label(renderer, (0.0, 0.0, 0.0), "x", top=v))
+        self.assertIsNotNone(screen.label(renderer, (0.0, 0.0, 0.0), "y", top=1.0, left=0.5, dy=-1.5))
+        start = time.perf_counter()
+        screen.bar(4, -1e12, 2e12 + 30, 0.5)
+        self.assertLess(time.perf_counter() - start, 0.5)
+        self.assertEqual("".join(screen.chars[4]), "\u2588" * 15 + "\u2591" * 15)  # (its middle: half full)
+
+    def test_bounds_of_bad_poses(self):
+        self.assertIsNone(Object3D(make_box(), rotation=np.array([np.inf, 0.0, 0.0, 0.0])).world_bounds())
+        self.assertIsNone(Object3D(make_box(), position=np.array([1.7e308, 0, 0]), scale=1e308).world_bounds())
+        model = Model(Node(), [Object3D(make_box(), position=np.array([1e308, 0, 0])),
+                               Object3D(make_box(), position=np.array([-1e308, 0, 0]))])
+        for part in model:
+            part.parent = model.root
+        model.fit()
+        model.world_bounds()
 
     def test_bad_texture_coordinates_and_normals(self):
         # Mip levels come from how fast uv change across the screen, and textures repeat beyond 0..1: neither may

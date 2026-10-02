@@ -17,6 +17,7 @@ add_display_args() adds.
 """
 import contextlib
 import faulthandler
+import math
 import os
 import platform
 import signal
@@ -50,6 +51,14 @@ COMPILE_NOTICE_DELAY = 0.5  # seconds: loading compiled kernels from Numba's cac
 CRASH_LOG_LIMIT = 1 << 20  # bytes: a longer crash log is cut down to its last quarter when run() opens it
 SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[0m\x1b[?2026l"  # synchronized output
 _CLEAR = np.frombuffer(b"\x1b[0m\x1b[2J", np.uint8)
+
+
+def _cell(value):
+    """A row, column or count of cells as an int (fractions rounded down), or None for NaN or an infinity."""
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    value = float(value)
+    return math.floor(value) if math.isfinite(value) else None
 
 
 def _printable(ch):
@@ -320,7 +329,8 @@ class Screen:
 
     def text(self, y, x, s, color=Color.DEFAULT, bold=False, reverse=False, dim=False):
         """Write a string at row y, column x in a named colour (the terminal's ANSI palette), clipped to the screen."""
-        if not 0 <= y < self._rows or x >= self._cols:
+        y, x = _cell(y), _cell(x)
+        if y is None or x is None or not 0 <= y < self._rows or x >= self._cols:
             return
         if x < 0:
             s, x = s[-x:], 0
@@ -344,9 +354,10 @@ class Screen:
         for one behind something drawn (owner: the object, objects or Model the point belongs to, whose own
         surface doesn't count). Returns the Anchor (see Renderer.anchor), or None if nothing was written."""
         anchor = renderer.anchor(point, owner, clamp)
-        if anchor is None or (hide and anchor.hidden):
+        top, left, dy = _cell(top), _cell(left), _cell(dy)
+        if anchor is None or (hide and anchor.hidden) or None in (top, left, dy):
             return None
-        x, y = left + anchor.x - len(text) // 2, top + anchor.y + int(dy)
+        x, y = left + anchor.x - len(text) // 2, top + anchor.y + dy
         if clamp:  # whole, inside the frame
             x = max(min(x, left + renderer.width - len(text)), left)
             y = max(min(y, top + renderer.height - 1), top)
@@ -358,18 +369,22 @@ class Screen:
         an eighth of a cell (with Unicode; # and - without), the rest in `empty` (dim). For progress and levels of
         any kind (loading, memory or disk in use, a volume, frame time), on its own or at a label's Anchor (a
         character's health, say)."""
-        width = max(int(width), 0)
+        y, x, width = _cell(y), _cell(x), _cell(width)
+        if y is None or x is None or width is None:
+            return
         fraction = min(1.0, max(0.0, float(fraction)))  # (NaN as 0)
-        eighths = int(round(fraction * width * 8))
-        full, part = divmod(eighths, 8)
+        full, part = divmod(round(fraction * max(width, 0) * 8), 8)
         if self.unicode:
-            filled = "\u2588" * full + (" \u258f\u258e\u258d\u258c\u258b\u258a\u2589"[part] if part else "")
-            self.text(y, x, filled, color)
-            self.text(y, x + len(filled), "\u2591" * (width - len(filled)), empty, dim=True)
+            tip = " \u258f\u258e\u258d\u258c\u258b\u258a\u2589"[part] if part else ""
         else:
-            filled = "#" * (full + (part >= 4))
-            self.text(y, x, filled, color)
-            self.text(y, x + len(filled), "-" * (width - len(filled)), empty, dim=True)
+            full, tip = full + (part >= 4), ""
+        # Only the cells on the screen are made into text (a width far beyond it costs nothing).
+        start, stop = max(0, -x), min(width, self._cols - x)
+        filled = min(max(full - start, 0), stop - start)
+        tip = tip if start <= full < stop else ""
+        self.text(y, x + start, ("\u2588" if self.unicode else "#") * filled + tip, color)
+        rest = max(stop - max(start, full + len(tip)), 0)
+        self.text(y, x + start + filled + len(tip), ("\u2591" if self.unicode else "-") * rest, empty, dim=True)
 
     def draw_frame(self, fb, top=0, left=0):
         """Draw a Renderer's framebuffer with its top-left cell at (top, left)."""

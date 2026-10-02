@@ -295,6 +295,25 @@ class RenderTests(unittest.TestCase):
         self.assertIsNone(Object3D(Mesh(np.zeros((0, 3)), np.zeros((0, 3), int))).world_bounds())
         self.assertIsNone(union_bounds([]))
 
+    def test_objects_are_equal_only_to_themselves(self):
+        # Lists of objects work with in, index() and remove() (comparing their arrays raised ValueError), and
+        # objects can be set members and dict keys: a hit's object looked up among the enemies, say.
+        a, b = Object3D(make_box()), Object3D(make_box())
+        twin = Object3D(a.mesh, a.position, a.rotation)  # the very same arrays, but another object
+        objects = [a, b]
+        self.assertIn(b, objects)
+        self.assertNotIn(twin, objects)
+        self.assertEqual(objects.index(b), 1)
+        objects.remove(b)
+        self.assertEqual(objects, [a])
+        self.assertEqual(len({a, b, twin}), 3)
+        self.assertEqual({a: 1, b: 2}[b], 2)
+        self.assertNotEqual(Node(), Node())
+        mesh = make_box()
+        self.assertEqual([m for m in (make_box(), mesh) if m == mesh], [mesh])
+        model = Model(Node(), [a])
+        self.assertEqual([Model(Node(), [b]), model].index(model), 1)
+
     def test_parents_move_turn_scale_and_hide_children(self):
         group = Node(position=np.array([1.0, 0.0, 0.0]), rotation=quat_axis_angle((0, 1, 0), np.pi / 2), scale=2.0)
         child = Object3D(make_box(0.5), position=np.array([1.0, 0.0, 0.0]), rotation=quat_axis_angle((1, 0, 0), 0.3),
@@ -820,6 +839,11 @@ class RenderTests(unittest.TestCase):
                        Camera(projection="ortho", near=np.nan), Camera(projection="ortho", far=-5.0)):
             renderer.render([Object3D(make_box())], camera, Light())
             renderer.ray(5, 5), renderer.pick(15, 7)
+        # A view of negative size or angle (upside down): a point on a surface isn't hidden by that surface.
+        for camera in (Camera(projection="ortho", size=-3.0), Camera(fov=-50.0)):
+            renderer.render([Object3D(make_box())], camera, Light())
+            anchor = renderer.anchor((0.0, 0.0, 0.5))
+            self.assertEqual((anchor.x, anchor.hidden), (15, False), camera)
         with self.assertRaises(ValueError):
             Camera(projection="orthographic")
 

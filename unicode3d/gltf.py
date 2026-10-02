@@ -52,7 +52,7 @@ COMPRESSION = {"KHR_draco_mesh_compression": "Draco-compressed meshes",
 MAX_ZEROS = 1 << 24  # the most numbers an accessor without data of its own may give
 MAX_NODES = 100_000  # deeper or larger node trees than this are taken as broken (a cycle)
 # What a broken part of a file raises as it is read: that part is left out, with a warning.
-BROKEN = (KeyError, ValueError, TypeError, IndexError, AttributeError, struct.error)
+BROKEN = (KeyError, ValueError, TypeError, IndexError, AttributeError, ArithmeticError, struct.error)  # (int(inf))
 
 
 def _name(value, default):
@@ -439,6 +439,8 @@ def _tracks(file, sampler, path):
     values = file.accessor(sampler["output"])
     method = sampler.get("interpolation", "LINEAR")
     width = 4 if path == "rotation" else 3
+    if values.shape[1] < width:  # (a position or scale of one number would stop the renderer when played)
+        raise ValueError(f"{path} needs {width} numbers a keyframe, not {values.shape[1]}")
     values = values[:, :width]
     if path == "rotation":
         values = values[:, [3, 0, 1, 2]]  # glTF's x, y, z, w as w, x, y, z
@@ -471,7 +473,8 @@ def load_gltf(path, max_texture=MAX_TEXTURE, double_sided=False, scene=None):
     Model.warnings.
     """
     try:
-        return _load(path, max_texture, double_sided, scene)
+        with np.errstate(all="ignore"):  # (numbers that aren't finite are left to the renderer, not warned about)
+            return _load(path, max_texture, double_sided, scene)
     except BROKEN as e:
         if isinstance(e, ValueError) and str(e).startswith(str(path)):
             raise

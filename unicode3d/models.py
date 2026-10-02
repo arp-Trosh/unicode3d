@@ -15,6 +15,7 @@ From an MTL: Kd colour, Ks and Ns highlights, Ke glow, d or Tr opacity, illum 0 
 map_Kd texture (with -o and -s, which move and scale it), map_d cut-outs and, from the PBR extension, Pm and Pr
 (metal reflects; rough metal less). Texture paths are taken relative to the MTL file.
 """
+import functools
 import os
 from dataclasses import dataclass, field
 
@@ -26,6 +27,16 @@ from .scene import Model, Node, Object3D
 from .texture import MAX_TEXTURE, load_image
 
 __all__ = ["Material", "load_model", "load_mtl", "load_obj"]
+
+
+def _quiet(load):
+    """load, run under np.errstate(all="ignore"): numbers in a file that aren't finite, or overflow, are left to
+    the renderer to draw around, as load_gltf leaves them, rather than warned about (over the picture)."""
+    @functools.wraps(load)
+    def quiet(*args, **kwargs):
+        with np.errstate(all="ignore"):
+            return load(*args, **kwargs)
+    return quiet
 
 
 @dataclass
@@ -103,6 +114,7 @@ def _floats(args, n, default):
     return tuple(values + [values[0]] * (n - len(values)))
 
 
+@_quiet
 def load_mtl(path, max_texture=MAX_TEXTURE, warnings=None):
     """The materials in an MTL file, {name: Material}, with their textures loaded (shrunk to at most max_texture
     texels across). What can't be loaded (a texture that isn't there, a line that makes no sense) is skipped,
@@ -151,7 +163,7 @@ def load_mtl(path, max_texture=MAX_TEXTURE, warnings=None):
             m.reflectivity = float(np.clip(metal * (1.0 - np.clip(rough or 0.0, 0.0, 1.0)), 0.0, 1.0))
             if m.shininess is None and rough is not None:
                 # The usual match between a roughness and a Blinn-Phong exponent: 2 / roughness^4 - 2.
-                m.shininess = float(np.clip(2.0 / max(rough, 0.03) ** 4 - 2.0, 1.0, 1000.0))
+                m.shininess = float(np.clip(2.0 / min(1.0, max(0.03, rough)) ** 4 - 2.0, 1.0, 1000.0))  # (NaN as 0.03)
         _load_maps(m, statements, folder, max_texture, warnings)
         materials[name] = m
     return materials
@@ -326,6 +338,7 @@ def _submesh(parsed, faces):
                 normals=None if np.isnan(normals).all() else normals)
 
 
+@_quiet
 def load_model(path, split_groups=False, max_texture=MAX_TEXTURE, double_sided=False):
     """A model file as a Model (scene.py): Wavefront .obj, or glTF 2.0 (.gltf or .glb, see gltf.load_gltf, which
     also gives the file's nodes and animations).
@@ -372,6 +385,7 @@ def load_model(path, split_groups=False, max_texture=MAX_TEXTURE, double_sided=F
     return model
 
 
+@_quiet
 def load_obj(path, max_texture=MAX_TEXTURE):
     """A Wavefront OBJ file as one Mesh: its vertices, faces, normals (worked out where the file has none),
     vertex colours if it has them, and, if it uses materials, their colours (as face_colors, with their

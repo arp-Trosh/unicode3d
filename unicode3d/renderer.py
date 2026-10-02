@@ -73,7 +73,10 @@ def _flat_plane(vertices, faces, radius):
     if len(vertices) < 3 or not np.isfinite(vertices).all():  # (a corner at NaN or infinity: no plane)
         return (np.nan,) * 4
     centre = vertices.mean(axis=0)
-    _, spread, axes = np.linalg.svd(vertices - centre, full_matrices=False)
+    offsets = vertices - centre
+    if not np.isfinite(offsets).all():  # (corners so far out that their sum overflows: an SVD of infinities can
+        return (np.nan,) * 4            # loop forever)
+    _, spread, axes = np.linalg.svd(offsets, full_matrices=False)
     normal = axes[-1]
     if np.abs((vertices - centre) @ normal).max() > 1e-6 * max(radius, 1e-12):
         return (np.nan,) * 4
@@ -364,7 +367,7 @@ class Renderer(ShadowMaps, Mirrors):
                 depth = float(fb.depth[py, px])
                 if depth > 0.0 and int(fb.ids[py, px]) > 0:
                     surface = 1.0 / np.float64(depth) - self._ortho  # how far ahead the surface drawn there is
-                    pixel = 2.0 * self._view_tan[1] * (ahead + self._ortho) / fb.height  # (in the world, there)
+                    pixel = 2.0 * abs(self._view_tan[1]) * (ahead + self._ortho) / fb.height  # (in the world, there)
                     if surface < ahead - LABEL_MARGIN * ahead - 2.0 * pixel:
                         drawn = self._objects[int(fb.ids[py, px]) - 1]
                         hidden = id(drawn) not in _objects_of(owner)

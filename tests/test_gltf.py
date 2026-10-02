@@ -9,6 +9,7 @@ import os
 import struct
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -324,6 +325,34 @@ class GltfTests(unittest.TestCase):
         self.assertTrue(any("3" in w and "positions" in w for w in model.warnings), model.warnings)
         self.assertTrue(any("too large" in w for w in model.warnings), model.warnings)
         Renderer(20, 10).render(list(model), Camera(), Light())
+
+    def test_animations_and_numbers_that_cannot_be_used(self):
+        # A translation or scale keyframed with one number each: the channel is left out (played, the node got a
+        # position of one number, and the next render() raised).
+        b = Builder()
+        door = b.node(mesh=b.mesh(), name="Door")
+        b.scene(door)
+        times = b.accessor([0.0, 1.0])
+        b.add("animations", {"name": "Bad", "samplers": [{"input": times, "output": b.accessor([1.0, 2.0])},
+                                                         {"input": times, "output": b.accessor(np.zeros((2, 3)))}],
+                             "channels": [{"sampler": 0, "target": {"node": door, "path": "translation"}},
+                                          {"sampler": 0, "target": {"node": door, "path": "scale"}},
+                                          {"sampler": 1, "target": {"node": door, "path": "translation"}}]})
+        model = load_gltf(b.glb(self.path("narrow.glb")))
+        self.assertEqual(sum("channel left out" in w for w in model.warnings), 2, model.warnings)
+        model.animations["Bad"].apply(0.5)
+        self.assertEqual(np.shape(model.nodes["Door"].position), (3,))
+        Renderer(20, 10).render(list(model), Camera(), Light())
+        # Numbers that can be drawn around are loaded without warnings (which would be printed over the picture);
+        # a length of infinity leaves its part out, with a warning (it raised OverflowError).
+        b.json["nodes"][door]["matrix"] = [1e308] * 16
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            Renderer(20, 10).render(list(load_gltf(b.glb(self.path("huge.glb")))), Camera(), Light())
+        b.json["bufferViews"][0]["byteLength"] = float("inf")  # (Python's json writes Infinity, and reads it)
+        model = load_gltf(b.glb(self.path("endless.glb")))
+        self.assertEqual(len(model), 0)
+        self.assertTrue(any("mesh 0" in w and "infinity" in w for w in model.warnings), model.warnings)
 
     def test_node_hierarchy_and_matrices(self):
         b = Builder()

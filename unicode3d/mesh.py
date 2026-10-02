@@ -15,7 +15,7 @@ def _srgb01(colors):
     return c / 255.0 if np.issubdtype(c.dtype, np.integer) else c.astype(float)
 
 
-@dataclass
+@dataclass(eq=False)  # (equal only to itself: see scene._Placed)
 class Mesh:
     """A triangle mesh. Its colours (per vertex, blended across each face, or per face) multiply the
     colour of the object showing it, as textures do: give the object color=(255, 255, 255) to show
@@ -40,8 +40,9 @@ class Mesh:
         (like the sides of make_box) stay flat. Cached, and worked out afresh when the arrays are replaced.
         """
         cached = self.__dict__.get("_normals")
-        if cached is not None and cached[0] is self.vertices and cached[1] is self.normals:
-            return cached[2]
+        if (cached is not None and cached[0] is self.vertices and cached[1] is self.normals
+                and cached[2] is self.faces):
+            return cached[3]
         vertices = np.asarray(self.vertices, dtype=float).reshape(-1, 3)
         faces = np.asarray(self.faces, dtype=np.int64).reshape(-1, 3)
         given = None
@@ -62,7 +63,7 @@ class Mesh:
             normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
             if given is not None:
                 normals[usable] = given[usable] / length[usable, None]
-        self._normals = (self.vertices, self.normals, normals)
+        self._normals = (self.vertices, self.normals, self.faces, normals)
         return normals
 
     def corner_colors(self):

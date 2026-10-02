@@ -4,6 +4,7 @@
 import os
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -171,6 +172,24 @@ class LoadModelTests(ModelFiles):
         self.assertEqual(model.materials, {})
 
 
+class BadNumberFileTests(ModelFiles):
+    def test_numbers_beyond_any_use(self):
+        # Loaded without an exception (a roughness of 1e308 raised OverflowError) or a warning (printed over the
+        # picture), and drawn without one.
+        self.write("huge.mtl", "newmtl a\nKs 1e308 1e308 1e308\nPm inf\nPr 1e308\nKe nan 1 1\n"
+                               "map_Kd -s 1e308 1e308 1 tex/checks.png\nnewmtl b\nPm 1\nPr nan\n")
+        self.write("huge.obj", "mtllib huge.mtl\nv 0 0 0\nv 1 10 0\nv 0 0 -1e308\nv 1 0 0\nvt 0 0\nvt -inf 1e308\n"
+                               "usemtl a\nf 1/1 2/2 3/1\nusemtl b\nf 1 4 2\n")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            model = load_model(self.path("huge.obj"))
+            mesh = load_obj(self.path("huge.obj"))
+            self.assertEqual(model.materials["b"].shininess, 1000.0)
+            for objects in (list(model), [Object3D(mesh)]):
+                fb = Renderer(20, 10).render(objects, Camera(position=np.array([0.0, 1.0, 4.0])), Light())
+                self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all())
+
+
 class LoadObjTests(ModelFiles):
     def test_one_mesh_with_colours_and_textures(self):
         mesh = load_obj(self.path("crate.obj"))
@@ -277,6 +296,13 @@ class NormalTests(unittest.TestCase):
         flat.normals = np.zeros((3, 3))
         with self.assertRaises(ValueError):
             flat.vertex_normals()
+
+    def test_normals_follow_replaced_faces(self):
+        # Worked out afresh when faces is replaced, as when the vertices are (they were kept from the old faces).
+        mesh = Mesh(np.array([(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)], float), np.array([(0, 1, 2), (0, 2, 3)]))
+        np.testing.assert_allclose(mesh.vertex_normals(), [(0, 0, 1)] * 4)
+        mesh.faces = mesh.faces[:, ::-1].copy()  # turned to face the other way
+        np.testing.assert_allclose(mesh.vertex_normals(), [(0, 0, -1)] * 4)
 
     def test_texture_seams_need_not_be_shading_seams(self):
         # Two faces with their own vertices (as a loader splits them where texture coordinates change) shade as

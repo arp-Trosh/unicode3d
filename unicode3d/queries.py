@@ -19,6 +19,7 @@ layers (walls, enemies, pickups); the trees are shared, so another set costs lit
 
 What a game does with a contact (sliding along walls, gravity, steps) is up to the game.
 """
+import functools
 import math
 import weakref
 from dataclasses import dataclass
@@ -36,6 +37,10 @@ MAX_DEPTH = 48    # deepest a tree goes (a node this deep is a leaf, however man
 STACK = MAX_DEPTH + 2  # nodes a walk through a tree keeps waiting at once, at most
 RAY_CHUNK = 64    # rays each iteration of raycast_many's parallel loop casts
 MERGE_COS = 0.9   # contacts with one object whose directions are closer than this (about 25 degrees) are one
+FLAT = 1e-12      # a triangle whose corners are this close to a line (relative to its sides) has no area to meet, and
+                  # a ray this close to a triangle's plane (relative to its sides) runs along it rather than through it
+SLACK = 1e-9      # a ray passes over boxes and spheres around triangles only where they start this much (relative)
+                  # beyond the distance it looks to: a hit right at its max_distance is found whatever the rounding
 
 
 @dataclass(repr=False)
@@ -206,6 +211,17 @@ def build_tree(tri):
     return lo[:n_nodes].copy(), hi[:n_nodes].copy(), first[:n_nodes].copy(), count[:n_nodes].copy(), order, deepest
 
 
+def _has_area(tri):
+    """Whether each triangle of tri (F, 3, 3) has an area: its corners are not all on one line (to within FLAT).
+    (A ray meeting one that hasn't would find a distance that is only rounding error, and a shape touching it no
+    direction to be pushed out in.) Call under np.errstate."""
+    e1, e2 = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
+    size = np.maximum(np.abs(e1).max(axis=1), np.abs(e2).max(axis=1))[:, None]  # (scaled to 1: no overflow)
+    e1, e2 = e1 / size, e2 / size
+    n = np.cross(e1, e2)
+    return (n * n).sum(axis=1) > FLAT * FLAT * (e1 * e1).sum(axis=1) * (e2 * e2).sum(axis=1)  # (NaN fails)
+
+
 class _Tree:
     """A mesh's tree, in the mesh's own space: its triangles in the tree's order and the face each came from."""
 
@@ -214,37 +230,40 @@ class _Tree:
         vertices = np.asarray(mesh.vertices, dtype=np.float64).reshape(-1, 3)
         faces = np.asarray(mesh.faces, dtype=np.int64).reshape(-1, 3)
         tri = vertices[faces] if len(faces) else np.zeros((0, 3, 3))
-        keep = np.flatnonzero(np.isfinite(tri).all(axis=(1, 2)))  # (a corner at NaN or infinity: never hit)
-        tri = np.ascontiguousarray(tri[keep])
-        if len(tri):
-            self.lo, self.hi, self.first, self.count, order, self.depth = build_tree(tri)
-        else:
-            self.lo = self.hi = np.zeros((0, 3))
-            self.first = self.count = order = np.zeros(0, np.int64)
-            self.depth = 0
-        self.tri = np.ascontiguousarray(tri[order])
-        self.face = keep[order]
-        if len(tri):
-            centre = (self.lo[0] + self.hi[0]) / 2
-            self.sphere = (centre, float(np.sqrt(((tri.reshape(-1, 3) - centre) ** 2).sum(axis=1).max())))
-        else:
-            self.sphere = (np.zeros(3), 0.0)
+        with np.errstate(all="ignore"):
+            # (a corner at NaN or infinity, or no area: never hit)
+            keep = np.flatnonzero(np.isfinite(tri).all(axis=(1, 2)) & _has_area(tri))
+            tri = np.ascontiguousarray(tri[keep])
+            if len(tri):
+                self.lo, self.hi, self.first, self.count, order, self.depth = build_tree(tri)
+            else:
+                self.lo = self.hi = np.zeros((0, 3))
+                self.first = self.count = order = np.zeros(0, np.int64)
+                self.depth = 0
+            self.tri = np.ascontiguousarray(tri[order])
+            self.face = keep[order]
+            if len(tri):
+                centre = (self.lo[0] + self.hi[0]) / 2
+                self.sphere = (centre, float(np.sqrt(((tri.reshape(-1, 3) - centre) ** 2).sum(axis=1).max())))
+            else:
+                self.sphere = (np.zeros(3), 0.0)
 
 
-_TREES = {}  # id(mesh): ((vertices, faces) as the tree was built from them, _Tree)
+_TREES = {}  # id(mesh): ((vertices, faces) as the tree was built from them, _Tree), or None after invalidate()
 
 
 def _forget(key):
+    """Drop a mesh's tree, once the mesh is gone."""
     _TREES.pop(key, None)
 
 
 def mesh_tree(mesh):
     """The mesh's tree, built on first use and kept while the mesh lives (shared by every Colliders); built afresh
     when mesh.vertices or mesh.faces are replaced, but not when they are edited in place (Colliders.invalidate)."""
-    entry = _TREES.get(id(mesh))
-    if entry is not None and entry[0][0] is mesh.vertices and entry[0][1] is mesh.faces:
+    entry = _TREES.get(id(mesh), False)
+    if entry and entry[0][0] is mesh.vertices and entry[0][1] is mesh.faces:
         return entry[1]
-    if entry is None:
+    if entry is False:  # (once a mesh: invalidate() leaves None, so that calling it each frame adds nothing)
         weakref.finalize(mesh, _forget, id(mesh))
     tree = _Tree(mesh)
     _TREES[id(mesh)] = ((mesh.vertices, mesh.faces), tree)
@@ -263,7 +282,7 @@ def _ray_sphere(ox, oy, oz, dx, dy, dz, sphere, best):
     if disc < 0.0:
         return False
     root = math.sqrt(disc)
-    return not (-b + root < 0.0 or -b - root > best)  # (NaN: tested anyway)
+    return not (-b + root < 0.0 or -b - root > best * (1.0 + SLACK))  # (NaN: tested anyway)
 
 
 @njit(cache=True, error_model="numpy")
@@ -283,7 +302,7 @@ def _ray_box(lx, ly, lz, ix, iy, iz, lo, hi, node, best):
     near, far = _slab(lx, ix, lo[node, 0], hi[node, 0], -np.inf, np.inf)
     near, far = _slab(ly, iy, lo[node, 1], hi[node, 1], near, far)
     near, far = _slab(lz, iz, lo[node, 2], hi[node, 2], near, far)
-    return not (near > far or far < 0.0 or near > best)  # (NaN: tested anyway)
+    return not (near > far or far < 0.0 or near > best * (1.0 + SLACK))  # (NaN: tested anyway)
 
 
 @njit(cache=True, error_model="numpy")
@@ -294,7 +313,9 @@ def _ray_triangle(lx, ly, lz, dx, dy, dz, tri, t):
     e2x, e2y, e2z = tri[t, 2, 0] - ax, tri[t, 2, 1] - ay, tri[t, 2, 2] - az
     px, py, pz = dy * e2z - dz * e2y, dz * e2x - dx * e2z, dx * e2y - dy * e2x
     det = e1x * px + e1y * py + e1z * pz
-    if not abs(det) > 0.0:
+    # (along the triangle's plane, to within rounding: a miss, rather than a distance made of rounding errors)
+    if not abs(det) > FLAT * ((abs(e1x) + abs(e1y) + abs(e1z)) * (abs(e2x) + abs(e2y) + abs(e2z))
+                              * (abs(dx) + abs(dy) + abs(dz))):
         return np.inf
     inv = 1.0 / det
     sx, sy, sz = lx - ax, ly - ay, lz - az
@@ -714,7 +735,11 @@ def overlap(kind, a, b, radius, axes, half, skip, sphere, lin, inv, pos, inst_tr
 # ----- sets of objects ---------------------------------------------------------------------------------------------
 
 def _parts(objects):
-    """The Object3Ds in objects, with each Model unpacked into its parts."""
+    """The Object3Ds in objects (an Object3D, a Model, or a list of either), with each Model unpacked into its
+    parts."""
+    if hasattr(objects, "mesh"):  # one Object3D
+        yield objects
+        return
     for obj in objects:
         if hasattr(obj, "root") and hasattr(obj, "__iter__"):  # a Model
             yield from obj
@@ -738,8 +763,8 @@ def _lengths(directions):
 
 
 def _limit(value):
-    """A distance limit as a float: NaN and anything below 0 as 0."""
-    value = float(value)
+    """A distance limit as a float: None as no limit, NaN and anything below 0 as 0."""
+    value = np.inf if value is None else float(value)
     return value if value > 0.0 else 0.0
 
 
@@ -758,6 +783,16 @@ def _node_matrix(node, known):
         lin = lin @ (quat_to_matrix(node.rotation) * scale3(node.scale))
         known[id(node)] = (lin, pos)
     return lin, pos
+
+
+def _quiet(method):
+    """method, run under np.errstate(all="ignore"): bad numbers give no hit or contact rather than a warning (which
+    would be printed over the picture), as in Renderer.render()."""
+    @functools.wraps(method)
+    def quiet(*args, **kwargs):
+        with np.errstate(all="ignore"):
+            return method(*args, **kwargs)
+    return quiet
 
 
 class Colliders:
@@ -780,12 +815,14 @@ class Colliders:
 
     def invalidate(self):
         """Build the trees of the set's meshes afresh (after their arrays were edited in place), and update()."""
-        for obj in self.objects:
-            if getattr(obj, "mesh", None) is not None:
-                _forget(id(obj.mesh))
+        for obj in _parts(self.objects):
+            mesh = getattr(obj, "mesh", None)
+            if mesh is not None and id(mesh) in _TREES:
+                _TREES[id(mesh)] = None
         self._packed = None
         self.update()
 
+    @_quiet
     def update(self):
         """Read where the objects are now (and pick up objects added to or taken out of `objects`)."""
         self.objects = list(_parts(self.objects))
@@ -812,27 +849,26 @@ class Colliders:
             inst_tree.append(m)
         self._instances = objects
         n = len(objects)
-        with np.errstate(all="ignore"):
-            pos = np.array(where, np.float64).reshape(n, 3)
-            quat = np.array(turn, np.float64).reshape(n, 4)
-            quat = quat / np.maximum(np.linalg.norm(quat, axis=1, keepdims=True), 1e-300)
-            lin = _rotations(quat) * np.array(scale, np.float64).reshape(n, 1, 3)
-            for row, (parent_lin, parent_pos) in placed_by:  # (as Object3D.world_matrix places them)
-                lin[row], pos[row] = parent_lin @ lin[row], parent_pos + parent_lin @ pos[row]
-            # The inverse from the adjugate: no exception for a singular matrix, which is skipped instead.
-            c0, c1, c2 = lin[:, :, 0], lin[:, :, 1], lin[:, :, 2]
-            rows = np.stack([np.cross(c1, c2), np.cross(c2, c0), np.cross(c0, c1)], axis=1)
-            det = np.einsum("ij,ij->i", c0, rows[:, 0])
-            inv = rows / det[:, None, None]
-            size = np.abs(lin).max(axis=(1, 2))
-            ok = (np.isfinite(lin).all(axis=(1, 2)) & np.isfinite(pos).all(axis=1) & np.isfinite(inv).all(axis=(1, 2))
-                  & (np.abs(det) > 1e-12 * size ** 3))
-            # Bounding spheres in the world: the stretch of lin is at most the square root of the largest row sum
-            # of |lin^T lin| (Gershgorin), exact for a rotation and an even scale.
-            radius = np.array([trees[m].sphere[1] for m in inst_tree], np.float64)
-            centre = np.array([trees[m].sphere[0] for m in inst_tree], np.float64).reshape(n, 3)
-            stretch = np.sqrt(np.abs(np.einsum("nki,nkj->nij", lin, lin)).sum(axis=2).max(axis=1)) if n else radius
-            sphere = np.concatenate([np.einsum("nij,nj->ni", lin, centre) + pos, (radius * stretch)[:, None]], axis=1)
+        pos = np.array(where, np.float64).reshape(n, 3)
+        quat = np.array(turn, np.float64).reshape(n, 4)
+        quat = quat / np.maximum(np.linalg.norm(quat, axis=1, keepdims=True), 1e-300)
+        lin = _rotations(quat) * np.array(scale, np.float64).reshape(n, 1, 3)
+        for row, (parent_lin, parent_pos) in placed_by:  # (as Object3D.world_matrix places them)
+            lin[row], pos[row] = parent_lin @ lin[row], parent_pos + parent_lin @ pos[row]
+        # The inverse from the adjugate: no exception for a singular matrix, which is skipped instead.
+        c0, c1, c2 = lin[:, :, 0], lin[:, :, 1], lin[:, :, 2]
+        rows = np.stack([np.cross(c1, c2), np.cross(c2, c0), np.cross(c0, c1)], axis=1)
+        det = np.einsum("ij,ij->i", c0, rows[:, 0])
+        inv = rows / det[:, None, None]
+        size = np.abs(lin).max(axis=(1, 2))
+        ok = (np.isfinite(lin).all(axis=(1, 2)) & np.isfinite(pos).all(axis=1) & np.isfinite(inv).all(axis=(1, 2))
+              & (np.abs(det) > 1e-12 * size ** 3))
+        # Bounding spheres in the world: the stretch of lin is at most the square root of the largest row sum
+        # of |lin^T lin| (Gershgorin), exact for a rotation and an even scale.
+        radius = np.array([trees[m].sphere[1] for m in inst_tree], np.float64)
+        centre = np.array([trees[m].sphere[0] for m in inst_tree], np.float64).reshape(n, 3)
+        stretch = np.sqrt(np.abs(np.einsum("nki,nkj->nij", lin, lin)).sum(axis=2).max(axis=1)) if n else radius
+        sphere = np.concatenate([np.einsum("nij,nj->ni", lin, centre) + pos, (radius * stretch)[:, None]], axis=1)
         inv[~ok] = 0.0
         sphere[~ok] = 0.0
         if self._packed is None or len(self._packed[0]) != len(trees) or any(
@@ -872,6 +908,7 @@ class Colliders:
         return (a["inv"], a["pos"], a["inst_tree"], a["node_start"], a["tri_start"], a["lo"], a["hi"], a["first"],
                 a["count"], a["tri"])
 
+    @_quiet
     def raycast(self, origin, direction, max_distance=np.inf, ignore=(), all=False):
         """The nearest Hit of the ray from origin along direction within max_distance, or None. ignore: objects (or
         Models) to pass through, such as the one casting it. With all=True, every Hit along it, nearest first (a
@@ -918,6 +955,7 @@ class Colliders:
         return Hit(self._instances[i], origin + direction * distance, normal if front else -normal, float(distance),
                    int(a["face"][k]), front)
 
+    @_quiet
     def raycast_many(self, origins, directions, max_distance=np.inf, ignore=()):
         """The nearest hit of each of many rays at once, on all cores, as arrays: (objects, a list with None where
         a ray hits nothing; distances (N,), inf for none; positions (N, 3); normals (N, 3), zero for none; faces
@@ -925,17 +963,16 @@ class Colliders:
         one number or (N,)."""
         origins = np.asarray(origins, dtype=np.float64)
         directions = np.asarray(directions, dtype=np.float64)
-        n = max(len(origins) if origins.ndim == 2 else 1, len(directions) if directions.ndim == 2 else 1)
+        rays = np.broadcast_shapes(origins.shape[:-1], directions.shape[:-1])  # (N,), or () for one ray
+        n = rays[0] if rays else 1
         origins = np.ascontiguousarray(np.broadcast_to(origins, (n, 3)), np.float64)
         directions = np.broadcast_to(directions, (n, 3))
-        with np.errstate(all="ignore"):
-            lengths = _lengths(directions)
-            usable = (lengths > 0.0) & np.isfinite(lengths) & np.isfinite(origins).all(axis=1)
-            directions = np.ascontiguousarray(np.where(usable[:, None], directions / lengths[:, None], 0.0), np.float64)
-            limit = np.broadcast_to(np.asarray(max_distance, dtype=np.float64), (n,))
-            limit = np.ascontiguousarray(np.where(usable & (limit > 0.0), limit, 0.0), np.float64)  # (NaN as 0)
-        origins = np.where(usable[:, None], origins, 0.0)
-        origins = np.ascontiguousarray(origins, np.float64)
+        lengths = _lengths(directions)
+        usable = (lengths > 0.0) & np.isfinite(lengths) & np.isfinite(origins).all(axis=1)
+        directions = np.ascontiguousarray(np.where(usable[:, None], directions / lengths[:, None], 0.0), np.float64)
+        limit = np.broadcast_to(np.asarray(np.inf if max_distance is None else max_distance, dtype=np.float64), (n,))
+        limit = np.ascontiguousarray(np.where(usable & (limit > 0.0), limit, 0.0), np.float64)  # (NaN as 0)
+        origins = np.ascontiguousarray(np.where(usable[:, None], origins, 0.0), np.float64)
         inst, tri = np.empty(n, np.int64), np.empty(n, np.int64)
         dist, normal = np.empty(n), np.empty((n, 3))
         a = self._arrays
@@ -945,8 +982,7 @@ class Colliders:
         hit = inst >= 0
         dist[~usable] = np.inf
         objects = [self._instances[i] if i >= 0 else None for i in inst]
-        with np.errstate(all="ignore"):
-            positions = np.where(hit[:, None], origins + directions * np.where(hit, dist, 0.0)[:, None], np.nan)
+        positions = np.where(hit[:, None], origins + directions * np.where(hit, dist, 0.0)[:, None], np.nan)
         faces = np.where(hit, a["face"][np.where(hit, tri, 0)] if len(a["face"]) else -1, -1)
         return objects, dist, positions, normal, faces
 
@@ -971,6 +1007,7 @@ class Colliders:
         deepest, so a corner of a wall and a floor gives two and a curved surface a few."""
         return self.overlap_capsule(centre, centre, radius, ignore)
 
+    @_quiet
     def overlap_capsule(self, a, b, radius, ignore=()):
         """Where a capsule (the points within radius of the segment a-b: the usual shape for a character, a and b at
         the centres of its round ends) touches or cuts into the objects: Contacts as overlap_sphere gives them."""
@@ -980,6 +1017,7 @@ class Colliders:
             return []
         return self._overlap(0, a, b, radius, np.eye(3), np.zeros(3), ignore)
 
+    @_quiet
     def overlap_box(self, centre, size, rotation=None, ignore=()):
         """Where a box touches or cuts into the objects: Contacts as overlap_sphere gives them. size: its full size along
         its x, y and z (one number for a cube); rotation: a quaternion (w first) turning it, as Object3D takes.
@@ -987,14 +1025,13 @@ class Colliders:
         centre = _point(centre, "centre")
         half = np.broadcast_to(np.asarray(size, dtype=np.float64), (3,)) / 2
         axes = np.eye(3) if rotation is None else quat_to_matrix(np.asarray(rotation, dtype=np.float64)).T
-        with np.errstate(all="ignore"):
-            norms = np.linalg.norm(axes, axis=1, keepdims=True)
-            axes = axes / norms
+        axes = axes / np.linalg.norm(axes, axis=1, keepdims=True)
         if not (np.isfinite(centre).all() and np.isfinite(half).all() and np.isfinite(axes).all()):
             return []
         return self._overlap(1, centre, centre, 0.0, np.ascontiguousarray(axes), np.ascontiguousarray(np.abs(half)),
                              ignore)
 
+    @_quiet
     def push_out(self, centre, radius, end=None, ignore=(), iterations=4):
         """How far to move a sphere at centre (or a capsule from centre to `end`) to get it out of every face it
         cuts into: a vector (3,), zero if it is clear. Moves out of the deepest contact, then looks again, up to
@@ -1002,7 +1039,7 @@ class Colliders:
         start = _point(centre, "centre")
         end = start if end is None else _point(end, "end")
         moved, slack = np.zeros(3), 1e-9 * (1.0 + _limit(radius))
-        for _ in range(min(max(int(iterations), 1), 100)):
+        for _ in range(int(min(100.0, max(1.0, float(iterations))))):  # (NaN as 1)
             contacts = self.overlap_capsule(start + moved, end + moved, radius, ignore)
             if not contacts or contacts[0].depth <= 2 * slack:  # (out but for rounding: touching)
                 break

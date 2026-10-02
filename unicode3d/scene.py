@@ -68,6 +68,10 @@ class _Placed:
     """Placement in a scene graph, shared by Node and Object3D: position, rotation and scale are
     relative to `parent` (a Node or Object3D), or to the world if there is none.
 
+    Each is a thing of its own, equal only to itself (eq=False), like Model and Mesh: lists of them work with
+    `in`, index() and remove() (comparing their numpy arrays would raise), and they can be dict keys and set
+    members.
+
     scale is one number, or three (x, y, z) that stretch along the object's own axes: (1, 3, 1) makes a
     cube a tall box, before rotation turns it. A parent's scale stretches its children along the parent's
     axes, whichever way they are turned.
@@ -117,7 +121,7 @@ class _Placed:
         return position + linear @ np.asarray(point, dtype=float)
 
 
-@dataclass
+@dataclass(eq=False)
 class Node(_Placed):
     """A transform with no mesh, for grouping: objects whose parent is a Node move, turn, scale and
     hide with it. Nodes can have Nodes as parents, and are not passed to render()."""
@@ -128,7 +132,7 @@ class Node(_Placed):
     parent: object = None
 
 
-@dataclass
+@dataclass(eq=False)
 class Object3D(_Placed):
     """A mesh placed in the scene. position, rotation (a quaternion, w first) and scale are relative to
     `parent` if it has one (a Node or another Object3D), otherwise to the world."""
@@ -159,8 +163,8 @@ class Object3D(_Placed):
         v = _finite_vertices(self.mesh)
         if not len(v):
             return None
-        linear, position, _ = self.world_matrix()
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"):  # (a pose that isn't finite gives None, not a warning over the picture)
+            linear, position, _ = self.world_matrix()
             v = v @ linear.T + position
             lo, hi = v.min(axis=0), v.max(axis=0)
         if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
@@ -182,7 +186,7 @@ def _finite_vertices(mesh):
     return v
 
 
-@dataclass
+@dataclass(eq=False)
 class Model:
     """A model loaded from a file (models.load_model): Object3Ds for its parts, all under `root`, so that placing,
     turning, scaling or hiding root does that to the whole model. render() takes the parts, and a Model unpacks
@@ -218,6 +222,10 @@ class Model:
     def bounds(self):
         """The corners (low (3,), high (3,)) of the box around the model's parts, in root's own space (as if root
         were at the origin, unturned and unscaled)."""
+        with np.errstate(all="ignore"):  # (numbers that aren't finite are left out, not warned about)
+            return self._bounds()
+
+    def _bounds(self):
         lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
         for obj in self.objects:
             linear, position = np.eye(3), np.zeros(3)
@@ -240,10 +248,11 @@ class Model:
         """Scale root so the model's largest extent is `size`, and place it so that its centre is at root's
         parent's origin (the world's, if it has none). Returns self."""
         lo, hi = self.bounds()
-        extent = float((hi - lo).max()) or 1.0
-        self.root.scale = size / extent
-        linear = quat_to_matrix(self.root.rotation) * scale3(self.root.scale)
-        self.root.position = -(linear @ ((lo + hi) / 2.0))
+        with np.errstate(all="ignore"):
+            extent = float((hi - lo).max()) or 1.0
+            self.root.scale = size / extent
+            linear = quat_to_matrix(self.root.rotation) * scale3(self.root.scale)
+            self.root.position = -(linear @ ((lo + hi) / 2.0))
         return self
 
 

@@ -43,11 +43,19 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
         return (w0 * at[0, k] + w1 * at[1, k] + w2 * at[2, k]) / ws
 
     nx, ny, nz = lerp(3), lerp(4), lerp(5)
-    nl = max(np.sqrt(nx * nx + ny * ny + nz * nz), 1e-12)
+    # A normal (or a view direction) that isn't finite, as at a face too large for its normal to be worked out,
+    # counts as none: the facing and reflection returned go unclamped into see-through surfaces' opacity.
+    nl = np.sqrt(nx * nx + ny * ny + nz * nz)
+    if not nl < np.inf:  # (NaN too)
+        nx = ny = nz = nl = 0.0
+    nl = max(nl, 1e-12)
     nx, ny, nz = nx / nl, ny / nl, nz / nl
     px, py, pz = lerp(0), lerp(1), lerp(2)
     ex, ey, ez = eye[0] - px, eye[1] - py, eye[2] - pz
-    el = max(np.sqrt(ex * ex + ey * ey + ez * ez), 1e-12)
+    el = np.sqrt(ex * ex + ey * ey + ez * ez)
+    if not el < np.inf:
+        ex = ey = ez = el = 0.0
+    el = max(el, 1e-12)
     ex, ey, ez = ex / el, ey / el, ez / el
     level_r = level_g = level_b = emissive
     spec_r = spec_g = spec_b = 0.0
