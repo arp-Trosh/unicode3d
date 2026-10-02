@@ -41,7 +41,7 @@ Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it.
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.7.0
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.7.1
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
@@ -880,18 +880,18 @@ built but not written to a terminal) on this machine:
 CPU:      AMD Ryzen 5 5600X 6-Core Processor (12 logical cores)
 Threads:  12 (Numba's tbb threading layer)
 System:   Linux 7.2.7-arch1-1 (x86_64)
-Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.5.0
+Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.7.1
 Frames:   180x50 cells, sextant glyphs, truecolor; median of 40 frames, ms
 
 scene        objects    tris   first          render      draw_frame  render_updates    total    fps  KB out
-dice               3      36     8.8            2.94            0.53            0.24     3.73  267.9    33.8
-dice-sun           4      38     9.6            5.36            0.58            0.32     6.31  158.6    45.9
-dice-lamp          4      38     8.7            5.31            0.60            0.38     6.33  158.0    56.9
-dice-glass         4      38    14.5            8.41            0.61            0.36     9.37  106.7    54.2
-dice-mirror        4      38    11.8            8.99            0.60            0.38     9.99  100.1    57.8
-balls-400        400  140800    24.4           18.67            0.83            0.87    20.32   49.2   148.1
-sphere-3k          1    2976     5.3            3.14            0.50            0.14     3.80  263.4    12.2
-sphere-27k         1   27360    14.9            4.71            0.50            0.12     5.33  187.6     9.5
+dice               3      36     6.8            2.62            0.49            0.24     3.36  297.7    33.9
+dice-sun           4      38     8.9            4.46            0.54            0.32     5.33  187.6    46.2
+dice-lamp          4      38     7.6            4.50            0.54            0.38     5.42  184.5    56.8
+dice-glass         4      38    12.5            6.70            0.56            0.36     7.62  131.3    54.0
+dice-mirror        4      38    10.8            7.26            0.54            0.38     8.19  122.1    57.9
+balls-400        400  140800    19.3           12.99            0.68            0.88    14.55   68.7   148.1
+sphere-3k          1    2976     4.6            2.33            0.45            0.13     2.92  342.0    12.2
+sphere-27k         1   27360    13.5            3.87            0.45            0.12     4.43  225.6     9.5
 ```
 
 `render` is `Renderer.render` (projecting, rasterizing and shading, shadow maps included),
@@ -916,8 +916,8 @@ resizing as it goes, and draws it from thousands of random cameras, to check tha
 <details>
 <summary><h3 id="first-run">First run</h3></summary>
 
-Numba compiles the renderer the first time it is used. Compiling its 24 kernels one after another
-takes about 40 seconds, so `compile_kernels()` compiles them in several Python processes at once
+Numba compiles the renderer the first time it is used. Compiling its 23 kernels one after another
+takes 30 to 40 seconds, so `compile_kernels()` compiles them in several Python processes at once
 (up to six, each using about 300 MB while it works), which takes about 10 seconds on a 6-core
 machine. The result is cached (in `__pycache__` beside the code, or a user cache folder if that
 can't be written), so later runs start in a fraction of a second. Upgrading unicode3d or Numba, or
@@ -1033,7 +1033,7 @@ Releases are git tags (`v0.1.0`, ...) following [semantic versioning](https://se
 release (`0.1.1`) fixes bugs, a minor release (`0.2.0`) adds features, and before 1.0 a minor release
 may also change the API. `unicode3d.__version__` holds the version. The `main` branch can be ahead
 of the latest tag; pin a tag in a game. To release: bump `__version__` in `unicode3d/__init__.py`,
-commit, then tag it and push the tag (`git tag v0.7.0 && git push --tags`).
+commit, then tag it and push the tag (`git tag v0.7.1 && git push --tags`).
 
 </details>
 
