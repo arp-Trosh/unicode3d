@@ -205,7 +205,7 @@ def bin_bands(xs, ys, select, want, height, span, per_chunk, band_start, band_tr
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_start, band_tris, see, attrs, chain, lod,
-              texels, levels, first):
+              texels, levels, first, clear):
     """Depth-test every triangle at every sample position and keep the nearest surface.
 
     depth, tris: (M, S) nearest 1/w so far (larger is nearer, 0 is empty) and the
@@ -224,6 +224,10 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
     their texture's alpha (from mipmap chain chain[t], at the uv in attrs, at the mip level texture_lod gives
     there plus lod[t]) is above (s + 0.5) / S for sample s of S: partly clear texels cover some of a pixel's
     samples (alpha to coverage), so the edges of holes are smoothed like the edges of shapes.
+
+    With `clear`, each band first empties its own pixels' rows of depth and tris (0 and -1): in parallel, and just
+    before they are drawn into, rather than in one pass over all of them beforehand (most of a big frame's memory
+    traffic).
     """
     n_samples = offsets.shape[0]
     oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
@@ -233,6 +237,13 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
         band = _scattered(nth, n_bands)
         band_y0 = band * ROW_BAND
         band_y1 = min(band_y0 + ROW_BAND, height) - 1
+        if clear:
+            for c in range(band_y0 * width, (band_y1 + 1) * width):
+                col = slots[c]
+                if col >= 0:
+                    for s in range(n_samples):
+                        depth[col, s] = 0.0
+                        tris[col, s] = -1
         for i in range(band_start[band], band_start[band + 1]):
             t = band_tris[i]
             x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
@@ -247,6 +258,7 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
             bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
             holes = see[t] == 2
+            per_area = 1.0 / area  # (multiplying by it is several times quicker than dividing by area)
             for py in range(by0, by1 + 1):
                 for px in range(bx0, bx1 + 1):
                     col = slots[py * width + px]
@@ -255,13 +267,13 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
                     for s in range(n_samples):
                         cx, cy = px + offsets[s, 0], py + offsets[s, 1]
                         # Barycentric weights; the slack closes hairline gaps between triangles.
-                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) / area
+                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) * per_area
                         if b0 < -1e-4:
                             continue
-                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) / area
+                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) * per_area
                         if b1 < -1e-4:
                             continue
-                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) / area
+                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) * per_area
                         if b2 < -1e-4:
                             continue
                         z = b0 * w0 + b1 * w1 + b2 * w2

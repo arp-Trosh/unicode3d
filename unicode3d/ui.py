@@ -185,8 +185,8 @@ class Slider(Widget):
             self._value = self.snap(value)
 
     def snap(self, v):
-        """v clamped to lo..hi and rounded to a whole number of steps from lo."""
-        v = min(max(v, self.lo), self.hi)
+        """v clamped to lo..hi and rounded to a whole number of steps from lo (NaN as lo)."""
+        v = min(max(v, self.lo), self.hi) if v == v else self.lo
         if self.step:
             v = self.lo + round((v - self.lo) / self.step) * self.step
             v = min(max(v, self.lo), self.hi)
@@ -214,7 +214,9 @@ class Slider(Widget):
     def knob(self):
         """Cell of the track the knob is drawn in."""
         span = self.hi - self.lo
-        return 0 if not span else round((self.value - self.lo) / span * (self.length - 1))
+        f = (self.value - self.lo) / span if span else 0.0
+        f = min(max(f, 0.0), 1.0) if f == f else 0.0  # (a value from get= may be out of range, infinite or NaN)
+        return round(f * (self.length - 1))
 
     def draw(self, screen, y, x, focused, hovered):
         filled, knob, empty = ("━", "●", "─") if screen.unicode else ("=", "O", "-")

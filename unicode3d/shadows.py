@@ -215,8 +215,9 @@ class ShadowMaps:
         shadowed = [light for light in lights if light.shadows and self.shadows]
         if not shadowed:
             return _NO_SHADOWS
-        size, cube_size = int(self.shadow_size), int(self.point_shadow_size)
-        soft = max(float(self.shadow_softness), 0.5)
+        # (A cube face needs room for its margins; a map of no texels, or fewer, has nowhere to draw.)
+        size, cube_size = max(int(self.shadow_size), 1), max(int(self.point_shadow_size), 4 * CUBE_MARGIN)
+        soft = max(0.5, float(self.shadow_softness))  # (in this order, NaN gives 0.5)
         # What the maps depend on: where the lights are (not how bright), and what is in the scene.
         key = ([np.asarray(light.position, float).tobytes() + np.float64(light.range).tobytes()
                 if isinstance(light, PointLight) else np.asarray(light.direction, float).tobytes()

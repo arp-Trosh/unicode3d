@@ -83,6 +83,7 @@ class Mesh:
         rgba[:, :3] = srgb_to_linear(c[:, :3])
         if c.shape[1] == 4:
             rgba[:, 3] = np.clip(c[:, 3], 0.0, 1.0)  # opacity is a fraction, not a colour: no sRGB curve
+        rgba = np.nan_to_num(rgba, nan=0.0, posinf=1.0, neginf=0.0)  # (NaN as black, or clear: never in the picture)
         if self.vertex_colors is not None:
             corners = rgba[self.faces]
         else:
@@ -103,6 +104,39 @@ class Mesh:
             centre, radius = np.zeros(3), 0.0
         self._bounds = (self.vertices, (centre, radius))
         return centre, radius
+
+    def check(self):
+        """Raise ValueError if the arrays don't fit together: faces naming vertices that aren't there, or colours,
+        texture coordinates or materials with a row too few or too many. Renderer checks each mesh it draws, as
+        the kernels trust these sizes (a mismatch would read memory outside the arrays, or crash)."""
+        vertices = np.asarray(self.vertices)
+        faces = np.asarray(self.faces)
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            raise ValueError(f"Mesh.vertices must be (V, 3), not {vertices.shape}")
+        if faces.ndim != 2 or faces.shape[1] != 3 or not (np.issubdtype(faces.dtype, np.integer) or not faces.size):
+            raise ValueError(f"Mesh.faces must be (F, 3) whole numbers, not {faces.shape} {faces.dtype}")
+        n_vertices, n_faces = len(vertices), len(faces)
+        if n_faces and not (0 <= faces.min() and faces.max() < n_vertices):
+            raise ValueError(f"Mesh.faces must index its {n_vertices} vertices (0 to {n_vertices - 1}), "
+                             f"not {faces.min()} to {faces.max()}")
+        by_vertex = self.vertex_colors is not None  # (corner_colors uses these, else face_colors)
+        colors = np.asarray(self.vertex_colors if by_vertex else self.face_colors)
+        if colors.ndim:
+            width = 4 if colors.ndim > 1 and colors.shape[-1] == 4 else 3  # read as corner_colors() reads them
+            rows, wanted = colors.size // width, n_vertices if by_vertex else n_faces
+            if colors.size % width or (rows < wanted if by_vertex else rows != wanted):
+                raise ValueError(f"Mesh.{'vertex_colors' if by_vertex else 'face_colors'} has {colors.size / width:g} "
+                                 f"rows for {wanted} {'vertices' if by_vertex else 'faces'}")
+        if self.materials is not None and self.textures:
+            materials = np.asarray(self.materials)
+            if materials.shape != (n_faces,) or not (np.issubdtype(materials.dtype, np.integer) or not n_faces):
+                raise ValueError(f"Mesh.materials must be ({n_faces},) whole numbers, one for each face, not "
+                                 f"{materials.shape} {materials.dtype}")
+            if n_faces and not (0 <= materials.min() and materials.max() < len(self.textures)):
+                raise ValueError(f"Mesh.materials must index its {len(self.textures)} textures, not "
+                                 f"{materials.min()} to {materials.max()}")
+            if np.shape(self.uvs) != (n_faces, 3, 2):
+                raise ValueError(f"Mesh.uvs must be ({n_faces}, 3, 2) for a textured mesh, not {np.shape(self.uvs)}")
 
     def mipmaps(self, material):
         """Mipmap chain of textures[material], built on first use and rebuilt if the texture is replaced."""

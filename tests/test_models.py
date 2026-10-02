@@ -210,6 +210,35 @@ class ImageTests(ModelFiles):
         grey = load_image(self.path("tex", "hole.png"))
         self.assertEqual((grey.shape, grey.min(), grey.max()), ((8, 8, 3), 0.0, 1.0))
 
+    def test_broken_images(self):
+        # Files Pillow can't read raise OSError, and one too large to decode safely ValueError (Pillow's own
+        # DecompressionBombError is neither): the model loaders take both as warnings and leave the texture out.
+        import io
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+        out = io.BytesIO()
+        Image.fromarray(CHECKS.astype(np.uint8)).save(out, "PNG")
+        good = out.getvalue()
+        for data in (good[:len(good) // 2], good[:20], b"", b"\x00" * 100):
+            with self.assertRaises(OSError):
+                load_image(data)
+        bomb = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 30000, 30000, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", b"") + chunk(b"IEND", b""))
+        with self.assertRaisesRegex(ValueError, "too large"):
+            load_image(bomb)
+        with open(self.path("tex", "checks.png"), "wb") as f:
+            f.write(bomb)
+        with open(self.path("tex", "hole.png"), "wb") as f:
+            f.write(good[:30])
+        model = load_model(self.path("crate.obj"))
+        self.assertTrue(any("too large" in w for w in model.warnings), model.warnings)
+        self.assertTrue(any("could not be read" in w for w in model.warnings), model.warnings)
+        Renderer(20, 10).render(list(model), Camera(), Light())
+
     def test_big_images_are_shrunk(self):
         Image.new("RGB", (300, 100), (10, 20, 30)).save(self.path("big.png"))
         self.assertEqual(load_image(self.path("big.png"), max_size=150).shape, (50, 150, 3))

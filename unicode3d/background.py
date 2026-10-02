@@ -21,7 +21,7 @@ from numba import njit, prange
 from .color import to_linear_rgb
 from .mesh import _srgb01
 from .texture import build_mipmaps, pack as pack_textures, sample as sample_texture
-from .transforms import normalize
+from .transforms import view_axes
 
 NONE, COLOR, GRADIENT, SKY, SKYBOX = range(5)
 
@@ -91,7 +91,7 @@ def fog_args(fog):
     Renderer.fog: a Fog, or a number (depth cueing), or None."""
     if isinstance(fog, Fog):
         clear = fog.color is None
-        rgb = np.zeros(3) if clear else np.asarray(to_linear_rgb(fog.color), np.float64)
+        rgb = np.zeros(3) if clear else np.nan_to_num(np.asarray(to_linear_rgb(fog.color), np.float64))
         return 0.0, float(fog.start), max(float(fog.end), 1e-9), rgb, clear
     cue = float(fog or 0.0)
     return (cue if np.isfinite(cue) else 0.0), 0.0, 0.0, np.zeros(3), False
@@ -120,12 +120,12 @@ def background_args(background, camera, aspect, height):
     elif kind == SKY:
         colors[:] = [to_linear_rgb(c) for c in (background.zenith, background.horizon, background.ground)]
     if kind in (SKY, SKYBOX):
-        # A pixel at (nx, ny) in normalized device coordinates looks along forward + nx * right + ny * up.
-        forward = normalize(np.asarray(camera.target, float) - np.asarray(camera.position, float))
-        right = normalize(np.cross(forward, camera.up))
-        up = np.cross(right, forward)
         tan_y = np.tan(np.radians(camera.fov) / 2)
-        basis[:] = forward, right * tan_y * aspect, up * tan_y
+        # A pixel at (nx, ny) in normalized device coordinates looks along forward + nx * right + ny * up (turned as
+        # the scene's view is, also looking straight up or down).
+        basis[:] = view_axes(camera.view_matrix(), np.radians(camera.fov), aspect)
+    if not np.isfinite(colors).all():  # (a NaN colour would reach the picture)
+        colors = np.nan_to_num(colors)
     refs = ()
     if kind == SKYBOX:
         texels, levels, first = background.packed()
@@ -141,9 +141,12 @@ def background_args(background, camera, aspect, height):
 def sky_colour(kind, colors, faces, texels, levels, first, lod, dx, dy, dz):
     """The background seen looking along unit direction (dx, dy, dz) in the world, linear rgb, for a sky
     or sky box; a plain colour for COLOR; for GRADIENT, the gradient from top (straight up) to bottom
-    (straight down); black for NONE (and for kind -1: reflections switched off)."""
+    (straight down); black for NONE (and for kind -1: reflections switched off). A NaN direction (a degenerate
+    view) gives a colour of the background all the same.
+    """
+    dy = min(1.0, max(-1.0, dy))  # (in this order, NaN becomes -1: Numba's max(a, NaN) is a)
     if kind == SKY:
-        angle = np.arcsin(min(max(dy, -1.0), 1.0))
+        angle = np.arcsin(dy)
         if angle >= 0.0:  # horizon to zenith, turning quickly at first
             t, top = np.sqrt(angle / (np.pi / 2)), 0
         else:  # horizon to ground within about ten degrees

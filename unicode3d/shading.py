@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Shading kernels: lighting a surface (_shade), shading and summing each pixel's samples (resolve), blending
+"""Shading kernels: lighting a surface (_shade), shading and averaging each pixel's samples (resolve), blending
 see-through layers over the solid picture (blend), and fog and outlines (post_effects)."""
 import numpy as np
 from numba import njit, prange
@@ -96,13 +96,14 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
     kr = _decode(min(max(level_r, 0.0), 1.0))
     kg = kr if level_g == level_r else _decode(min(max(level_g, 0.0), 1.0))
     kb = kr if level_b == level_r else _decode(min(max(level_b, 0.0), 1.0))
+    # (Clamped as min(1, max(0, x)), which turns NaN into 0: Numba's max(a, NaN) is a.)
     if split:
-        out[0], out[1], out[2] = min(max(r * kr, 0.0), 1.0), min(max(g * kg, 0.0), 1.0), min(max(b * kb, 0.0), 1.0)
-        spec_out[0], spec_out[1], spec_out[2] = spec_r, spec_g, spec_b
+        out[0], out[1], out[2] = min(1.0, max(0.0, r * kr)), min(1.0, max(0.0, g * kg)), min(1.0, max(0.0, b * kb))
+        spec_out[0], spec_out[1], spec_out[2] = max(0.0, spec_r), max(0.0, spec_g), max(0.0, spec_b)
     else:
-        out[0] = min(max(r * kr + spec_r, 0.0), 1.0)
-        out[1] = min(max(g * kg + spec_g, 0.0), 1.0)
-        out[2] = min(max(b * kb + spec_b, 0.0), 1.0)
+        out[0] = min(1.0, max(0.0, r * kr + spec_r))
+        out[1] = min(1.0, max(0.0, g * kg + spec_g))
+        out[2] = min(1.0, max(0.0, b * kb + spec_b))
     ne = nx * ex + ny * ey + nz * ez  # the view reflected about the surface: 2 (n . e) n - e
     return a, abs(ne), 2 * ne * nx - ex, 2 * ne * ny - ey, 2 * ne * nz - ez
 
@@ -111,7 +112,7 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
 def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess, shine,
             chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
             pixel_size, eye, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, contrast,
-            sample_rgb, spec_rgb, rgb, cover, near_depth, near_id, more):
+            sample_rgb, spec_rgb, rgb, cover, near_depth, near_id, more, frame_rgb, frame_alpha, frame_samples):
     """Shade the rasterized samples and sum them up per pixel.
 
     Each pixel is shaded once per triangle covering it, at the pixel centre, like
@@ -123,6 +124,11 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
     more: whether the samples disagree (some covered and some not, different
     objects, or colours further apart than `contrast`), so the pixel is worth more
     samples. sample_rgb (M, S, 3) and spec_rgb (M, 3) are scratch space.
+
+    With frame_rgb and frame_alpha (whole-frame, flat; empty for none), the pixel's colour (premultiplied) and
+    coverage go there instead of rgb and cover: the average of its samples, or, where frame_samples of them are
+    there already, the average of those and these (more samples at an edge). That takes back what is there exactly,
+    as sample counts are powers of two (SAMPLE_PATTERNS), so it is what averaging all the sums at once would give.
 
     Shiny surfaces (shine, per instance) mix that much of the background seen reflected in
     them (sky and its colours etc.: background.sky_colour's arguments) into their colour.
@@ -171,25 +177,18 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
             r, g, b = r + vr, g + vg, b + vb
             lr, lg, lb = min(lr, vr), min(lg, vg), min(lb, vb)
             hr, hg, hb = max(hr, vr), max(hg, vg), max(hb, vb)
-        rgb[c, 0], rgb[c, 1], rgb[c, 2] = r, g, b
-        cover[c], near_depth[c], near_id[c] = covered, best, best_id
+        if frame_rgb.shape[0] == 0:
+            rgb[c, 0], rgb[c, 1], rgb[c, 2] = r, g, b
+            cover[c] = covered
+        else:
+            p, total = pixels[c], n + frame_samples
+            had = frame_samples  # (0 for the first samples: then there is nothing to take back)
+            frame_rgb[p, 0] = (frame_rgb[p, 0] * had + r) / total if had else r / n
+            frame_rgb[p, 1] = (frame_rgb[p, 1] * had + g) / total if had else g / n
+            frame_rgb[p, 2] = (frame_rgb[p, 2] * had + b) / total if had else b / n
+            frame_alpha[p] = (frame_alpha[p] * had + covered) / total if had else covered / n
+        near_depth[c], near_id[c] = best, best_id
         more[c] = 0 < covered < n or mixed or max(hr - lr, hg - lg, hb - lb) > contrast
-
-
-@njit(cache=True, error_model="numpy")
-def combine(rgb, alpha, base_rgb, base_cover, n, pixels, extra_rgb, extra_cover, n_extra):
-    """Each pixel's colour and coverage (flat framebuffer arrays) from its n base samples, plus the
-    n_extra samples taken in `pixels`."""
-    for c in range(base_cover.shape[0]):
-        alpha[c] = base_cover[c] / n
-        for k in range(3):
-            rgb[c, k] = base_rgb[c, k] / n
-    total = n + n_extra
-    for j in range(pixels.shape[0]):
-        c = pixels[j]
-        alpha[c] = (base_cover[c] + extra_cover[j]) / total
-        for k in range(3):
-            rgb[c, k] = (base_rgb[c, k] + extra_rgb[j, k]) / total
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
@@ -231,7 +230,7 @@ def blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, l
             if polish > 0.0:
                 for k in range(3):
                     scratch[p, k] = scratch[p, k] * (1.0 - polish) + polish * scratch[p, 6 + k]
-            clear = min(max(clear, 0.0), 1.0)
+            clear = min(1.0, max(0.0, clear))  # (NaN as 0)
             gloss = min(4.0 * clear, 1.0)
             fresnel = 0.04 + 0.96 * (1.0 - min(facing, 1.0)) ** 5
             # What it gains in opacity at a slant is the background reflected in it (unless reflections are off).
@@ -321,12 +320,17 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
                         rgb[y, x, k] = rgb[y, x, k] * (1.0 - f) + f * a * fog_rgb[k]
     elif fog:
         # Dim pixels in proportion to how far back they sit within the scene's depth range (of the pixels
-        # drawn that have a depth).
-        near, far = np.inf, -np.inf
-        for y in range(h):
+        # drawn that have a depth): each row's range into its own slot, then all of them.
+        row_near, row_far = np.empty(h), np.empty(h)
+        for y in prange(h):
+            lo, hi = np.inf, -np.inf
             for x in range(w):
                 if alpha[y, x] > 0 and depth[y, x] > 0:
-                    near, far = min(near, 1.0 / depth[y, x]), max(far, 1.0 / depth[y, x])
+                    lo, hi = min(lo, 1.0 / depth[y, x]), max(hi, 1.0 / depth[y, x])
+            row_near[y], row_far[y] = lo, hi
+        near, far = np.inf, -np.inf
+        for y in range(h):
+            near, far = min(near, row_near[y]), max(far, row_far[y])
         span = max(far - near, 0.25 * near)
         for y in prange(h):
             for x in range(w):

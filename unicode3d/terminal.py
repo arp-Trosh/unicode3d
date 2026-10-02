@@ -15,9 +15,11 @@ Both are detected, and can be forced with arguments, the UNICODE3D_GLYPHS and
 UNICODE3D_COLOR environment variables, or the command-line flags that
 add_display_args() adds.
 """
+import contextlib
 import faulthandler
 import os
 import platform
+import signal
 import sys
 import threading
 import time
@@ -395,10 +397,40 @@ def _describe(screen):
             f"{platform.platform()}")
 
 
+def _frame_period(fps):
+    """The seconds a frame takes at `fps` frames a second: 0 (no waiting between frames) for 0, None, or anything else
+    that isn't a positive number."""
+    try:
+        return 1.0 / fps if fps > 0 else 0.0  # (NaN fails the comparison too)
+    except TypeError:
+        return 0.0
+
+
+@contextlib.contextmanager
+def _exit_on_sigterm():
+    """While the loop runs, SIGTERM (kill, a closing session) ends the program as SystemExit does, so that the
+    terminal is restored on the way out: the signal's default ends Python at once, leaving the terminal in raw mode
+    on the alternate screen. A handler the program set itself is left alone."""
+    if (not hasattr(signal, "SIGTERM") or threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL):
+        yield
+        return
+
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)  # (the exit status a shell shows for a program the signal ended)
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
 def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
 
-    frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved.
+    frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved. An fps of 0 draws
+    frames as fast as it can.
 
     mouse: False, True (clicks and wheel), "drag" (also moves while a button is
     held, for sliders) or "move" (every move, for hover effects).
@@ -410,13 +442,14 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
 
     Each run is noted in crash_log_path(), with the terminal's size and settings; if the
     loop raises, the traceback goes there too (and is raised as usual), and a crash of
-    Python itself leaves a stack trace there (faulthandler), where the screen would lose it.
+    Python itself leaves a stack trace there (faulthandler), where the screen would lose it. SIGTERM ends the
+    program as sys.exit() would, with the terminal restored (unless the program handles that signal itself).
     """
     log, screen, frame, handler = _open_crash_log(), None, 0, faulthandler.is_enabled()
     if log is not None:
         faulthandler.enable(log)
     try:
-        with open_console(mouse=mouse, title=title, key_release=key_release) as console:
+        with _exit_on_sigterm(), open_console(mouse=mouse, title=title, key_release=key_release) as console:
             screen = Screen(console, glyphs=glyphs, color=color, background=background)
             screen.fps = fps
             if log is not None:
@@ -435,7 +468,7 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
                 screen.poll_size()
                 if frame_fn(screen, dt, screen.keys()) is False:
                     return
-                remaining = 1.0 / screen.fps - (time.perf_counter() - start)
+                remaining = _frame_period(screen.fps) - (time.perf_counter() - start)
                 if remaining > 0:
                     time.sleep(remaining)
     except Exception:  # (the terminal is restored by now)

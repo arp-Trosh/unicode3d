@@ -175,7 +175,7 @@ class InputDecoder:
                 text = "".join(chr(int(c)) for c in fields[2] if c) if len(fields) > 2 else ""
                 return j + 1, self._kitty_key(code, mods, kind, text)
             key = _CSI_TILDE.get(int(fields[0][0])) if final == "~" else _CSI_LETTER.get(final)
-        except ValueError:
+        except (ValueError, OverflowError):  # (garbled input; chr() of a huge number overflows before Python 3.13)
             return j + 1, None
         if key is None:
             return j + 1, None

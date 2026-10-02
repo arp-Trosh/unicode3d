@@ -22,6 +22,7 @@ import numpy as np
 from numba import njit, prange
 
 from .color import linear_to_srgb, luminance
+from .threads import kernel_lock
 
 RAMP = " .:-=+*#%@"  # dark -> bright; the first character is the empty background
 ALPHA_WEIGHT = 0.5   # how much coverage counts, against colour, when choosing a split
@@ -188,8 +189,9 @@ def match_cells(fb, glyphs, background=None):
     fg, bg = np.empty((h, w, 3)), np.empty((h, w, 3))
     fg_on, bg_on = np.empty((h, w), bool), np.empty((h, w), bool)
     min_alpha = MIN_ALPHA * ALPHA_WEIGHT if background is None else -1.0  # a filled background is always opaque
-    _match(fb.rgb, fb.alpha, pw, ph, np.zeros(3) if background is None else np.asarray(background, dtype=float),
-           masks, bits, min_alpha, glyphs.pixel_count * MIN_SPLIT ** 2, mask, fg, bg, fg_on, bg_on)
+    with kernel_lock():
+        _match(fb.rgb, fb.alpha, pw, ph, np.zeros(3) if background is None else np.asarray(background, dtype=float),
+               masks, bits, min_alpha, glyphs.pixel_count * MIN_SPLIT ** 2, mask, fg, bg, fg_on, bg_on)
     return Cells(np.array(glyphs.chars)[mask], fg, bg, fg_on, bg_on)
 
 

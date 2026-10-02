@@ -683,6 +683,26 @@ class RenderTests(unittest.TestCase):
             else:
                 np.testing.assert_allclose(fb.rgb[fb.height // 2, fb.width // 2], to_linear_rgb(colour), atol=1e-9)
 
+    def test_sky_straight_up_turns_as_the_scene_does(self):
+        # Looking straight up along the default up, the view takes another up (look_at); the sky behind it used to
+        # take none, and smeared each row of the sky box into one colour.
+        textures = [np.random.default_rng(i).uniform(0.0, 1.0, (8, 8, 3)) for i in range(6)]
+        for background in (SkyBox(textures), Sky()):
+            renderer = Renderer(40, 20, background=background)
+            default = renderer.render([], Camera(position=np.zeros(3), target=np.array([0.0, 5.0, 0.0])), Light()).copy()
+            chosen = renderer.render([], Camera(position=np.zeros(3), target=np.array([0.0, 5.0, 0.0]),
+                                                up=np.array([0.0, 0.0, -1.0])), Light())
+            np.testing.assert_allclose(default.rgb, chosen.rgb, atol=1e-12)
+            if isinstance(background, SkyBox):
+                self.assertGreater(np.ptp(default.rgb[:, :, 0], axis=1).max(), 0.1)  # (rows aren't one colour)
+
+    def test_objects_may_come_from_a_generator(self):
+        boxes = [Object3D(make_box(), position=np.array([x, 0.0, 0.0])) for x in (-1.5, 1.5)]
+        renderer = Renderer(40, 20)
+        fb = renderer.render((box for box in boxes if box.visible), Camera(), Light())
+        self.assertEqual(set(np.unique(fb.ids)), {0, 1, 2})
+        self.assertIs(renderer.pick(*renderer.project(boxes[1].position)).object, boxes[1])
+
     def test_pick_and_ray(self):
         camera = Camera(position=np.array([0.0, 0.0, 5.0]))
         near = Object3D(make_box(), position=np.array([0.5, 0.0, 0.0]))

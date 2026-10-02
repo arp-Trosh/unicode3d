@@ -66,7 +66,9 @@ def light_rows(lights, shadows=True):
             rows[i, 15], maps = maps, maps + (6 if isinstance(light, PointLight) else 1)
         rows[i, 4:7], rows[i, 7:10] = to_srgb(light.color), lin
         rows[i, 10:14] = light.ambient, light.diffuse, light.specular, light.shininess
-    return rows
+    # NaN as 0 (a light that adds nothing there) and infinities as the largest numbers (a range of inf still fades
+    # out nowhere), as either could reach the picture as NaN.
+    return rows if np.isfinite(rows).all() else np.nan_to_num(rows)
 
 
 def as_lights(lights):

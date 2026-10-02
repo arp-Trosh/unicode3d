@@ -17,7 +17,9 @@ import sys
 from .keys import KITTY_KEYBOARD_OFF, KITTY_KEYBOARD_ON, Key
 
 ENTER_SEQ = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J"  # alternate screen, hide cursor, no auto-wrap, clear
-EXIT_SEQ = "\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"
+# (Ending synchronized output first: a frame cut short by Ctrl-C or an error would leave the terminal holding back
+# what follows until it times out.)
+EXIT_SEQ = "\x1b[?2026l\x1b[0m\x1b[?7h\x1b[?25h\x1b[?1049l"
 # Mouse reporting, in SGR encoding: clicks (1000), plus moves while a button is held (1002), or all moves (1003).
 MOUSE_MODES = {True: "1000", "click": "1000", "drag": "1002", "move": "1003"}
 TITLE_PUSH, TITLE_POP = "\x1b[22;0t", "\x1b[23;0t"  # save and restore the window title, where supported

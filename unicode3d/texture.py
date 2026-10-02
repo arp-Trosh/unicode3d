@@ -28,21 +28,26 @@ def load_image(path, max_size=MAX_TEXTURE):
     """An image file (PNG, JPEG, or anything else Pillow reads) as a texture: (H, W, 3) colours, 0..1 sRGB, or
     (H, W, 4) with alpha where the image has transparency. path is a file name, an open binary file, or the
     file's contents (bytes). Images wider or taller than max_size (None: no limit) are shrunk to fit: a terminal
-    shows few pixels, and a 4096x4096 texture would take about a gigabyte once mipmapped in floats."""
+    shows few pixels, and a 4096x4096 texture would take about a gigabyte once mipmapped in floats. Raises
+    OSError for a file Pillow can't read, and ValueError for one too large to decode (beyond Pillow's limit on
+    pixels, which guards against decompression bombs)."""
     if isinstance(path, (bytes, bytearray, memoryview)):
         path = io.BytesIO(path)
-    with Image.open(path) as image:
-        image.load()
-        alpha = image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info
-        if image.mode in ("I", "I;16", "I;16B", "I;16L", "F"):  # 16-bit or float greyscale: scale to 8 bits
-            grey = np.asarray(image, dtype=float)
-            image = Image.fromarray(np.clip(grey * (255.0 / max(grey.max(), 1.0)), 0, 255).astype(np.uint8))
-        image = image.convert("RGBA" if alpha else "RGB")
-        if max_size and max(image.size) > max_size:
-            scale = max_size / max(image.size)
-            image = image.resize((max(round(image.width * scale), 1), max(round(image.height * scale), 1)),
-                                 Image.Resampling.BOX)
-        return np.asarray(image, dtype=float) / 255.0
+    try:
+        with Image.open(path) as image:
+            image.load()
+            alpha = image.mode in ("RGBA", "LA", "PA", "RGBa", "La") or "transparency" in image.info
+            if image.mode in ("I", "I;16", "I;16B", "I;16L", "F"):  # 16-bit or float greyscale: scale to 8 bits
+                grey = np.nan_to_num(np.asarray(image, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+                image = Image.fromarray(np.clip(grey * (255.0 / max(grey.max(), 1.0)), 0, 255).astype(np.uint8))
+            image = image.convert("RGBA" if alpha else "RGB")
+            if max_size and max(image.size) > max_size:
+                scale = max_size / max(image.size)
+                image = image.resize((max(round(image.width * scale), 1), max(round(image.height * scale), 1)),
+                                     Image.Resampling.BOX)
+            return np.asarray(image, dtype=float) / 255.0
+    except Image.DecompressionBombError as e:  # (not an OSError: the model loaders would not take it as a warning)
+        raise ValueError(f"image too large to load ({e})") from None
 
 
 def build_mipmaps(texture):
@@ -50,9 +55,12 @@ def build_mipmaps(texture):
 
     texture: (H, W) brightness multipliers, (H, W, 3) colours, both 0..1 sRGB, or (H, W, 4)
     colours and alpha (opacity, 0..1, not gamma-encoded). With alpha, levels are (H, W, 4),
-    colour premultiplied by alpha.
+    colour premultiplied by alpha. NaN counts as 0 (black, or clear), so that it never reaches the picture.
     """
     texture = np.asarray(texture, dtype=float)
+    if texture.ndim not in (2, 3) or not texture.size:  # (sampling reads at least one texel of every level)
+        raise ValueError(f"a texture must be (H, W) or (H, W, channels) with at least one texel, not {texture.shape}")
+    texture = np.nan_to_num(texture, nan=0.0, posinf=1.0, neginf=0.0)
     if texture.ndim == 3 and texture.shape[2] == 4:
         alpha = np.clip(texture[..., 3:], 0.0, 1.0)
         level = np.concatenate([srgb_to_linear(texture[..., :3]) * alpha, alpha], axis=2)

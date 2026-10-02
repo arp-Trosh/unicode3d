@@ -33,6 +33,11 @@ pixels. `test_same_frame_on_any_number_of_threads` compares whole frames drawn o
 It catches most violations, but races show up by chance, so passing it is not proof: check new kernels against the
 rule by reading them. Add anything a new kernel draws to that test's scenes.
 
+Programs may also draw from threads of their own, each with its own Renderer and Screen. Python code that launches
+parallel kernels holds `threads.kernel_lock()` (as `Renderer.render`, `match_cells` and `linear_to_srgb` do): Numba's
+fallback `workqueue` threading layer aborts the process when two threads launch at once, and the lock makes them
+take turns there (`test_threads_on_the_workqueue_layer`).
+
 ## Other kernel conventions
 
 - **One set of argument types.** Numba compiles a kernel separately for each combination of argument types and
@@ -66,7 +71,13 @@ stop the program: frames may be slower or wrong for a moment, never an exception
   NaN (Numba's `max(nan, 0.0)` is NaN): `texture.clamp_index` for an index, `raster.pixel_range` for a span of
   pixels, and `raster.drawable(area)` to skip triangles with non-finite corners.
 - **`Renderer.render()` runs under `np.errstate(all="ignore")`**, as a warning would be printed over the picture;
-  objects with a non-finite pose are skipped in `_instances`.
+  objects with a non-finite pose are skipped in `_instances`. Other numbers are made finite where they enter (NaN
+  as 0: `_instances`, `light_rows`, `background_args`, `Mesh.corner_colors`, `build_mipmaps`), and kernels clamp
+  as `min(1.0, max(0.0, x))`, which turns NaN into 0 (`max(nan, 0.0)` is NaN, `max(0.0, nan)` is 0.0).
+- **Mesh arrays are checked before kernels index them** (`Mesh.check()`, from `_pack_meshes`): a face index, a colour
+  row or a material beyond the end of its array is a ValueError, not a read outside it (one such crashed Python).
+- **No matrix inverses of the view** (singular for a camera at its target, near = 0, ...): pixel directions come
+  from `transforms.view_axes`.
 - **Memory is bounded by `Renderer.max_pixels`.** Beyond it the scene is drawn into `Renderer._fb`, a smaller
   framebuffer, and `raster.upscale` stretches it into `Renderer.framebuffer`. Code that draws uses `self._fb`
   (its size is what rasterizing, shading and buffers work with); only the result and `pick()` use
@@ -80,7 +91,8 @@ stop the program: frames may be slower or wrong for a moment, never an exception
 the `Renderer`, which inherits its shadow-map methods from `shadows.ShadowMaps` and its mirror passes from
 `mirrors.Mirrors`; `shading.py` the shading kernels; `raster.py` projection and rasterizing; `lights.py` the
 lights; `models.py` and `gltf.py` loading models (OBJ and glTF; no kernels); `kernel_cache.py` keeps Numba's
-cache in step with helpers in other modules. Instances reach the kernels as `inst` dicts of arrays
+cache in step with helpers in other modules; `threads.py` has the lock that keeps threads from launching
+parallel kernels at once where Numba can't take that. Instances reach the kernels as `inst` dicts of arrays
 (`Renderer._instances`): each has a `lin` (3, 3) matrix (rotation and per-axis scale, parents included) and `pos`,
 and `flip` where the matrix mirrors.
 
@@ -88,6 +100,10 @@ and `flip` where the matrix mirrors.
 
 - `python -m unittest` from the repository root. The tests use the public API. `tests/test_stability.py` covers
   huge terminals, resizing while running, bad numbers, and a real pseudo-terminal (on Unix).
+- `NUMBA_BOUNDSCHECK=1 NUMBA_CACHE_DIR=$(mktemp -d) python -m unittest` (about a minute) runs the suite with every
+  kernel checking its indices, so a read or write outside an array raises (inside a parallel kernel, a SystemError)
+  rather than quietly corrupting memory. It needs a cache of its own: Numba's cache key leaves the flag out, so a
+  warm cache would load the unchecked kernels. CI runs it too (the `bounds` job).
 - Before a release, `python -m benchmarks.stress` (a few minutes): the room demo walked through sizes from one
   cell to 1920x540 while resizing, and drawn from thousands of random close-up cameras.
 - `python -m benchmarks.bench` times each stage of a frame; compare it before and after a change, run back to

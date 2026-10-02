@@ -52,7 +52,7 @@ COMPRESSION = {"KHR_draco_mesh_compression": "Draco-compressed meshes",
 MAX_ZEROS = 1 << 24  # the most numbers an accessor without data of its own may give
 MAX_NODES = 100_000  # deeper or larger node trees than this are taken as broken (a cycle)
 # What a broken part of a file raises as it is read: that part is left out, with a warning.
-BROKEN = (KeyError, ValueError, TypeError, IndexError, AttributeError)
+BROKEN = (KeyError, ValueError, TypeError, IndexError, AttributeError, struct.error)
 
 
 def _name(value, default):
@@ -95,6 +95,8 @@ class _File:
             data = f.read()
         self.glb = None
         if data[:4] == GLB_MAGIC:
+            if len(data) < 12:
+                raise ValueError(f"{path}: a .glb cut short ({len(data)} bytes)")
             version, length = struct.unpack_from("<II", data, 4)
             if version != 2:
                 raise ValueError(f"{path}: glTF version {version}; only 2 can be loaded")
@@ -334,7 +336,10 @@ def _primitive(file, prim, material, weights, skin):
     attributes = prim.get("attributes", {})
     if "POSITION" not in attributes:
         raise ValueError("no positions")
-    positions = file.accessor(attributes["POSITION"])[:, :3]
+    positions = file.accessor(attributes["POSITION"])
+    if positions.shape[1] < 3:
+        raise ValueError(f"positions of {positions.shape[1]} numbers each, not 3")
+    positions = positions[:, :3]
     count = len(positions)
 
     def attribute(name, width):

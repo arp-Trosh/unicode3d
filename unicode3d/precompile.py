@@ -108,12 +108,17 @@ def precompile(max_workers=MAX_WORKERS):
         except OSError:
             break
     deadline = time.monotonic() + TIMEOUT
-    for proc in procs:
-        try:
-            proc.wait(timeout=max(deadline - time.monotonic(), 0.1))
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+    try:
+        for proc in procs:
+            try:
+                proc.wait(timeout=max(deadline - time.monotonic(), 0.1))
+            except subprocess.TimeoutExpired:
+                pass
+    finally:  # (timed out, or Ctrl-C while waiting: no worker goes on compiling once the program has moved on)
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
     return len(procs)
 
 

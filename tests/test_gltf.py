@@ -37,6 +37,12 @@ def png(pixels):
     return out.getvalue()
 
 
+def _png_chunk(kind, data):
+    """A PNG chunk: length, kind, data and checksum."""
+    import zlib
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
 class Builder:
     """Writes small glTF files: JSON plus one binary buffer, as a .glb or as a .gltf with the buffer beside it
     (or inside it, as a data: uri)."""
@@ -294,6 +300,30 @@ class GltfTests(unittest.TestCase):
         model = load_gltf(b.glb(self.path("broken.glb")))
         self.assertEqual(len(model), 0)
         self.assertTrue(any("past" in w for w in model.warnings))
+        # A .glb cut short within its header is refused as a ValueError too (not struct's own error).
+        for data in (b"glTF", b"glTF\x02\x00\x00\x00", b"glTF\x02\x00\x00\x00\x40\x00"):
+            with open(self.path("short.glb"), "wb") as f:
+                f.write(data)
+            with self.assertRaises(ValueError):
+                load_gltf(self.path("short.glb"))
+
+    def test_broken_parts_are_left_out_with_warnings(self):
+        # Positions of two numbers each (they need three) leave their part out, rather than making a mesh that
+        # can't be drawn; a texture too large to decode safely (a decompression bomb) leaves the part untextured.
+        b = Builder()
+        flat = b.mesh(positions=QUAD[:, :2], normals=False, uv=None)
+        bomb = (b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 30000, 30000, 8, 2, 0, 0, 0))
+                + _png_chunk(b"IDAT", b"") + _png_chunk(b"IEND", b""))
+        image = b.add("images", {"bufferView": b.view(bomb), "mimeType": "image/png"})
+        material = b.add("materials", {"pbrMetallicRoughness": {"baseColorTexture": {"index": b.add(
+            "textures", {"source": image})}}})
+        b.scene(b.node(mesh=flat), b.node(mesh=b.mesh(material=material)))
+        model = load_gltf(b.glb(self.path("broken-parts.glb")))
+        self.assertEqual(len(model), 1)
+        self.assertIsNone(model.objects[0].mesh.uvs)
+        self.assertTrue(any("3" in w and "positions" in w for w in model.warnings), model.warnings)
+        self.assertTrue(any("too large" in w for w in model.warnings), model.warnings)
+        Renderer(20, 10).render(list(model), Camera(), Light())
 
     def test_node_hierarchy_and_matrices(self):
         b = Builder()

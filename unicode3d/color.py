@@ -19,6 +19,8 @@ from enum import IntEnum
 import numpy as np
 from numba import njit, prange
 
+from .threads import kernel_lock
+
 COLOR_MODES = ("truecolor", "256", "16", "mono")
 
 DEFAULT = -1        # the terminal's own foreground/background colour
@@ -72,7 +74,8 @@ def linear_to_srgb(c):
     """Linear light to sRGB values 0..1 (clipped)."""
     c = np.ascontiguousarray(c, dtype=float)
     out = np.empty_like(c)
-    _encode_srgb(c.reshape(-1), out.reshape(-1))
+    with kernel_lock():
+        _encode_srgb(c.reshape(-1), out.reshape(-1))
     return out
 
 

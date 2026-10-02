@@ -209,8 +209,10 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   are skipped before any of their triangles are touched. The renderer keeps its working arrays from
   frame to frame rather than allocating new ones. Triangles crossing the camera's near plane are
   clipped rather than dropped.
-- **Stability:** NaN or infinite positions, degenerate cameras and terminals from one cell to a
-  million are drawn around, never crashed on, and a crash log records anything that does go wrong.
+- **Stability:** NaN or infinite numbers anywhere in a scene (positions, colours, lights, textures),
+  degenerate cameras and terminals from one cell to a million are drawn around, never crashed on;
+  mesh arrays that don't fit together are refused with a `ValueError` rather than read past; and a
+  crash log records anything that does go wrong.
 
 </details>
 
@@ -488,7 +490,9 @@ From an OBJ file, `load_model` makes an `Object3D` for each material:
 `load_obj(path)` loads the same file as one `Mesh`, with the materials' colours and textures but
 not their other settings. Meshes take normals from a file, or from you: `mesh.normals` (one per
 vertex) replaces the ones worked out from the faces, so that a model's texture seams (where it has
-separate vertices) needn't show as creases.
+separate vertices) needn't show as creases. `mesh.check()` raises a `ValueError` if a mesh's arrays
+don't fit together (a face naming a vertex that isn't there, a colour or texture coordinate too few
+or too many); the renderer checks each mesh it draws.
 
 </details>
 
@@ -761,7 +765,8 @@ def frame(screen, dt, keys):
 
 `run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None,
 key_release=False)` takes over the terminal (naming its window `title`, if given) and restores it
-however the loop ends (Ctrl-C raises `KeyboardInterrupt`). `frame_fn(screen, dt, keys)` returns
+however the loop ends (Ctrl-C raises `KeyboardInterrupt`; `kill`'s SIGTERM exits as `sys.exit()`
+would, unless the program handles that signal itself). `frame_fn(screen, dt, keys)` returns
 `False` to stop. `keys` holds ints (a character's code, or a `Key` such as `Key.UP`, `Key.ENTER`,
 `Key.ESC`), `MouseEvent`s and, with `key_release=True`, `KeyRelease`s (see [Input](#input)).
 
@@ -772,8 +777,8 @@ however the loop ends (Ctrl-C raises `KeyboardInterrupt`). `frame_fn(screen, dt,
   exactly; by default, edges blend toward black over the terminal's own background.
 - `screen.set_glyphs(name)` and `screen.set_color(mode)` switch modes while running
   (`screen.glyph_modes` lists the glyph sets the terminal can take).
-- `screen.fps` is the target frame rate, which `run()` re-reads every frame; `screen.measured_fps`
-  is the rate it achieved over the last second.
+- `screen.fps` is the target frame rate, which `run()` re-reads every frame (0: as fast as it can);
+  `screen.measured_fps` is the rate it achieved over the last second.
 - `Screen(size=(rows, cols))` with no console gives an off-screen grid, for tests;
   `render_updates()` returns the escape sequences a refresh would send.
 
@@ -933,6 +938,12 @@ compiles in the one process instead.
 The renderer uses every CPU core Numba finds, about twice as fast as one core at typical sizes. Set
 `NUMBA_NUM_THREADS`, or call `numba.set_num_threads()`, to leave cores for other work. Frames come
 out identical whatever the thread count.
+
+A program can also draw from several threads of its own (a server drawing for each client, say),
+each with its own `Renderer` and `Screen` (one of either isn't for sharing between threads). Where
+Numba runs on its fallback threading layer, `workqueue` (no TBB or OpenMP installed; often so on
+macOS), which would abort the program if two threads started parallel work at once, the threads
+take turns instead; `pip install tbb` lets them run side by side.
 
 </details>
 

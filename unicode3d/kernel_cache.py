@@ -116,8 +116,12 @@ def refresh(package=None):
             for kernel in kernels:
                 kernel._cache.flush()
             os.makedirs(os.path.dirname(stamp), exist_ok=True)
-            with open(stamp, "w", encoding="ascii") as f:
+            # Written whole, then put in place, so that another program starting meanwhile never reads half of it
+            # (and drops the cache again, as it would for a changed fingerprint).
+            temp = f"{stamp}.{os.getpid()}.tmp"
+            with open(temp, "w", encoding="ascii") as f:
                 f.write(digest + "\n")
+            os.replace(temp, stamp)
             dropped.append(name)
         except Exception:
             continue

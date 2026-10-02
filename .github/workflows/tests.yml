@@ -1,4 +1,5 @@
-# Runs the tests on Linux, Windows and macOS, on the oldest and newest supported Python, on every push.
+# Runs the tests on Linux, Windows and macOS, on the oldest and newest supported Python, on every push; and once
+# more on Linux with Numba checking every index (the bounds job).
 name: Tests
 
 on:
@@ -26,4 +27,25 @@ jobs:
         run: python -m pip install --disable-pip-version-check .
 
       - name: Unit tests
+        run: python -m unittest -v
+
+  bounds:
+    # The same tests with every kernel checking its indices: a read or write outside an array fails the run instead
+    # of quietly corrupting memory. In a cache of its own, as Numba's cache key leaves the flag out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install
+        run: python -m pip install --disable-pip-version-check .
+
+      - name: Unit tests, bounds checked
+        env:
+          NUMBA_BOUNDSCHECK: "1"
+          NUMBA_CACHE_DIR: ${{ runner.temp }}/numba-bounds
         run: python -m unittest -v

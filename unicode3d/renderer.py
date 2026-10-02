@@ -6,6 +6,7 @@ It packs the meshes and poses into arrays, projects every triangle, rasterizes s
 them (shading.py), blends see-through surfaces over the solid ones, and adds what mirrors show (mirrors.py),
 shadows (shadows.py), fog and outlines, and the background.
 """
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,10 +17,11 @@ from .lights import LIGHT_COLUMNS, as_lights, light_rows
 from .mirrors import Mirrors
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, SAMPLE_PATTERNS, SOLID, VERTEX_CHUNK, FrameBuffer,
                      bin_bands, count_bands, project, rasterize, rasterize_layers, transform, upscale, NO_CLIP)
-from .shading import blend, combine, post_effects, resolve
+from .shading import blend, post_effects, resolve
 from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
-from .transforms import normalize, perspective, scale3
+from .threads import kernel_lock
+from .transforms import normalize, perspective, scale3, view_axes
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
@@ -60,6 +62,7 @@ def _pack_meshes(meshes):
     verts, normals, faces, uvs, colors, face_chain, face_texels, face_kind = [], [], [], [], [], [], [], []
     mesh_vertex, mesh_face, spheres, clear, tints, planes = [0], [0], [], [], [], []
     for mesh in meshes:
+        mesh.check()  # (the kernels index these arrays by each other's sizes without checking)
         n_faces = len(mesh.faces)
         verts.append(np.asarray(mesh.vertices, dtype=float))
         normals.append(mesh.vertex_normals())
@@ -137,7 +140,7 @@ class _Buffers:
 
     def get(self, name, shape, dtype=np.float64):
         """An array of this shape with undefined contents, in the memory of the last one of this name if it fits."""
-        size = int(np.prod(shape))
+        size = int(math.prod(shape))  # (np.prod takes microseconds, and this runs a hundred times a frame)
         a = self._arrays.get(name)
         if a is None or a.dtype != dtype or a.size < size:
             a = self._arrays[name] = np.empty(size + size // 4, dtype)  # room to grow a little
@@ -227,7 +230,7 @@ class Renderer(ShadowMaps, Mirrors):
         self._last = None  # what the framebuffer shows, as _scene_state() gives it
         self._pack = None  # (mesh keys, _pack_meshes() of those meshes) as last drawn
         self._objects = []  # the render list as last drawn, for pick()
-        self._eye = self._forward = None  # the camera's position and view direction then
+        self._eye = self._axes = None  # the camera's position and its pixels' directions (view_axes) then
         self._buffers = _Buffers()
         self._shadows = None  # (what the shadow maps depend on, the maps as _shadow_maps() returns them)
         self.resize(width, height)
@@ -235,6 +238,7 @@ class Renderer(ShadowMaps, Mirrors):
     def resize(self, width, height, cell_pixels=None):
         """Set the size in cells, and optionally the pixels per cell (e.g. Screen.cell_pixels)."""
         cell_pixels = self.cell_pixels if cell_pixels is None else tuple(cell_pixels)
+        width, height = max(int(width), 0), max(int(height), 0)  # (rows - 2 for a status line, in a 1-row terminal)
         if (width, height, cell_pixels) == (self.width, self.height, self.cell_pixels):
             return
         self.width, self.height, self.cell_pixels = width, height, cell_pixels
@@ -270,10 +274,11 @@ class Renderer(ShadowMaps, Mirrors):
         """Cell coordinates (x, y) of a world point as of the last render, or None if behind the camera."""
         if self.view_proj is None:
             return None
-        clip = self.view_proj @ np.array([*point, 1.0])
-        if clip[3] <= 1e-6:
-            return None
-        return (clip[0] / clip[3] + 1.0) * 0.5 * self.width, (1.0 - clip[1] / clip[3]) * 0.5 * self.height
+        with np.errstate(all="ignore"):
+            clip = self.view_proj @ np.array([*point, 1.0])
+            if not clip[3] > 1e-6:  # (also NaN)
+                return None
+            return (clip[0] / clip[3] + 1.0) * 0.5 * self.width, (1.0 - clip[1] / clip[3]) * 0.5 * self.height
 
     def ray(self, x, y):
         """(origin, unit direction) in the world of the line of sight through cell (x, y) as of the last
@@ -282,10 +287,9 @@ class Renderer(ShadowMaps, Mirrors):
         if self.view_proj is None or self.width < 1 or self.height < 1:
             return None
         nx, ny = x / self.width * 2.0 - 1.0, 1.0 - y / self.height * 2.0
-        inv = np.linalg.inv(self.view_proj)
-        near, far = inv @ np.array([nx, ny, -1.0, 1.0]), inv @ np.array([nx, ny, 1.0, 1.0])
-        near, far = near[:3] / near[3], far[:3] / far[3]
-        return self._eye.copy(), normalize(far - near)
+        with np.errstate(all="ignore"):  # (a degenerate camera gives NaN, not an exception)
+            a = self._axes
+            return self._eye.copy(), normalize(a[0] + nx * a[1] + ny * a[2])
 
     def pick(self, x, y):
         """What the last render drew in cell (x, y) of its frame: a Pick (object, position in the world,
@@ -303,9 +307,9 @@ class Renderer(ShadowMaps, Mirrors):
         obj = self._objects[ids[py, px] - 1]
         # The pixel's centre, at the depth drawn there: 1/w is the distance along the view direction.
         origin, direction = self.ray((x * pw + px + 0.5) / pw, (y * ph + py + 0.5) / ph)
-        forward = self._forward
-        distance = 1.0 / depth[py, px] / max(float(direction @ forward), 1e-12)
-        return Pick(obj, origin + direction * distance, distance)
+        with np.errstate(all="ignore"):
+            distance = 1.0 / depth[py, px] / max(float(direction @ self._axes[0]), 1e-12)
+            return Pick(obj, origin + direction * distance, distance)
 
     def invalidate(self):
         """Make the next render draw afresh, e.g. after editing a mesh's arrays in place."""
@@ -324,8 +328,8 @@ class Renderer(ShadowMaps, Mirrors):
             mesh = obj.mesh
             if mesh is None or not len(mesh.faces):
                 continue
-            if obj.opacity <= 0.0:
-                continue  # wholly clear: nothing to draw, nor any shadow
+            if not obj.opacity > 0.0:
+                continue  # wholly clear (or NaN): nothing to draw, nor any shadow
             if obj.parent is None:
                 if not obj.visible:
                     continue
@@ -384,17 +388,22 @@ class Renderer(ShadowMaps, Mirrors):
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
         double = np.array(double, np.bool_) | (alpha < 1.0) | packed[1]["clear"][mesh_idx]
+
+        def numbers(values):  # (NaN as 0: a NaN colour or glow would reach the picture)
+            a = np.array(values, np.float64)
+            return np.where(np.isnan(a), 0.0, a) if np.isnan(a).any() else a
+
         return {"mesh": mesh_idx, "pos": where, "lin": np.ascontiguousarray(linear),
                 "flip": np.linalg.det(linear) < 0.0,
-                "rgb": np.array(rgb, np.float64).reshape(-1, 3), "double": double, "alpha": alpha,
-                "shine": np.clip(np.array(shine, np.float64), 0.0, 1.0),
-                "specular": np.maximum(np.array(spec, np.float64), 0.0),
-                "shininess": np.maximum(np.array(shiny, np.float64), 0.0),
+                "rgb": numbers(rgb).reshape(-1, 3), "double": double, "alpha": alpha,
+                "shine": np.clip(numbers(shine), 0.0, 1.0),
+                "specular": np.maximum(numbers(spec), 0.0),
+                "shininess": np.maximum(numbers(shiny), 0.0),
                 "ident": np.array(ident, np.int32),
-                "emissive": np.array(emissive, np.float64), "cast": np.array(cast, np.bool_), "pack": packed[1],
+                "emissive": numbers(emissive), "cast": np.array(cast, np.bool_), "pack": packed[1],
                 "keys": keys}
 
-    def _scene_state(self, inst, camera, lights):
+    def _scene_state(self, inst, camera):
         """Everything a render depends on: (values compared by equality, objects compared by identity).
 
         Meshes, their arrays and textures count as changed when replaced, as in Mesh's own caches;
@@ -407,7 +416,7 @@ class Renderer(ShadowMaps, Mirrors):
                   self.point_shadow_size, self.shadow_softness,
                   np.asarray(camera.position, float).tobytes(), np.asarray(camera.target, float).tobytes(),
                   np.asarray(camera.up, float).tobytes(), camera.fov, camera.near, camera.far,
-                  light_rows(lights, self.shadows).tobytes()]
+                  self._light_rows.tobytes()]
         if inst is None:
             return values, []
         values += [inst[k].tobytes()
@@ -424,17 +433,18 @@ class Renderer(ShadowMaps, Mirrors):
         returned as it is, so a still scene costs almost nothing. Floating-point trouble (NaN or infinite
         coordinates) is drawn around rather than warned about: a warning would be printed over the picture.
         """
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"), kernel_lock():
             return self._render(objects, camera, lights)
 
     def _render(self, objects, camera, lights):
         lights = as_lights(lights)
         self._fit()
-        self._objects = list(objects)
+        self._objects = objects = list(objects)  # (once: objects may be a generator)
         inst = self._instances(objects)
+        self._light_rows = light_rows(lights, self.shadows)
         aspect = self.width * self.cell_aspect / max(self.height, 1)
         bg_args, bg_state = background_args(self.background, camera, aspect, self._fb.height)
-        state = self._scene_state(inst, camera, lights)
+        state = self._scene_state(inst, camera)
         state = (state[0] + list(bg_state[0]), state[1] + list(bg_state[1]))
         last = self._last
         if (last is not None and last[0] == state[0] and len(last[1]) == len(state[1])
@@ -448,14 +458,14 @@ class Renderer(ShadowMaps, Mirrors):
 
     def _draw(self, inst, camera, lights, bg_args):
         fb = self._fb
-        fb.clear()
         if self.width < 1 or self.height < 1:
             self.framebuffer.clear()
             return self.framebuffer
         aspect = self.width * self.cell_aspect / self.height
-        self.view_proj = perspective(np.radians(camera.fov), aspect, camera.near, camera.far) @ camera.view_matrix()
+        view = camera.view_matrix()
+        self.view_proj = perspective(np.radians(camera.fov), aspect, camera.near, camera.far) @ view
         self._eye = np.asarray(camera.position, dtype=float).copy()
-        self._forward = normalize(np.asarray(camera.target, float) - self._eye)
+        self._axes = view_axes(view, np.radians(camera.fov), aspect)  # (for ray(), and what mirrors show of the sky)
         tan_y = float(np.tan(np.radians(camera.fov) / 2))
         self._view_tan = (tan_y * aspect, tan_y)  # for fog: the direction each pixel looks in
         kind, colors, basis, texels, levels, first, lod = bg_args
@@ -466,7 +476,9 @@ class Renderer(ShadowMaps, Mirrors):
         self._haze = (int(kind), colors, basis, SKYBOX_FACES, texels, levels, first, haze_lod)
         scene = self._geometry(inst, camera, lights) if inst is not None else None
         if scene is not None:
-            self._shade_scene(scene)
+            self._shade_scene(scene)  # (which writes every pixel)
+        else:
+            fb.clear()
         fill_background(fb.rgb, fb.alpha, kind, colors, basis, SKYBOX_FACES, texels, levels, first, lod)
         out = self.framebuffer
         if fb is not out:  # drawn smaller, within max_pixels: stretched to the size the screen needs
@@ -480,28 +492,27 @@ class Renderer(ShadowMaps, Mirrors):
         # Which solid triangles (cut-outs too) may touch each band of rows, for both rasterizing passes.
         scene["bands"] = self._bins(scene["xs"], scene["ys"], scene["see"], SOLID | CUT, fb.height, "")
         n = self.samples
-        base = self._accumulate(scene, SAMPLE_PATTERNS[n], "base", depth=fb.depth.reshape(-1), ids=fb.ids.reshape(-1))
+        # The base samples give every pixel its colour, coverage, depth and id; edge samples then add to some.
+        base = self._accumulate(scene, SAMPLE_PATTERNS[n], "base", depth=fb.depth.reshape(-1), ids=fb.ids.reshape(-1),
+                                frame_samples=0)
         layers = self._layers(scene, SAMPLE_PATTERNS[n], base["sample_depth"]) if (scene["see"] == 1).any() else None
-        pixels, extra_rgb, extra_cover = np.zeros(0, np.int64), np.zeros((0, 3)), np.zeros(0, np.int64)
         if self.edge_samples and n > 1:
             pixels = np.flatnonzero(base["more"])
             if len(pixels):
                 # A different pattern from the base one: the same one turned a quarter.
                 pattern = tuple((1.0 - y, x) for x, y in SAMPLE_PATTERNS[self.edge_samples])
-                extra = self._accumulate(scene, pattern, "edge", pixels)
-                extra_rgb, extra_cover = extra["rgb"], extra["cover"]
+                extra = self._accumulate(scene, pattern, "edge", pixels, frame_samples=n)
                 rows = self._buffers.get("edge_rows", (fb.width * fb.height,), np.int64)
                 rows.fill(-1)
                 rows[pixels] = np.arange(len(pixels))
                 base["extra"] = (rows, extra["tris"], extra["sample_rgb"])  # for mirrors to replace them too
-        combine(fb.rgb.reshape(-1, 3), fb.alpha.reshape(-1), base["rgb"], base["cover"], n,
-                 pixels, extra_rgb, extra_cover, self.edge_samples)
         if self.reflections and self.mirror_bounces > 0:  # what mirrors show (the base samples drew every pixel)
             every = self._buffers.arange(fb.width * fb.height)
             self._reflect(scene, base, every, every, fb.rgb.reshape(-1, 3), 0, 1.0)
         if layers is not None:
             self._blend_layers(scene, layers, n)
-        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, self.outline, *self._haze)
+        outline = float(self.outline) if math.isfinite(self.outline) else 0.0  # (NaN would darken edges into NaN)
+        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, outline, *self._haze)
 
     def _bins(self, xs, ys, select, want, height, prefix, span=None):
         """The triangles whose kind (select: 0 solid, 1 see-through, 2 cut-out) is among `want` (SOLID, CLEAR
@@ -580,15 +591,15 @@ class Renderer(ShadowMaps, Mirrors):
         with what shading them needs; None if there are none."""
         eye = np.asarray(camera.position, dtype=float)
         shading = {"shadows": self._shadow_maps(inst, lights), "pixel_size": self._pixel_size(camera),
-                   "lights": np.ascontiguousarray(light_rows(lights, self.shadows).reshape(-1, LIGHT_COLUMNS))}
+                   "lights": np.ascontiguousarray(self._light_rows.reshape(-1, LIGHT_COLUMNS))}
         return self._view(inst, self.view_proj, eye, float(camera.near), NO_CLIP, self._pass_shine(inst, 0), shading,
-                          "")
+                          "", self._axes)
 
-    def _view(self, inst, view_proj, eye, near, clip, shine, shading, prefix):
+    def _view(self, inst, view_proj, eye, near, clip, shine, shading, prefix, axes):
         """The instances' triangles seen through view_proj from `eye` (clipped against the plane `clip`), in
         buffers named from `prefix`, as a scene for _accumulate() and friends; None if there are none.
         shine: each instance's reflectivity of the background (see _shade); shading: its lights, shadow
-        maps and pixel size."""
+        maps and pixel size; axes: the directions its pixels look in (see transforms.view_axes)."""
         fb, buf, pack = self._fb, self._buffers, inst["pack"]
         k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = self._transform(
             pack, inst, inst["double"], view_proj, eye, near, prefix, clip)
@@ -609,7 +620,7 @@ class Renderer(ShadowMaps, Mirrors):
                 "shininess": inst["shininess"], "chain": chain[:k],
                 "lod": lod[:k], "shine": shine if self.reflections else np.zeros_like(shine), "sky": self._sky,
                 "textures": pack["textures"], "eye": eye, "inst": inst, "view_proj": view_proj, "near": near,
-                "shading": shading, **shading}
+                "axes": axes, "shading": shading, **shading}
 
     def _pixel_size(self, camera):
         """The width in the world of a pixel one unit in front of the camera: the larger of its width and
@@ -646,29 +657,40 @@ class Renderer(ShadowMaps, Mirrors):
 
     # ----- sampling and shading ---------------------------------------------------------
 
-    def _accumulate(self, scene, pattern, name, pixels=None, depth=None, ids=None):
+    def _accumulate(self, scene, pattern, name, pixels=None, depth=None, ids=None, frame_samples=None):
         """Render every sample position in `pattern`, in all pixels or just the given flat pixel indices.
 
         Returns _resolve()'s per-pixel outputs (rgb, cover, more) and, at each sample, its depth,
         triangle and colour (sample_depth, tris, sample_rgb), in buffers named after `name`; the depth
-        and object id of each pixel's nearest sample go into `depth` and `ids` if given.
+        and object id of each pixel's nearest sample go into `depth` and `ids` if given. With frame_samples, each
+        pixel's colour and coverage go into the framebuffer instead of rgb and cover (left empty): averaged with
+        the frame_samples samples already there (0: none), as resolve() does.
         """
         fb, buf = self._fb, self._buffers
-        if pixels is None:
+        n = len(pattern)
+        whole = pixels is None
+        if whole:
             pixels = slots = buf.arange(fb.width * fb.height)
         else:
             slots = buf.get("slots", (fb.width * fb.height,), np.int64)
             slots.fill(-1)
             slots[pixels] = buf.arange(fb.width * fb.height)[:len(pixels)]
-        n, m = len(pattern), len(pixels)
+        m = len(pixels)
         sample_depth = buf.get(name + "_sample_depth", (m, n))
-        sample_depth.fill(0.0)
         tris = buf.get(name + "_tris", (m, n), np.int32)
-        tris.fill(-1)
+        if not whole:  # (a whole frame's are emptied by rasterize, band by band)
+            sample_depth.fill(0.0)
+            tris.fill(-1)
         rasterize(sample_depth, tris, fb.width, fb.height, scene["xs"], scene["ys"], scene["inv_w"],
                   np.array(pattern, dtype=float), slots, *scene["bands"], scene["see"], scene["attrs"], scene["chain"],
-                  scene["lod"], *scene["textures"])
-        out = {"rgb": buf.get(name + "_rgb", (m, 3)), "cover": buf.get(name + "_cover", (m,), np.int64),
+                  scene["lod"], *scene["textures"], whole)
+        if frame_samples is None:
+            sums = buf.get(name + "_rgb", (m, 3)), buf.get(name + "_cover", (m,), np.int64)
+            frame = np.zeros((0, 3)), np.zeros(0)
+        else:
+            sums = np.zeros((0, 3)), np.zeros(0, np.int64)
+            frame = fb.rgb.reshape(-1, 3), fb.alpha.reshape(-1)
+        out = {"rgb": sums[0], "cover": sums[1],
                "more": buf.get(name + "_more", (m,), np.bool_), "sample_depth": sample_depth, "tris": tris,
                "sample_rgb": buf.get(name + "_sample_rgb", (m, n, 3))}
         depth = buf.get("near_depth", (m,)) if depth is None else depth
@@ -677,5 +699,6 @@ class Renderer(ShadowMaps, Mirrors):
                 scene["tri_inst"], scene["ident"], scene["emissive"], scene["specular"], scene["shininess"],
                 scene["shine"], scene["chain"], scene["lod"], *scene["textures"], scene["lights"], *scene["shadows"],
                 scene["pixel_size"], scene["eye"], *scene["sky"], EDGE_CONTRAST, out["sample_rgb"],
-                buf.get(name + "_spec", (m, 3)), out["rgb"], out["cover"], depth, ids, out["more"])
+                buf.get(name + "_spec", (m, 3)), out["rgb"], out["cover"], depth, ids, out["more"], *frame,
+                frame_samples or 0)
         return out

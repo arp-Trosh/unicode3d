@@ -18,13 +18,14 @@ import numpy as np
 import unicode3d
 from numba.core.registry import CPUDispatcher
 
-from unicode3d.background import Fog, Sky, SkyBox
+from unicode3d.background import Fog, Gradient, Sky, SkyBox
 from unicode3d.examples.room import Walk
-from unicode3d.keys import Key, MouseEvent
+from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.mesh import Mesh, make_box
 from unicode3d.scene import Camera, Light, Object3D, PointLight, Renderer
 from unicode3d.terminal import Screen, crash_log_path
 from unicode3d.transforms import quat_axis_angle
+from unicode3d.ui import Choice, DisplayControls, Panel, Slider, Toggle
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Full screen at a tiny font: kitty at font size 2 on a 1080p screen, and about a 4K screen's worth.
@@ -275,6 +276,251 @@ class BadNumberTests(unittest.TestCase):
             [Object3D(make_box())], Camera(position=np.array([np.nan] * 3)), Light(shadows=True))
         screen.draw_frame(fb)
         screen.render_updates()
+        self.assertTrue(np.isfinite(fb.rgb).all())
+
+    def test_nan_colours_lights_and_textures_never_reach_the_picture(self):
+        # Colours, glow, opacity and light settings gone NaN or infinite: the objects show black, clear or not at
+        # all, but the picture stays numbers (and nothing warns).
+        nan, inf = np.nan, np.inf
+        by_vertex, by_face = make_box(), make_box()
+        by_vertex.vertex_colors = np.full((len(by_vertex.vertices), 4), nan)
+        by_face.face_colors = np.full((len(by_face.faces), 3), inf)
+        alpha = np.ones((4, 4, 4))
+        alpha[..., 3] = nan
+        meshes = [make_box(), make_box(), by_vertex, by_face, make_box(textures=[np.full((4, 4, 3), nan)] * 6),
+                  make_box(textures=[alpha] * 6), make_box(), make_box()]
+        options = [{}, {"color": (nan, 0.5, 0.5), "emissive": nan, "reflectivity": nan}, {}, {"specular": inf},
+                   {"opacity": 0.5}, {}, {"opacity": nan}, {"color": (inf, 0.0, 0.0), "emissive": -inf}]
+        objects = [Object3D(m, position=np.array([1.5 * (i % 4) - 2.0, 1.5 * (i // 4) - 0.5, 0.0]), **o)
+                   for i, (m, o) in enumerate(zip(meshes, options))]
+        lights = [Light(ambient=nan, color=(nan, 1.0, 1.0), shadows=True), Light(direction=np.full(3, nan), diffuse=inf,
+                                                                               shadows=True),
+                  PointLight(np.array([0.0, 2.0, 2.0]), range=nan, specular=nan, shadows=True),
+                  PointLight(np.full(3, nan), range=inf, shadows=True)]
+        settings = [(Sky((nan, 0, 0), (0, nan, 0), (0, 0, nan)), Fog(1.0, 20.0, (nan, 0, 0))), ((nan, nan, nan), 0.3),
+                    (Gradient((nan, 0, 0), (inf, 0, 0)), Fog(1.0, 20.0))]
+        for background, fog in settings:
+            screen = Screen(glyphs="sextant", color="256", size=(20, 40))
+            r = Renderer(40, 20, screen.cell_pixels, background=background, fog=fog)
+            fb = r.render(objects, Camera(position=np.array([0.0, 0.0, 7.0])), lights)
+            screen.draw_frame(fb)
+            screen.render_updates()
+            self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all(), background)
+            self.assertTrue((fb.ids == 1).any())  # the plain box is drawn
+
+    def test_odd_renderer_settings(self):
+        # Settings a slider or a typo can give: shadow maps of no texels, NaN softness, no layers, too many bounces,
+        # and a size from rows - 2 in a terminal of one row.
+        mirror = Mesh(np.array([(-3, -1, -2), (3, -1, -2), (3, 2, -2), (-3, 2, -2)], float),
+                      np.array([(0, 1, 2), (0, 2, 3)]))
+        objects = [Object3D(make_box()), Object3D(make_box(), position=np.array([1.5, 0, 0]), opacity=0.5),
+                   Object3D(mirror, reflectivity=0.8)]
+        lights = [Light(shadows=True), PointLight(np.array([0.0, 2.0, 2.0]), shadows=True)]
+        for settings in ({"shadow_size": 0, "point_shadow_size": 0}, {"shadow_size": -4, "point_shadow_size": 16},
+                         {"shadow_softness": np.nan, "lod_bias": np.nan, "outline": np.nan},
+                         {"transparency_layers": 0, "mirror_bounces": 99}, {"cell_aspect": 0.0}):
+            r = Renderer(40, 20, **settings)
+            self.assertTrue(np.isfinite(r.render(objects, Camera(), lights).rgb).all(), settings)
+        r = Renderer(40, -1)
+        self.assertEqual(r.framebuffer.height, 0)
+        r.render(objects, Camera(), lights)
+        r.resize(40, 20)
+        self.assertTrue(r.render(objects, Camera(), lights).drawn.any())
+
+    def test_sliders_bound_to_bad_numbers(self):
+        # A slider showing a value it reads (get=) that has gone out of range, infinite or NaN keeps its knob on
+        # its track, and moving it gives a value within range again.
+        value = [0.0]
+        slider = Slider("Speed", 0.0, 0.0, 10.0, step=0.5, get=lambda: value[0], set=lambda v: value.__setitem__(0, v))
+        screen = Screen(glyphs="half", color="16", size=(3, 60))
+        for bad in (np.nan, np.inf, -np.inf, 1e300, -5.0):
+            value[0] = bad
+            Panel([slider]).draw(screen, 0, 1)
+            self.assertIn(slider.knob(), range(slider.length))
+            slider.nudge(1)
+            self.assertTrue(0.0 <= value[0] <= 10.0, bad)
+
+
+class MalformedMeshTests(unittest.TestCase):
+    """Mesh arrays that don't fit together are refused with a ValueError saying what is wrong: the kernels index them
+    by each other's sizes without checking, so a mismatch used to read outside them, or crash Python outright."""
+
+    def test_mismatched_arrays_are_refused(self):
+        def changed(edit, textured=False):
+            mesh = make_box(textures=[np.ones((4, 4))] * 6) if textured else make_box()
+            edit(mesh)
+            return mesh
+
+        def set_face(mesh, value):
+            mesh.faces = mesh.faces.copy()
+            mesh.faces[3, 1] = value
+
+        cases = [
+            (changed(lambda m: set_face(m, 24)), "faces must index its 24 vertices"),
+            (changed(lambda m: set_face(m, -1)), "faces must index"),  # (numpy would quietly take the last vertex)
+            (changed(lambda m: setattr(m, "faces", m.faces.astype(float))), "whole numbers"),
+            (changed(lambda m: setattr(m, "vertices", m.vertices[:, :2])), r"vertices must be \(V, 3\)"),
+            (changed(lambda m: setattr(m, "face_colors", np.full((11, 3), 200))), "face_colors has 11 rows for 12"),
+            (changed(lambda m: setattr(m, "face_colors", np.full((13, 4), 200))), "face_colors has 13 rows"),
+            (changed(lambda m: setattr(m, "vertex_colors", np.full((23, 3), 200))), "vertex_colors has 23 rows"),
+            (changed(lambda m: setattr(m, "materials", m.materials[:2]), True), r"materials must be \(12,\)"),
+            (changed(lambda m: setattr(m, "materials", m.materials + 1), True), "materials must index its 6"),
+            (changed(lambda m: setattr(m, "uvs", m.uvs[:-1]), True), r"uvs must be \(12, 3, 2\)"),
+            (make_box(textures=[np.zeros((0, 4, 3))] * 6), "at least one texel"),
+            (make_box(textures=[np.ones(5)] * 6), "at least one texel"),
+        ]
+        r = Renderer(20, 10)
+        for mesh, message in cases:
+            with self.assertRaisesRegex(ValueError, message):
+                r.render([Object3D(make_box()), Object3D(mesh)], Camera(), Light(shadows=True))
+        # The renderer goes on drawing good meshes, and a sky box needs textures with texels too.
+        self.assertTrue(r.render([Object3D(make_box())], Camera(), Light()).drawn.any())
+        with self.assertRaisesRegex(ValueError, "at least one texel"):
+            Renderer(20, 10, background=SkyBox([np.zeros((0, 0, 3))] * 6)).render([], Camera(), Light())
+
+    def test_the_engines_own_meshes_fit_together(self):
+        from unicode3d.examples.dice import make_die
+        from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, pillow_mesh, text_mesh
+        from unicode3d.examples.room import FONT
+        meshes = [make_box(), make_box(textures=[np.ones((2, 2))] * 6), make_die(), blob_mesh((1.0, 1.0, 1.0)),
+                  block_mesh((0.0, 0.0, 0.0), (1.0, 2.0, 3.0)), pillow_mesh(lambda x, y: x * x + y * y < 1.0),
+                  text_mesh("CODE", FONT)[0], merge_meshes([make_box(), blob_mesh((1.0, 1.0, 1.0))], [(255, 0, 0), (0, 0, 255)])]
+        for mesh in meshes:
+            mesh.check()
+
+
+class DegenerateCameraTests(unittest.TestCase):
+    """Cameras no proper view comes from (near == far, at their own target, a zero up, a fov of 0): drawn as best
+    they can be, never an exception or a warning, also with mirrors, which used to invert the view, and in pick()
+    and ray(), which did too."""
+
+    def setUp(self):
+        caught = warnings.catch_warnings()
+        caught.__enter__()
+        self.addCleanup(caught.__exit__, None, None, None)
+        warnings.simplefilter("error")
+
+    def test_degenerate_cameras(self):
+        p = lambda *v: np.array(v, float)  # noqa: E731
+        mirror = Mesh(np.array([(-3, -1, -2), (3, -1, -2), (3, 2, -2), (-3, 2, -2)], float),
+                      np.array([(0, 1, 2), (0, 2, 3)]))
+        objects = [Object3D(make_box()), Object3D(mirror, reflectivity=0.8),
+                   Object3D(make_box(), position=p(1.5, 0, 0), opacity=0.5),
+                   Object3D(make_box(), position=p(-1.5, 0, 0), reflectivity=0.5)]
+        lights = [Light(shadows=True), PointLight(p(0, 2, 2), shadows=True)]
+        cameras = [Camera(near=5.0, far=5.0), Camera(near=0.0), Camera(near=-1.0), Camera(near=50.0, far=1.0),
+                   Camera(far=np.inf), Camera(near=np.nan), Camera(fov=0.0), Camera(fov=180.0), Camera(fov=-50.0),
+                   Camera(fov=np.nan), Camera(position=p(0, 0, 0), target=p(0, 0, 0)), Camera(up=p(0, 0, 0)),
+                   Camera(up=p(np.nan, 0, 0)), Camera(position=p(0, 5, 0), target=p(0, 0, 0), up=p(0, 1, 0)),
+                   Camera(position=p(0, 0, 1e300)), Camera(position=p(0, 0, np.inf)), Camera(target=p(np.inf, 0, 0))]
+        sky_box = SkyBox([np.full((4, 4, 3), v) for v in (0.2, 0.3, 0.4, 0.5, 0.6, 0.7)])
+        screen = Screen(glyphs="sextant", color="256", size=(20, 40))
+        for camera in cameras:
+            for background in (Sky(), sky_box, None):
+                r = Renderer(40, 20, screen.cell_pixels, background=background, fog=Fog(1.0, 5.0))
+                fb = r.render(objects, camera, lights)
+                screen.draw_frame(fb)
+                screen.render_updates()
+                self.assertTrue(np.isfinite(fb.rgb).all() and np.isfinite(fb.alpha).all(), camera)
+                for x, y in ((20, 10), (0, 0), (39.5, 19.5)):
+                    r.pick(x, y)
+                    r.ray(x, y)
+                r.project((0.0, 0.0, 0.0))
+        # near == far still draws the scene: only depth is lost, which a perspective's 1/w doesn't need.
+        r = Renderer(40, 20)
+        self.assertTrue(r.render(objects, Camera(near=1.0, far=1.0), lights).drawn.any())
+        self.assertIs(r.pick(20, 10).object, objects[0])
+
+
+class GarbledInputTests(unittest.TestCase):
+    """Whatever the terminal sends (line noise over ssh, a paste of escape sequences, a terminal of its own mind),
+    the decoder and the widgets never raise."""
+
+    def test_garbled_input_never_raises(self):
+        rng = np.random.default_rng(7)
+        pieces = ["\x1b", "\x1b[", "\x1b[<", "\x1bO", "[", "<", ";", ":", "u", "~", "M", "m", "?", ">", "-", "A", "Z", "1",
+                  "9", "0", "65", "99999999999999999999999", "1114112", "57441", "a", "é", "\x00", "\x7f", "\U0001fb00"]
+        decoder, held = InputDecoder(), HeldKeys()
+        controls = DisplayControls(renderer=Renderer(10, 5))
+        panel = Panel([Slider("x", 5, 0, 10, keys="[]"), Toggle("t", key="t"), Choice("c", ("a", "b"), key="c")])
+        screen = Screen(glyphs="sextant", color="256", size=(6, 80))
+        now = 0.0
+        for i in range(3000):
+            text = "".join(rng.choice(pieces, size=int(rng.integers(1, 12))))
+            now += float(rng.uniform(0.0, 0.05))
+            events = decoder.feed(text, now) + decoder.flush(now)
+            for event in events:
+                self.assertIsInstance(event, (int, KeyRelease, MouseEvent))
+            held.update(events, now)
+            panel.draw(screen, 0, 0)
+            controls.draw(screen, 1, 0)
+            controls.handle(panel.handle(events), screen)
+        for sequence in ("\x1b[97;5;99999999999999999999u", "\x1b[1114112u", "\x1b[97;1;1114112u", "\x1b[97;1;-3u",
+                         "\x1b[<0;-5;-7M", "\x1b[" + "9" * 5000 + "~", "\x1b[<99999999999999999999;1;1M", "\x1b[;;;u"):
+            InputDecoder().feed(sequence, 0.0)
+
+
+class ThreadTests(unittest.TestCase):
+    """Drawing from several threads at once (a server drawing for each client, say), each with its own Renderer and
+    Screen: the same frames as drawn one at a time, and no crash on any of Numba's threading layers."""
+
+    def test_threads_draw_the_same_frames(self):
+        import threading
+
+        def scene(seed):
+            rng = np.random.default_rng(seed)
+            return [Object3D(make_box(), position=rng.normal(size=3), opacity=0.6 if i % 3 == 0 else 1.0,
+                             color=tuple(int(c) for c in rng.integers(0, 255, 3))) for i in range(12)]
+
+        lights = [Light(shadows=True)]
+        alone = {s: Renderer(40, 20, (2, 3)).render(scene(s), Camera(), lights).copy() for s in range(3)}
+        wrong = []
+
+        def draw(seed):
+            r, screen = Renderer(40, 20, (2, 3)), Screen(glyphs="sextant", size=(20, 40))
+            for _ in range(8):
+                r.invalidate()
+                fb = r.render(scene(seed), Camera(), lights)
+                screen.draw_frame(fb)
+                if not (np.array_equal(fb.rgb, alone[seed].rgb) and np.array_equal(fb.ids, alone[seed].ids)):
+                    wrong.append(seed)
+
+        threads = [threading.Thread(target=draw, args=(s,)) for s in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(wrong, [])
+
+    def test_threads_on_the_workqueue_layer(self):
+        # Numba's fallback threading layer aborts the process when two threads launch parallel kernels at once;
+        # kernel_lock() makes them take turns there.
+        import subprocess
+        program = ("import threading, numpy as np\n"
+                   "from unicode3d import Camera, Light, Object3D, Renderer, make_box\n"
+                   "from unicode3d.terminal import Screen\n"
+                   "def draw():\n"
+                   "    r, screen = Renderer(40, 20, (2, 3)), Screen(glyphs='sextant', size=(20, 40))\n"
+                   "    for _ in range(15):\n"
+                   "        r.invalidate()\n"
+                   "        screen.draw_frame(r.render([Object3D(make_box())], Camera(), Light(shadows=True)))\n"
+                   "threads = [threading.Thread(target=draw) for _ in range(3)]\n"
+                   "[t.start() for t in threads]; [t.join() for t in threads]\n"
+                   "import numba; print(numba.threading_layer())\n")
+        result = subprocess.run([sys.executable, "-c", program], cwd=ROOT, capture_output=True, text=True, timeout=600,
+                                env=dict(os.environ, NUMBA_THREADING_LAYER="workqueue"))
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+        self.assertEqual(result.stdout.strip(), "workqueue")
+
+
+class FrameRateTests(unittest.TestCase):
+    def test_any_frame_rate_setting(self):
+        # screen.fps is the program's to change while it runs: 0 or None (as fast as it can) and nonsense mustn't
+        # stop run() with a ZeroDivisionError or a TypeError.
+        from unicode3d.terminal import _frame_period
+        self.assertAlmostEqual(_frame_period(30), 1 / 30)
+        for fps in (0, 0.0, None, -5, np.nan, np.inf, "fast"):
+            self.assertEqual(_frame_period(fps), 0.0, fps)
 
 
 class CrashLogTests(unittest.TestCase):
@@ -288,9 +534,10 @@ class CrashLogTests(unittest.TestCase):
 
 def run_in_pty(args, rows, cols, script, env=None, timeout=240):
     """Run `python args` in a pseudo-terminal of rows x cols, reading everything it writes. `script` is a list
-    of (frames, action): once that many frames (synchronized updates) have arrived, action(fd, set_size) runs,
-    e.g. to resize the terminal or type a key; or sooner, once a frame has come since the last action and
-    a few seconds have passed (a frame where nothing changed sends nothing). Returns (exit code, output)."""
+    of (frames, action): once that many frames (synchronized updates) have arrived, action(fd, set_size, pid)
+    runs, e.g. to resize the terminal, type a key or send the program a signal; or sooner, once a frame has
+    come since the last action and a few seconds have passed (a frame where nothing changed sends nothing).
+    Returns (exit code, output)."""
     import fcntl
     import pty
     import struct
@@ -323,7 +570,7 @@ def run_in_pty(args, rows, cols, script, env=None, timeout=240):
                 out = (out + data)[-65536:]
             while steps and (frames >= steps[0][0] or since is not None and frames > since
                              and time.monotonic() - then > 3.0):
-                steps.pop(0)[1](fd, set_size)
+                steps.pop(0)[1](fd, set_size, pid)
                 since, then = frames, time.monotonic()
         else:
             os.kill(pid, 9)
@@ -340,12 +587,12 @@ class RealTerminalTests(unittest.TestCase):
 
     def test_room_in_a_resized_terminal(self):
         def resize(r, c):
-            return lambda fd, set_size: set_size(fd, r, c)
+            return lambda fd, set_size, pid: set_size(fd, r, c)
 
         with tempfile.TemporaryDirectory() as cache:
             code, out = run_in_pty(["-m", "unicode3d.examples.room"], *TINY_FONT, [
                 (2, resize(24, 80)), (4, resize(300, 1200)), (6, resize(1, 1)), (8, resize(50, 180)),
-                (10, lambda fd, _: os.write(fd, b"\x1b"))], env={"XDG_CACHE_HOME": cache})
+                (10, lambda fd, *_: os.write(fd, b"\x1b"))], env={"XDG_CACHE_HOME": cache})
             with open(crash_log_path({"XDG_CACHE_HOME": cache}, windows=False)) as f:
                 log = f.read()
         self.assertEqual(code, 0, out[-3000:])
@@ -371,6 +618,27 @@ class RealTerminalTests(unittest.TestCase):
         self.assertLess(text.rfind("\x1b[?1049l"), text.find("unicode3d: stopped"))  # after restoring the terminal
         self.assertIn("RuntimeError: broken frame", log)
         self.assertIn("crashed in frame 1: -c: 80x24 cells", log)
+
+    def test_sigterm_restores_the_terminal(self):
+        # kill (SIGTERM) ends the program as sys.exit() would, so the terminal leaves raw mode and the alternate
+        # screen; by default the signal ends Python at once, leaving both. (And fps=0 runs as fast as it can.)
+        import signal
+        program = ("from unicode3d.terminal import run\n"
+                   "frames = 0\n"
+                   "def frame(screen, dt, keys):\n"
+                   "    global frames\n"
+                   "    frames += 1\n"
+                   "    screen.text(0, 0, str(frames)); screen.refresh()\n"
+                   "run(frame, fps=0)\n")
+        with tempfile.TemporaryDirectory() as cache:
+            code, out = run_in_pty(["-c", program], 24, 80, [(20, lambda fd, set_size, pid: os.kill(pid, signal.SIGTERM))],
+                                   env={"XDG_CACHE_HOME": cache})
+            with open(crash_log_path({"XDG_CACHE_HOME": cache}, windows=False)) as f:
+                log = f.read()
+        self.assertEqual(code, 128 + signal.SIGTERM, out[-2000:])
+        self.assertIn(b"\x1b[?2026l", out[-200:])  # a frame cut short is ended
+        self.assertIn(b"\x1b[?1049l", out[-200:])  # the alternate screen left
+        self.assertNotIn("crashed", log)
 
 
 if __name__ == "__main__":

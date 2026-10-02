@@ -37,26 +37,20 @@ def _gather_pass(pixels, rgb, cover, depth, ids, n_samples, out_rgb, out_alpha, 
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def _fill_sky(pixels, rgb, alpha, width, height, inv_view_proj, sky, sky_colors, sky_faces, sky_texels, sky_levels,
-              sky_first, sky_lod):
+def _fill_sky(pixels, rgb, alpha, width, height, axes, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first,
+              sky_lod):
     """Fill what the scene leaves uncovered in each of `pixels` (flat indices of whole-frame rgb, alpha) with
-    the background seen along the ray through the pixel of the view whose inverse is inv_view_proj (a
-    reflected one: what a mirror shows beyond everything), and make the pixel opaque."""
+    the background seen along the ray through the pixel of a view whose pixels look along `axes` (see
+    transforms.view_axes; a reflected view: what a mirror shows beyond everything), and make the pixel opaque."""
     for j in prange(pixels.shape[0]):
         c = pixels[j]
         a = alpha[c]
         if a >= 1.0:
             continue
         nx, ny = (c % width + 0.5) / width * 2.0 - 1.0, 1.0 - (c // width + 0.5) / height * 2.0
-        m = inv_view_proj
-        near_w = m[3, 0] * nx + m[3, 1] * ny - m[3, 2] + m[3, 3]
-        far_w = m[3, 0] * nx + m[3, 1] * ny + m[3, 2] + m[3, 3]
-        dx = (m[0, 0] * nx + m[0, 1] * ny + m[0, 2] + m[0, 3]) / far_w - (m[0, 0] * nx + m[0, 1] * ny - m[0, 2]
-                                                                           + m[0, 3]) / near_w
-        dy = (m[1, 0] * nx + m[1, 1] * ny + m[1, 2] + m[1, 3]) / far_w - (m[1, 0] * nx + m[1, 1] * ny - m[1, 2]
-                                                                           + m[1, 3]) / near_w
-        dz = (m[2, 0] * nx + m[2, 1] * ny + m[2, 2] + m[2, 3]) / far_w - (m[2, 0] * nx + m[2, 1] * ny - m[2, 2]
-                                                                           + m[2, 3]) / near_w
+        dx = axes[0, 0] + nx * axes[1, 0] + ny * axes[2, 0]
+        dy = axes[0, 1] + nx * axes[1, 1] + ny * axes[2, 1]
+        dz = axes[0, 2] + nx * axes[1, 2] + ny * axes[2, 2]
         dl = max(np.sqrt(dx * dx + dy * dy + dz * dz), 1e-30)
         r, g, b = sky_colour(sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, dx / dl, dy / dl,
                              dz / dl)
@@ -75,7 +69,7 @@ def _mix_mirror(target, pixels, rows, tris, sample_rgb, extra_rows, extra_tris, 
 
     The samples are row rows[j] of tris and sample_rgb (the pass the pixel was drawn in), and, where the
     pixel took extra samples at an edge (extra_rows[c] >= 0, indexed by flat pixel), that row of
-    extra_tris and extra_rgb too, as in _combine."""
+    extra_tris and extra_rgb too, as resolve() averages them into the frame."""
     n_base, n_extra = tris.shape[1], extra_tris.shape[1]
     for j in prange(pixels.shape[0]):
         c, row, extra = pixels[j], rows[j], extra_rows[pixels[j]]
@@ -169,18 +163,20 @@ class Mirrors:
             mirror[:3, :3] -= 2.0 * np.outer(normal, normal)
             mirror[:3, 3] = -2.0 * d * normal
             view_proj = scene["view_proj"] @ mirror
+            axes = scene["axes"] @ mirror[:3, :3]  # (each pixel's direction, reflected: the matrix is symmetric)
             keep = np.arange(len(inst["mesh"])) != i
             sub = {k: (v[keep] if isinstance(v, np.ndarray) and len(v) == len(keep) else v) for k, v in inst.items()}
             prefix = f"mirror{level}_"
             child = self._view(sub, view_proj, (mirror @ np.r_[eye, 1.0])[:3], scene["near"], np.r_[normal, d],
-                               self._pass_shine(sub, level + 1), scene["shading"], prefix)
+                               self._pass_shine(sub, level + 1), scene["shading"], prefix, axes)
             shown = pixels[on]
             seen = (buf.get(prefix + "rgb_frame", (fb.width * fb.height, 3)),
                     buf.get(prefix + "alpha_frame", (fb.width * fb.height,)),
                     buf.get(prefix + "depth_frame", (fb.width * fb.height,)),
                     buf.get(prefix + "ids_frame", (fb.width * fb.height,), np.int32))
-            seen[0][shown], seen[1][shown] = 0.0, 0.0
-            if child is not None:
+            if child is None:  # (else _gather_pass writes all of each pixel shown)
+                seen[0][shown], seen[1][shown] = 0.0, 0.0
+            else:
                 span = self._spans(shown)
                 child["bands"] = self._bins(child["xs"], child["ys"], child["see"], SOLID | CUT, fb.height, prefix,
                                             span)
@@ -197,7 +193,7 @@ class Mirrors:
                     layers = self._layers(child, pattern, solid, prefix, span)
                     if layers is not None:
                         self._blend_layers(child, layers, n, seen)
-            _fill_sky(shown, seen[0], seen[1], fb.width, fb.height, np.linalg.inv(view_proj), *self._sky)
+            _fill_sky(shown, seen[0], seen[1], fb.width, fb.height, axes, *self._sky)
             extra_rows, extra_tris, extra_rgb = drawn.get("extra") or self._no_extra()
             _mix_mirror(target, shown, rows[on], drawn["tris"], drawn["sample_rgb"], extra_rows, extra_tris, extra_rgb,
                         scene["tri_inst"], scene["ident"], ident, reflectivity, seen[0])
