@@ -3,8 +3,9 @@
 A 3D renderer for the terminal, written in Python with numpy and [Numba](https://numba.pydata.org).
 It draws with Unicode block characters in 24-bit colour, falls back to 256 or 16 colours and to
 ASCII where it must, and runs in Windows Terminal and in Linux and macOS terminals, with no curses.
-It has textures, shadows, glass, mirrors, fog, picking, widgets and a scene graph, and draws a
-typical frame in a few milliseconds. It started as a Python port, in spirit, of
+It has textures, shadows, glass, mirrors, fog, a scene graph, glTF and OBJ models with their
+animations, ray and overlap queries, labels and widgets, and draws a typical frame in a few
+milliseconds. It started as a Python port, in spirit, of
 [ShakedAp/ASCII-renderer](https://github.com/ShakedAp/ASCII-renderer).
 
 Used by [Zombie Dice](https://github.com/arp-Trosh/zombieDice). For how it works inside, read
@@ -498,7 +499,7 @@ renderer.render([body, *wheels, trailer], camera, light)
 
 Draw as many objects as you like in one render list: objects that share a `Mesh` share its packed
 copy, all objects are projected in one parallel kernel call, and those wholly outside the view are
-skipped. 400 small balls (140,800 triangles) take about 20 ms at 180x50 cells (see
+skipped. 400 small balls (140,800 triangles) take about 14 ms at 180x50 cells (see
 [Performance](#performance) for the machine). For thousands of static pieces, merging them into one
 mesh with `merge_meshes` (keeping each part's colour) is cheaper still. For objects that are small
 on screen, a mesh with fewer triangles looks the same and costs less (the balls demo switches meshes
@@ -694,8 +695,8 @@ Each shadowed light draws the scene once more, as seen from the light, into a sh
 slower; spread over a big scene, texels get coarser). A `PointLight`'s is a cube of six
 `point_shadow_size` x `point_shadow_size` faces looking every way from it, holding whatever is in
 its range. A map is only redrawn when an object or its light moves, so walking the camera around
-a still scene costs little. At 180x50 cells, a shadowed sun over a few dice adds about 1.3 ms to a
-frame when something moves, and about 0.3 ms when nothing but the camera does. `shadow_softness`
+a still scene costs little. At 180x50 cells, a shadowed sun over a few dice adds about 1.2 ms to a
+frame when something moves, and about 0.5 ms when nothing but the camera does. `shadow_softness`
 blurs edges further; they are always smoothed over at least a pixel on screen.
 `renderer.shadows = False` switches all shadows off, as F5 does in the demos
 (`DisplayControls(renderer=...)`).
@@ -748,7 +749,7 @@ its far side through them.
 
 Scenes without see-through objects cost nothing extra. Otherwise the cost grows with the screen area
 that see-through surfaces cover: three glass dice, covering about an eighth of a 180x50 view, add
-about 3 ms.
+about 2.5 ms.
 
 ```python
 glass = Object3D(make_box(), color=(200, 225, 255), opacity=0.15)  # a faintly blue glass case
@@ -781,7 +782,7 @@ costs only a few passes. `renderer.reflections = False` switches all reflections
 in the demos.
 
 Each mirror on screen costs a pass: about 1.5–2 ms at 180x50 cells, plus the drawing of the pixels
-it covers (a floor mirror under three dice adds about 3.5 ms in all). Curved shiny objects cost
+it covers (a floor mirror under three dice adds about 3 ms in all). Curved shiny objects cost
 almost nothing extra. A mirror off screen, or hidden, costs nothing.
 
 ```python
@@ -990,10 +991,10 @@ run(frame, mouse="drag")
 <details>
 <summary><h3 id="performance">Performance</h3></summary>
 
-Drawing a frame and building its screen update takes about 1.9 ms for a 60x15-cell view of three
-rolling dice, and about 3.7 ms for a 180x50 view in `sextant` mode. Cost grows with the pixel count
+Drawing a frame and building its screen update takes about 1.5 ms for a 60x15-cell view of three
+rolling dice, and about 3.2 ms for a 180x50 view in `sextant` mode. Cost grows with the pixel count
 and, more slowly, the triangle count: a 27,000-triangle sphere filling a 180x50 view takes about
-5.4 ms, and 400 separate balls (140,800 triangles) about 20 ms. Shadows, see-through surfaces and
+4.3 ms, and 400 separate balls (140,800 triangles) about 14 ms. Shadows, see-through surfaces and
 mirrors cost more where they are used (see [Shadows](#shadows), [Transparency](#transparency) and
 [Reflections](#reflections)); the room demo, with all of them, takes about 16 ms a frame at 180x52
 cells while turning. A scene that hasn't changed since the last `render()` (same objects, poses,
@@ -1007,18 +1008,18 @@ built but not written to a terminal) on this machine:
 CPU:      AMD Ryzen 5 5600X 6-Core Processor (12 logical cores)
 Threads:  12 (Numba's tbb threading layer)
 System:   Linux 7.2.7-arch1-1 (x86_64)
-Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.8.0
+Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.8.1
 Frames:   180x50 cells, sextant glyphs, truecolor; median of 40 frames, ms
 
 scene        objects    tris   first          render      draw_frame  render_updates    total    fps  KB out
-dice               3      36     6.6            2.59            0.49            0.22     3.29  303.8    29.5
-dice-sun           4      38     8.5            4.49            0.53            0.27     5.30  188.8    38.7
-dice-lamp          4      38     7.4            4.53            0.53            0.32     5.40  185.2    46.4
-dice-glass         4      38    12.7            6.72            0.55            0.31     7.58  131.9    45.1
-dice-mirror        4      38    10.3            7.17            0.53            0.32     8.03  124.5    45.6
-balls-400        400  140800    19.2           12.82            0.68            0.52    14.02   71.3    76.2
-sphere-3k          1    2976     4.5            2.34            0.44            0.06     2.84  351.8     2.1
-sphere-27k         1   27360    13.0            3.77            0.44            0.06     4.28  233.4     1.7
+dice               3      36     6.6            2.53            0.48            0.22     3.23  309.3    29.5
+dice-sun           4      38     8.2            4.43            0.53            0.27     5.24  191.0    38.7
+dice-lamp          4      38     7.7            4.48            0.53            0.32     5.33  187.5    46.4
+dice-glass         4      38    11.2            6.64            0.54            0.31     7.49  133.5    45.1
+dice-mirror        4      38    10.1            7.12            0.53            0.32     7.99  125.2    45.6
+balls-400        400  140800    18.9           12.73            0.67            0.53    13.97   71.6    76.2
+sphere-3k          1    2976     4.4            2.30            0.43            0.06     2.81  356.4     2.1
+sphere-27k         1   27360    13.1            3.77            0.44            0.06     4.28  233.6     1.7
 ```
 
 `render` is `Renderer.render` (projecting, rasterizing and shading, shadow maps included),
@@ -1044,7 +1045,7 @@ resizing as it goes, and draws it from thousands of random cameras, to check tha
 <details>
 <summary><h3 id="first-run">First run</h3></summary>
 
-Numba compiles the renderer the first time it is used. Compiling its 23 kernels one after another
+Numba compiles the renderer the first time it is used. Compiling its 28 kernels one after another
 takes 30 to 40 seconds, so `compile_kernels()` compiles them in several Python processes at once
 (up to six, each using about 300 MB while it works), which takes about 10 seconds on a 6-core
 machine. The result is cached (in `__pycache__` beside the code, or a user cache folder if that
@@ -1100,7 +1101,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 |-----------------|------|
 | `scene.py`      | `Camera`, `Node`, `Object3D`, `Model` (and, from their own modules, `Light`, `PointLight`, `Renderer`, `Pick`) |
 | `lights.py`     | `Light`, `PointLight`, and their packing for the kernels |
-| `renderer.py`   | `Renderer`: packs the scene, projects and culls it, multisampling with extra edge samples, see-through layers, fog, outlines, background, picking |
+| `renderer.py`   | `Renderer`: packs the scene, projects and culls it, multisampling with extra edge samples, see-through layers, fog, outlines, background, picking, `ray`, `project` and `anchor` (where a point lands, for labels) |
 | `shading.py`    | shading kernels: lighting and materials, resolving samples into pixels, blending see-through layers, fog and outlines |
 | `shadows.py`    | shadow maps: drawing them (for directional and point lights) and looking them up while shading |
 | `mirrors.py`    | mirrors: the extra passes that draw what flat reflective objects show |
@@ -1116,10 +1117,11 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `shapes.py`     | mesh builders: `text_mesh` (extruded text in any bitmap font), `bitmap_mesh`, `blob_mesh` (ellipsoid), `block_mesh`, `pillow_mesh` (a 2D shape puffed into a cushion), `merge_meshes` |
 | `color.py`      | sRGB/linear conversion, named `Color`s, OKLab palette matching, dithering, SGR colour codes |
 | `glyphs.py`     | glyph sets (half, quad, sextant, ascii) and matching pixels to cells |
-| `terminal.py`   | `Screen` (cell grid, text, frames, diffed output, held keys), `run`, `compile_kernels`, command-line display flags |
+| `terminal.py`   | `Screen` (cell grid, text, labels, meters, frames, diffed output, held keys), `run`, `compile_kernels`, command-line display flags |
 | `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
 | `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections on F2-F6) |
+| `threads.py`    | `kernel_lock()`, which keeps threads from launching parallel kernels at once where Numba's threading layer can't take it |
 | `precompile.py` | compiling the kernels on several cores at once on the first run (their argument types are in `kernel_signatures.py`) |
 | `kernel_cache.py` | dropping cached kernels compiled with helpers (in other modules) that have since changed |
 | `examples/dice.py`   | pip-textured die, `orientation_showing`, `top_face`, `RollAnimation` (result chosen first, then animated to land on it); Zombie Dice builds its dice on it |
@@ -1140,9 +1142,9 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 For work on the engine itself (see also `CLAUDE.md`):
 
 - `python -m unittest`: the tests.
-- `python -m benchmarks.gallery diff [REV]`: draws 20 reference scenes (a cube, dice in every glyph
+- `python -m benchmarks.gallery diff [REV]`: draws 24 reference scenes (a cube, dice in every glyph
   set and colour mode, glass, shadows, cut-outs, mirrors, a textured floor to the horizon, many
-  balls, the room demo, fog, materials, stretched shapes) with the engine as of a git revision
+  balls, the room demo, fog, materials, stretched shapes, OBJ and glTF models, an orthographic view) with the engine as of a git revision
   (default `HEAD`) and as it is now, and says for each whether it came out identical, within
   rounding, or changed, with pictures of what changed. `save DIR` keeps a set, `compare OLD NEW`
   compares two.

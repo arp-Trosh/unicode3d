@@ -6,11 +6,11 @@ sign, a stained-glass panel, a lamp and pillars, under a sky, drawn in terminal 
 *The room demo, as a terminal shows it: 100x36 cells, each one a character and two colours.*
 
 unicode3d draws 3D scenes in a terminal: textured and lit meshes, shadows from the sun and from lamps,
-glass, mirrors, fog. Rather than choosing characters while it draws, it does what a GPU does: it
-rasterizes the scene into an ordinary image of small pixels, several samples each, and only at the end
-asks which character and pair of colours best stands for each cell's block of pixels. It runs on the CPU, written in
-Python, with the per-pixel work compiled by [Numba](https://numba.pydata.org) and split across
-cores.
+glass, mirrors, fog, and models loaded from glTF and OBJ files, animations included. Rather than
+choosing characters while it draws, it does what a GPU does: it rasterizes the scene into an
+ordinary image of small pixels, several samples each, and only at the end asks which character and
+pair of colours best stands for each cell's block of pixels. It runs on the CPU, written in Python,
+with the per-pixel work compiled by [Numba](https://numba.pydata.org) and split across cores.
 
 This article follows a frame from the scene to the escape sequences sent to the terminal, and explains
 the choices made along the way. All the pictures are real output, produced by
@@ -292,6 +292,20 @@ notices the flipped handedness and flips which side of each face counts as the f
 *A plank, a tall box and an egg made from a cube and a sphere; a die with a negative scale (its pips
 mirrored); and a box turned inside a stretched group, which shears it.*
 
+## Models from files
+
+`load_model` reads glTF 2.0 (`.gltf` or `.glb`) and Wavefront OBJ with its MTL materials. glTF's
+binary buffers go straight into numpy arrays, so it loads quickly. A file's node hierarchy becomes
+the scene graph's nodes, and a mesh used by several nodes stays one mesh, packed once. Materials in
+glTF are physically based (a base colour, roughness, metalness), and are mapped onto the renderer's
+simpler ones: rough surfaces get no highlights and smooth ones tight, bright ones; metal reflects,
+much less when rough. A file that uses something the loader can't read correctly, such as compressed meshes, is refused with an error naming it, rather than
+drawn wrong; smaller problems, like a missing texture, become warnings and the rest loads.
+
+A glTF file's animations become clips: keyframe tracks of position, rotation and scale (linear,
+stepped or spline), all on one clock, moving the model's nodes. A door swings on its hinge node and
+everything hanging from it follows.
+
 ## Orthographic views
 
 An orthographic camera (isometric and top-down games, board games) shows things the same size however far
@@ -358,12 +372,12 @@ sextants (360x150 pixels), drawing a frame and building its terminal update take
 
 | scene | triangles | ms a frame |
 |-------|----------:|-----------:|
-| three textured dice | 36 | 3.7 |
-| the same with a sun casting shadows (redrawn every frame) | 38 | 6.3 |
-| the same in glass | 38 | 9.4 |
-| the same on a mirror floor | 38 | 10.0 |
-| a smooth sphere | 27,360 | 5.3 |
-| 400 separate balls | 140,800 | 20.3 |
+| three textured dice | 36 | 3.2 |
+| the same with a sun casting shadows (redrawn every frame) | 38 | 5.2 |
+| the same in glass | 38 | 7.5 |
+| the same on a mirror floor | 38 | 8.0 |
+| a smooth sphere | 27,360 | 4.3 |
+| 400 separate balls | 140,800 | 14.0 |
 | the room demo, with everything, while turning | | 16 |
 
 Cost follows the pixel count first and the triangle count second. Terminals take longer to show a
@@ -374,8 +388,8 @@ machine it ran on.
 
 *400 separate objects, 140,800 triangles.*
 
-Compiling is the other cost. Numba compiles on first use and caches the result, but the 24 kernels
-take about 40 seconds to compile one after another, and Numba compiles one function at a time.
+Compiling is the other cost. Numba compiles on first use and caches the result, but the 28 kernels
+take about 35 seconds to compile one after another, and Numba compiles one function at a time.
 Because the cache is shared on disk, the first run instead starts several Pythons, each compiling a
 share of the kernels (their argument types are recorded in advance in `kernel_signatures.py`), and
 then loads them all from the cache: about 10 seconds on six cores. Numba updates a kernel's cache
@@ -387,7 +401,7 @@ was given, and compiles the helpers they call without caching them.
 Unit tests check properties: the nearer object wins, shadows darken what they fall on, the frame is
 the same on any number of threads. They survive deliberate changes to the look, which is their
 strength, and they can miss an accidental one. So there is also `python -m benchmarks.gallery diff`,
-which renders twenty reference scenes (every feature, every glyph set and colour mode) with the
+which renders 24 reference scenes (every feature, every glyph set and colour mode) with the
 engine as of a git revision and as it is now. For each scene it reports "identical", "within
 tolerance" (rounding), or what changed, and saves pictures of the difference. A refactor should come
 out identical. A new feature should change only the scenes it touches, which can be checked before it
@@ -398,8 +412,9 @@ is committed rather than noticed later in a demo.
 This is a software renderer, so it has a ceiling. Every visible triangle costs CPU time, and past a
 few hundred thousand triangles a frame, frames slow down in proportion. Transparency keeps a fixed
 number of layers a pixel, so a fifth pane of glass in line is dropped. Shadow maps are a fixed size
-over the whole scene, so a sun over a large world gives coarse shadows. Mip levels are chosen per
-triangle (see above). And the terminal is the final limit: two colours a cell, and whatever font and
+over the whole scene, so a sun over a large world gives coarse shadows. Models play only what moves
+their nodes: skinned characters stand in the pose they were loaded in, and normal maps aren't read.
+And the terminal is the final limit: two colours a cell, and whatever font and
 colour depth it has.
 
 Inside those limits, the approach holds up: treat the cell as a tiny two-colour display, render the
