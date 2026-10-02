@@ -11,7 +11,7 @@ import numpy as np
 from .lights import Light, PointLight, _vec3
 from .mesh import Mesh
 from .renderer import Anchor, Pick, Renderer
-from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3
+from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3, world_matrix
 
 __all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer", "union_bounds"]
 
@@ -81,18 +81,7 @@ class _Placed:
         """(linear (3, 3), position (3,), visible) in the world, through all parents: a point p of the mesh is
         at linear @ p + position. linear is the rotations and scales along the way, in one matrix; an object is
         visible only if it and all its parents are."""
-        linear = quat_to_matrix(self.rotation) * scale3(self.scale)
-        position, visible = np.asarray(self.position, dtype=float), bool(self.visible)
-        node, seen = self.parent, 0
-        while node is not None:
-            turn = quat_to_matrix(node.rotation) * scale3(node.scale)
-            position = np.asarray(node.position, dtype=float) + turn @ position
-            linear = turn @ linear
-            visible = visible and bool(node.visible)
-            node, seen = node.parent, seen + 1
-            if seen > 1000:
-                raise ValueError("scene graph has a cycle: an object is its own ancestor")
-        return linear, position, visible
+        return world_matrix(self)
 
     def world_transform(self):
         """(position (3,), rotation quaternion (4,), scale, visible) in the world, through all parents.

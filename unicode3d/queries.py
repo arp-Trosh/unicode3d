@@ -29,7 +29,7 @@ from numba import njit, prange
 
 from .renderer import _rotations
 from .threads import kernel_lock
-from .transforms import quat_to_matrix, scale3
+from .transforms import quat_to_matrix, scale3, world_matrix
 
 LEAF_SIZE = 4     # triangles in a leaf of a tree, at most (unless they can't be split)
 BINS = 16         # candidate split planes a node tries along its longest axis
@@ -768,23 +768,6 @@ def _limit(value):
     return value if value > 0.0 else 0.0
 
 
-def _node_matrix(node, known):
-    """(linear, position) of a node in the world, through its parents, as world_matrix() gives them; known holds
-    those already worked out, by id, and gets this one's and its parents'."""
-    chain = []
-    while node is not None and id(node) not in known:
-        chain.append(node)
-        node = node.parent
-        if len(chain) > 1000:
-            raise ValueError("scene graph has a cycle: an object is its own ancestor")
-    lin, pos = known[id(node)] if node is not None else (np.eye(3), np.zeros(3))
-    for node in reversed(chain):
-        pos = pos + lin @ np.asarray(node.position, dtype=float)
-        lin = lin @ (quat_to_matrix(node.rotation) * scale3(node.scale))
-        known[id(node)] = (lin, pos)
-    return lin, pos
-
-
 def _quiet(method):
     """method, run under np.errstate(all="ignore"): bad numbers give no hit or contact rather than a warning (which
     would be printed over the picture), as in Renderer.render()."""
@@ -827,7 +810,7 @@ class Colliders:
         """Read where the objects are now (and pick up objects added to or taken out of `objects`)."""
         self.objects = list(_parts(self.objects))
         objects, trees, tree_of, inst_tree, where, turn, scale, placed_by = [], [], {}, [], [], [], [], []
-        parents = {}  # id(node): its (linear, position) in the world, worked out once for all its children
+        parents = {}  # id(node): its pose in the world (world_matrix), worked out once for all its children
         for obj in self.objects:
             mesh = getattr(obj, "mesh", None)
             if mesh is None:
@@ -836,7 +819,7 @@ class Colliders:
             if not len(tree.tri):
                 continue
             if obj.parent is not None:
-                placed_by.append((len(where), _node_matrix(obj.parent, parents)))
+                placed_by.append((len(where), world_matrix(obj.parent, parents)[:2]))
             where.append(obj.position)
             turn.append(obj.rotation)
             sc = obj.scale

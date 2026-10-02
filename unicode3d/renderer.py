@@ -21,7 +21,7 @@ from .shading import blend, post_effects, resolve
 from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
-from .transforms import normalize, perspective, scale3, view_axes
+from .transforms import normalize, perspective, scale3, view_axes, world_matrix
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
@@ -420,7 +420,7 @@ class Renderer(ShadowMaps, Mirrors):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and
         position), colours, materials, flags and ids (render-list index + 1). Packs the meshes afresh if the set
         of meshes has changed."""
-        meshes, mesh_of, keys = [], {}, []
+        meshes, mesh_of, keys, known = [], {}, [], {}  # known: world poses worked out, by node id
         mesh_idx, pos, quat, scale, placed_by, rgb, double, ident, emissive, cast, alpha, shine, spec, shiny = (
             [], [], [], [], [], [], [], [], [], [], [], [], [], [])
         for i, obj in enumerate(objects):
@@ -435,7 +435,7 @@ class Renderer(ShadowMaps, Mirrors):
                 p, q, sc = obj.position, obj.rotation, obj.scale
                 sc = (sc, sc, sc) if isinstance(sc, (int, float, np.number)) else tuple(scale3(sc))
             else:
-                linear, p, visible = obj.world_matrix()
+                linear, p, visible = world_matrix(obj, known)  # (each shared parent once)
                 if not visible:
                     continue
                 q, sc = _NO_TURN, (1.0, 1.0, 1.0)

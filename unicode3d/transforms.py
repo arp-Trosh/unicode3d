@@ -144,3 +144,25 @@ def scale3(scale):
     if s.shape != (3,):
         raise ValueError(f"scale must be a number or three numbers (x, y, z), not {scale!r}")
     return s
+
+
+def world_matrix(node, known=None):
+    """(linear (3, 3), position (3,), visible) of a node in the world, through all its parents (see
+    Node.world_matrix). known, a dict, holds those already worked out, by id, and gets this node's and its
+    parents': passing one dict for many nodes works out each shared parent once."""
+    chain = []
+    while node is not None and (known is None or id(node) not in known):
+        chain.append(node)
+        node = node.parent
+        if len(chain) > 1000:
+            raise ValueError("scene graph has a cycle: an object is its own ancestor")
+    lin, pos, visible = known[id(node)] if node is not None else (np.eye(3), np.zeros(3), True)
+    for node in reversed(chain):
+        pos = pos + lin @ np.asarray(node.position, dtype=float)
+        scale = node.scale
+        turn = quat_to_matrix(node.rotation)
+        lin = lin @ (turn * float(scale) if isinstance(scale, (int, float)) else turn * scale3(scale))
+        visible = visible and bool(node.visible)
+        if known is not None:
+            known[id(node)] = (lin, pos, visible)
+    return lin, pos, visible
