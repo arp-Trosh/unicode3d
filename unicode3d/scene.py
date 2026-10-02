@@ -10,23 +10,58 @@ import numpy as np
 
 from .lights import Light, PointLight, _vec3
 from .mesh import Mesh
-from .renderer import Pick, Renderer
+from .renderer import Anchor, Pick, Renderer
 from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3
 
-__all__ = ["Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer"]
+__all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer", "union_bounds"]
+
+
+ORTHO_BACK = 1e5  # how far back, in view sizes, the eye an orthographic view is drawn from sits (see Camera)
 
 
 @dataclass
 class Camera:
+    """Where the scene is seen from: a camera at `position` looking at `target`, with `up` towards the top of the
+    picture.
+
+    projection "perspective" (the default) shows things smaller further off, in a view `fov` degrees tall;
+    "ortho" (orthographic) shows them the same size however far off, in a view `size` units of the world tall, as
+    in isometric and top-down games, board games and technical drawings. Either shows what is between `near` and
+    `far` in front of the camera.
+    """
     position: np.ndarray = _vec3(0.0, 0.0, 5.0)
     target: np.ndarray = _vec3(0.0, 0.0, 0.0)
     up: np.ndarray = _vec3(0.0, 1.0, 0.0)
-    fov: float = 50.0  # vertical, degrees
+    fov: float = 50.0  # vertical, degrees (perspective)
     near: float = 0.1
     far: float = 100.0
+    projection: str = "perspective"  # or "ortho"
+    size: float = 10.0  # how tall the view is in the world (ortho)
+
+    def __post_init__(self):
+        if self.projection not in ("perspective", "ortho"):
+            raise ValueError(f'projection must be "perspective" or "ortho", not {self.projection!r}')
 
     def view_matrix(self):
         return look_at(self.position, self.target, self.up)
+
+    def drawn_as(self):
+        """(the perspective camera the renderer draws this one as, how far behind this one it is). An orthographic
+        view is a perspective one seen from far back (ORTHO_BACK view sizes, and its depth as far again) through a
+        narrow angle: what is size tall at `position` fills the picture, near and far are moved back with it, and
+        the sizes of things differ with distance by a hundred-thousandth at most, far under a pixel. So every part
+        of drawing works for both; only distances from the eye (fog, outlines, pick(), ray()) are measured from
+        `position` instead. A perspective camera is drawn as it is, from 0 behind."""
+        if self.projection != "ortho":
+            return self, 0.0
+        with np.errstate(all="ignore"):
+            size, near, far = (float(v) for v in (self.size, self.near, self.far))
+            back = ORTHO_BACK * (abs(size) + abs(far) + abs(near) + 1.0)
+            position = np.asarray(self.position, dtype=float)
+            forward = np.asarray(self.target, dtype=float) - position
+            forward = forward / np.sqrt(forward @ forward)
+            fov = float(np.degrees(2.0 * np.arctan(size / 2.0 / back)))
+        return Camera(position - forward * back, self.target, self.up, fov, near + back, far + back), back
 
 
 class _Placed:
@@ -117,6 +152,35 @@ class Object3D(_Placed):
     shininess: float = None  # how tight its highlights are (the Blinn-Phong exponent): about 5 is broad and soft,
                              # 100 a pin-point, as on chrome; None takes each light's `shininess`
 
+    def world_bounds(self):
+        """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
+        its parents: to put a label just above it, or frame a camera on it. None if there is nothing to box (no
+        vertices, or a pose that isn't finite). Vertices at NaN or infinity are left out."""
+        v = _finite_vertices(self.mesh)
+        if not len(v):
+            return None
+        linear, position, _ = self.world_matrix()
+        with np.errstate(all="ignore"):
+            v = v @ linear.T + position
+            lo, hi = v.min(axis=0), v.max(axis=0)
+        if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
+            return None
+        return lo, hi
+
+
+def _finite_vertices(mesh):
+    """The mesh's vertices that are finite, as floats (V, 3), cached like Mesh.bounds() (until vertices is
+    replaced)."""
+    if mesh is None:
+        return np.zeros((0, 3))
+    cached = mesh.__dict__.get("_finite_vertices")
+    if cached is not None and cached[0] is mesh.vertices:
+        return cached[1]
+    v = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3)
+    v = v[np.isfinite(v).all(axis=1)]
+    mesh._finite_vertices = (mesh.vertices, v)
+    return v
+
 
 @dataclass
 class Model:
@@ -145,6 +209,11 @@ class Model:
 
     def __len__(self):
         return len(self.objects)
+
+    def world_bounds(self):
+        """The corners (low (3,), high (3,)) of the box around the model's parts as they stand in the world (see
+        Object3D.world_bounds); None if there is nothing to box."""
+        return union_bounds(self.objects)
 
     def bounds(self):
         """The corners (low (3,), high (3,)) of the box around the model's parts, in root's own space (as if root
@@ -176,3 +245,13 @@ class Model:
         linear = quat_to_matrix(self.root.rotation) * scale3(self.root.scale)
         self.root.position = -(linear @ ((lo + hi) / 2.0))
         return self
+
+
+def union_bounds(objects):
+    """The corners (low (3,), high (3,)) of the box around several objects (Object3Ds or Models) as they stand in
+    the world; None if there is nothing to box."""
+    boxes = [box for obj in objects for box in ([obj.world_bounds()] if hasattr(obj, "mesh") else
+                                                    [part.world_bounds() for part in obj]) if box is not None]
+    if not boxes:
+        return None
+    return np.min([lo for lo, _ in boxes], axis=0), np.max([hi for _, hi in boxes], axis=0)

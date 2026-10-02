@@ -14,7 +14,10 @@ Newer things to find: a bench of balls in different materials (rubber, paint,
 gold, pearl) beside an egg (a sphere, stretched), a table and bench built from
 stretched cubes, a door that swings open as you come near (keyframe animation,
 overshooting as it opens), dice bobbing in their case, and an orrery turning on
-looping tracks.
+looping tracks. You bump into things and slide along them: the walker is a
+capsule pushed out of whatever it walks into (Colliders), the door too until it
+has swung open. N puts names over the things nearby (labels anchored to points
+in the scene, hidden behind whatever is in front of them).
 
 Walking feels best in a terminal that reports key releases (kitty, foot,
 Ghostty, WezTerm, Alacritty, iTerm2, Windows Terminal): elsewhere a held key is
@@ -33,6 +36,7 @@ from ..color import Color
 from ..keys import Key, MouseEvent
 from ..mesh import Mesh, make_box
 from ..scene import Camera, Light, Node, Object3D, PointLight, Renderer
+from ..queries import Colliders
 from ..shapes import blob_mesh, block_mesh, text_mesh
 from ..terminal import add_display_args, display_options, run
 from ..transforms import UP, quat_axis_angle, quat_mul
@@ -43,10 +47,14 @@ WALL_HEIGHT = 3.5
 DIE_SIZE = 0.34      # of the dice in the glass case
 EYE = 1.6
 RADIUS = 0.35        # how close the walker gets to walls and things
+KNEE = 0.45          # the height of the walker's lowest point, plus RADIUS: what they step over
 WALK, TURN, LOOK = 3.0, 1.8, 1.2  # units a second, radians a second
 MIST = (225, 228, 232)  # the fog's colour when it is mist rather than the background
 DOOR_AT = np.array([0.85, 0.0, 1.0])  # the door's hinge; it is 1.1 wide, along +x
 DOOR_NEAR = 2.3      # how close the walker comes before the door opens
+TAG_REACH = 10.0     # how near things are to have their names shown (the Names toggle)
+TAG_LIFT = 0.15      # how far above the top of a thing its name is
+TAG_GAP = 0.5        # objects of one name nearer each other than this are named once, as one thing
 
 FONT = {  # 5 rows a letter, for the sign on the north wall
     "U": ["#...#", "#...#", "#...#", "#...#", ".###."],
@@ -207,7 +215,8 @@ class Courtyard:
         rng = np.random.default_rng(seed)
         self.names = {}   # id(object) -> what the crosshair calls it
         self.objects = []
-        self.obstacles = []  # (x, z, radius) the walker can't enter
+        self.solid = Colliders()  # what the walker can't walk into (see blocked)
+        self.groups = {}  # what the crosshair calls things -> the objects it calls that
 
         # Textures cover a whole wall or the floor, so their patterns repeat inside them: a stretch of
         # plaster four times along each wall, and metre-wide floor tiles.
@@ -218,11 +227,11 @@ class Courtyard:
                  "the courtyard")
         for x, z in ((-HALF + 0.6, -HALF + 0.6), (HALF - 0.6, -HALF + 0.6), (-HALF + 0.6, HALF - 0.6), (HALF - 0.6, HALF - 0.6)):
             self.add(Object3D(block_mesh((x, WALL_HEIGHT / 2 + 0.3, z), (0.8, WALL_HEIGHT + 0.6, 0.8)), color=(170, 160, 150),
-                              specular=0.1), "a pillar", (x, z, 0.6))
+                              specular=0.1), "a pillar")
         box = make_box()  # one cube, stretched (scale=(x, y, z)) into the table's parts, the bench, the door
 
         # Dice turning slowly on a pedestal.
-        self.add(Object3D(block_mesh((-4.0, 0.5, -3.0), (1.2, 1.0, 1.2)), color=(90, 90, 110)), "a pedestal", (-4.0, -3.0, 0.9))
+        self.add(Object3D(block_mesh((-4.0, 0.5, -3.0), (1.2, 1.0, 1.2)), color=(90, 90, 110)), "a pedestal")
         # Small enough that, turning, they keep inside the glass case below and clear of each other.
         die = make_die(DIE_SIZE)
         self.dice = [Object3D(die, np.array([-4.0 + dx, 1.0 + DIE_SIZE / 2, -3.0 + dz]), orientation_showing(i, 0.0),
@@ -242,14 +251,14 @@ class Courtyard:
         self.orrery = Node(position=np.array([3.5, 1.4, -3.5]))
         self.planet_orbit = Node(parent=self.orrery)
         self.moon_orbit = Node(position=np.array([1.4, 0.0, 0.0]), parent=self.planet_orbit)
-        self.add(Object3D(block_mesh((3.5, 0.35, -3.5), (0.9, 0.7, 0.9)), color=(120, 100, 80)), "the orrery's stand",
-                 (3.5, -3.5, 1.0))
+        self.add(Object3D(block_mesh((3.5, 0.35, -3.5), (0.9, 0.7, 0.9)), color=(120, 100, 80)), "the orrery's stand")
         self.add(Object3D(blob_mesh((0.3, 0.3, 0.3), rings=12, segments=16), color=(255, 190, 60), emissive=1.0,
                           parent=self.orrery), "the orrery's sun")
         self.add(Object3D(blob_mesh((0.16, 0.16, 0.16), rings=10, segments=14), color=Color.BLUE, parent=self.moon_orbit,
-                          specular=1.2, shininess=30.0), "a planet")
+                          specular=1.2, shininess=30.0), "a planet", solid=False)  # (it would sweep the walker aside)
         self.moon = Node(position=np.array([0.35, 0.0, 0.0]), parent=self.moon_orbit)
-        self.add(Object3D(blob_mesh((0.06, 0.06, 0.06)), color=(200, 200, 200), parent=self.moon, specular=0.0), "its moon")
+        self.add(Object3D(blob_mesh((0.06, 0.06, 0.06)), color=(200, 200, 200), parent=self.moon, specular=0.0), "its moon",
+                 solid=False)
         # They turn on looping tracks: keyframes a third of a turn apart, blended at a steady rate (slerp).
         self.orbits = [Animation(self.planet_orbit, rotation=turning(UP, 12.6)),
                        Animation(self.moon_orbit, rotation=turning(UP, 3.7))]
@@ -258,7 +267,7 @@ class Courtyard:
         # colours on it. Its top is lacquered: a strong, tight highlight.
         self.table = Node(position=np.array([-3.5, 0.0, 3.5]), rotation=quat_axis_angle(UP, 0.4))
         self.add(Object3D(box, np.array([0.0, 0.8, 0.0]), scale=(2.0, 0.1, 1.2), color=(140, 90, 50), specular=1.8,
-                          shininess=45.0, parent=self.table), "a lacquered table", (-3.5, 3.5, 1.2))
+                          shininess=45.0, parent=self.table), "a lacquered table")
         for lx in (-0.9, 0.9):
             for lz in (-0.5, 0.5):
                 self.add(Object3D(box, np.array([lx, 0.4, lz]), scale=(0.08, 0.8, 0.08), color=(110, 70, 40),
@@ -273,13 +282,12 @@ class Courtyard:
         # A slowly turning blob in rainbow vertex colours.
         self.blob = Object3D(rainbow_blob(), np.array([3.5, 1.3, 3.5]), scale=0.8, color=(255, 255, 255), specular=1.5,
                              shininess=35.0)
-        self.add(Object3D(block_mesh((3.5, 0.2, 3.5), (1.0, 0.4, 1.0)), color=(80, 80, 80), specular=0.2), "a plinth",
-                 (3.5, 3.5, 0.8))
+        self.add(Object3D(block_mesh((3.5, 0.2, 3.5), (1.0, 0.4, 1.0)), color=(80, 80, 80), specular=0.2), "a plinth")
         self.add(self.blob, "a rainbow blob")
 
         # A lamp by the west wall: a glowing bulb, and the light it gives.
         self.lamp_at = np.array([-6.5, 2.3, 0.0])
-        self.add(Object3D(block_mesh((-6.5, 1.1, 0.0), (0.12, 2.2, 0.12)), color=(60, 60, 60)), "a lamp", (-6.5, 0.0, 0.4))
+        self.add(Object3D(block_mesh((-6.5, 1.1, 0.0), (0.12, 2.2, 0.12)), color=(60, 60, 60)), "a lamp")
         self.bulb = Object3D(blob_mesh((0.18, 0.18, 0.18)), self.lamp_at, color=(255, 225, 160), emissive=1.0,
                              cast_shadows=False)  # it would shadow everything from the light inside it
         self.add(self.bulb, "a lamp")
@@ -288,20 +296,18 @@ class Courtyard:
         # sunlight dapples the ground through it.
         tree = Node(position=np.array([5.5, 0.0, 0.2]))
         self.add(Object3D(block_mesh((0.0, 0.9, 0.0), (0.22, 1.8, 0.22)), color=(95, 70, 45), parent=tree,
-                          specular=0.0), "a tree", (5.5, 0.2, 0.4))
+                          specular=0.0), "a tree")
         for i in range(3):
             self.add(Object3D(picture(2.4, 2.0, leaves(rng), i * np.pi / 3), np.array([0.0, 1.5, 0.0]),
-                              color=(255, 255, 255), parent=tree), "a tree")
+                              color=(255, 255, 255), parent=tree), "a tree", solid=False)  # (leaves: walk through)
         crown = picture(2.4, 2.4, leaves(rng, count=140))  # and one lying flat on top
         crown.vertices = crown.vertices - (0, 1.2, 0)
         self.add(Object3D(crown, np.array([0.0, 2.9, 0.0]), quat_axis_angle((1, 0, 0), -np.pi / 2),
-                          color=(255, 255, 255), parent=tree), "a tree")
+                          color=(255, 255, 255), parent=tree), "a tree", solid=False)
 
         # A trellis between the lamp and the middle, whose lattice the lamp throws across the ground.
         self.add(Object3D(picture(2.6, 1.9, lattice(), np.pi / 2), np.array([-4.2, 0.0, 0.0]), color=(255, 255, 255)),
                  "a trellis")
-        for z in (-1.0, 0.0, 1.0):
-            self.obstacles.append((-4.2, z, 0.3))
 
         # A stained-glass panel in a frame, turned to face the sun (see Walk.frame): its colours fall on the
         # ground behind it.
@@ -311,7 +317,7 @@ class Courtyard:
         for side in (-0.73, 0.73):
             post = at + side * np.array([np.cos(turn), 0.0, -np.sin(turn)])
             self.add(Object3D(block_mesh((post[0], 1.0, post[2]), (0.06, 2.0, 0.06)), color=(70, 55, 40)),
-                     "a stained-glass panel", (post[0], post[2], 0.3))
+                     "a stained-glass panel")
 
         # A mirror on the south wall, in a frame: turn round at the start to see the courtyard behind you.
         mirror = Mesh(np.array([(3.0, 0.4, 0.0), (-3.0, 0.4, 0.0), (-3.0, 3.0, 0.0), (3.0, 3.0, 0.0)], float),
@@ -326,15 +332,16 @@ class Courtyard:
         water = Mesh(np.array([(-pool, 0.12, -pool), (-pool, 0.12, pool), (pool, 0.12, pool), (pool, 0.12, -pool)]),
                      np.array([(0, 1, 2), (0, 2, 3)]))
         self.add(Object3D(water, pool_at, color=(40, 70, 80), reflectivity=0.6), "a pool")
+        # The rim is low enough to step over, so a box the walker can't walk into stands in for the pool: in the
+        # Colliders, not drawn.
+        self.solid.objects.append(Object3D(block_mesh(pool_at + (0.0, 0.5, 0.0), (2 * pool + 0.4, 1.0, 2 * pool + 0.4))))
         for dx, dz, w, d in ((0, -pool - 0.1, 2 * pool + 0.4, 0.2), (0, pool + 0.1, 2 * pool + 0.4, 0.2),
                              (-pool - 0.1, 0, 0.2, 2 * pool), (pool + 0.1, 0, 0.2, 2 * pool)):
             self.add(Object3D(block_mesh((pool_at[0] + dx, 0.15, pool_at[2] + dz), (w, 0.3, d)), color=(150, 145, 135),
                               specular=0.1), "a pool")
-        self.obstacles.append((*pool_at[[0, 2]], pool + 0.3))
 
         # A chrome ball on a plinth, reflecting the sky.
-        self.add(Object3D(block_mesh((-7.0, 0.45, -7.0), (0.9, 0.9, 0.9)), color=(80, 80, 90)), "a plinth",
-                 (-7.0, -7.0, 0.8))
+        self.add(Object3D(block_mesh((-7.0, 0.45, -7.0), (0.9, 0.9, 0.9)), color=(80, 80, 90)), "a plinth")
         self.add(Object3D(blob_mesh((0.55, 0.55, 0.55), rings=24, segments=32), np.array([-7.0, 1.45, -7.0]),
                           color=(230, 230, 235), reflectivity=0.85, specular=2.5, shininess=150.0), "a chrome ball")
 
@@ -343,7 +350,7 @@ class Courtyard:
         # it, an egg: a sphere stretched taller than it is wide.
         bench = Node(position=np.array([7.0, 0.0, -7.6]))
         self.add(Object3D(box, np.array([0.0, 0.55, 0.0]), scale=(2.8, 0.12, 0.7), color=(120, 85, 55), specular=0.3,
-                          parent=bench), "a bench", (7.0, -7.6, 1.5))
+                          parent=bench), "a bench")
         for x in (-1.25, 1.25):
             self.add(Object3D(box, np.array([x, 0.25, 0.0]), scale=(0.12, 0.5, 0.6), color=(90, 65, 40), parent=bench),
                      "a bench")
@@ -355,8 +362,7 @@ class Courtyard:
                 (0.975, "a pearl", (240, 235, 225), 1.3, 6.0, 0.0)):
             self.add(Object3D(ball, np.array([x, 0.86, 0.0]), color=colour, specular=specular, shininess=shininess,
                               reflectivity=reflect, parent=bench), name)
-        self.add(Object3D(box, np.array([8.9, 0.25, -7.6]), scale=0.5, color=(80, 80, 90), specular=0.2), "a plinth",
-                 (8.9, -7.6, 0.5))
+        self.add(Object3D(box, np.array([8.9, 0.25, -7.6]), scale=0.5, color=(80, 80, 90), specular=0.2), "a plinth")
         self.add(Object3D(blob_mesh((1.0, 1.0, 1.0), rings=24, segments=32), np.array([8.9, 0.86, -7.6]),
                           scale=(0.26, 0.36, 0.26), color=(235, 225, 205), specular=0.8, shininess=15.0),
                  "an egg (a sphere, stretched)")
@@ -366,8 +372,7 @@ class Courtyard:
         hinge = Node(position=DOOR_AT.copy())
         for x, y, size in ((-0.07, 1.15, (0.12, 2.3, 0.16)), (1.17, 1.15, (0.12, 2.3, 0.16)),
                            (0.55, 2.36, (1.36, 0.12, 0.16))):
-            self.add(Object3D(box, DOOR_AT + (x, y, 0.0), scale=size, color=(95, 70, 50), specular=0.3), "a door frame",
-                     (DOOR_AT[0] + x, DOOR_AT[2], 0.12) if y < 2 else None)
+            self.add(Object3D(box, DOOR_AT + (x, y, 0.0), scale=size, color=(95, 70, 50), specular=0.3), "a door frame")
         self.add(Object3D(box, np.array([0.55, 1.15, 0.0]), scale=(1.08, 2.28, 0.07), color=(150, 95, 55), specular=0.6,
                           shininess=20.0, parent=hinge), "a door (to nowhere)")
         for side in (-1, 1):
@@ -379,11 +384,12 @@ class Courtyard:
         sign = rainbow_text("UNICODE3D")
         self.add(Object3D(sign, np.array([0.0, 2.3, -HALF + 0.4]), scale=0.14, color=(255, 255, 255)), "the sign")
 
-    def add(self, obj, name, obstacle=None):
+    def add(self, obj, name, solid=True):
         self.objects.append(obj)
         self.names[id(obj)] = name
-        if obstacle is not None:
-            self.obstacles.append(obstacle)
+        self.groups.setdefault(name, []).append(obj)
+        if solid:
+            self.solid.objects.append(obj)
 
     def animate(self, t):
         """Everything that moves by itself, at time t seconds (the door moves with the walker: see Door)."""
@@ -394,18 +400,39 @@ class Courtyard:
             orbit.apply(t)
         self.blob.rotation = quat_axis_angle((0.3, 1.0, 0.1), 0.3 * t)
 
+    def name_tags(self, eye, reach):
+        """(name, a point just above the thing, its objects) for each thing within reach of eye, to label: over the
+        middle of the top of the box around its objects as they stand now. Objects of one name make one thing where
+        their boxes are within TAG_GAP of each other (a table and its legs, three dice), and one each otherwise
+        (the four pillars)."""
+        tags = []
+        for name, objects in self.groups.items():
+            if name in ("the courtyard", "a mirror"):
+                continue
+            things = []  # [[low, high, objects]], merged as they come near each other
+            for obj in objects:
+                box = obj.world_bounds() if obj.world_matrix()[2] else None
+                if box is None:
+                    continue
+                lo, hi, members = box[0], box[1], [obj]
+                for thing in [t for t in things if (t[0] - TAG_GAP <= hi).all() and (lo <= t[1] + TAG_GAP).all()]:
+                    things.remove(thing)
+                    lo, hi, members = np.minimum(lo, thing[0]), np.maximum(hi, thing[1]), thing[2] + members
+                things.append([lo, hi, members])
+            for lo, hi, members in things:
+                top = np.array([(lo[0] + hi[0]) / 2, hi[1] + TAG_LIFT, (lo[2] + hi[2]) / 2])
+                if np.linalg.norm(top - eye) < reach:
+                    tags.append((name, top, members))
+        return tags
+
     def blocked(self, x, z):
-        """Push a walker at (x, z) out of the walls and the things in the courtyard."""
-        room = HALF - RADIUS
-        x, z = min(max(x, -room), room), min(max(z, -room), room)
-        for ox, oz, r in self.obstacles:
-            dx, dz = x - ox, z - oz
-            d = np.hypot(dx, dz)
-            if d < r + RADIUS:
-                if d < 1e-9:
-                    dx, dz, d = 1.0, 0.0, 1.0
-                x, z = ox + dx / d * (r + RADIUS), oz + dz / d * (r + RADIUS)
-        return x, z
+        """Push a walker at (x, z) out of the walls and the things in the courtyard: a capsule from knee to eye
+        height (clear of the floor), moved out of whatever it cuts into, along the ground. Things that move by
+        themselves, such as the door, push the walker too."""
+        self.solid.update()
+        push = self.solid.push_out((x, KNEE, z), RADIUS, end=(x, EYE, z))
+        room = HALF - RADIUS  # (and never outside the walls, whatever happens)
+        return min(max(x + push[0], -room), room), min(max(z + push[2], -room), room)
 
 
 class Walk:
@@ -420,7 +447,8 @@ class Walk:
         self.background = Choice("Background (b)", tuple(self.backgrounds), key="b")
         self.fog = Slider("Fog", 0.3, 0.0, 0.9, step=0.05, keys="[]", length=8, fmt=lambda v: f"{v:.2f}")
         self.fog_into = Choice("fades into (f)", ("background", "mist"), key="f")
-        self.panel = Panel([self.lamp, self.sun, self.background, self.fog, self.fog_into], keyboard=False)
+        self.tags = Toggle("Names (n)", False, key="n")
+        self.panel = Panel([self.lamp, self.sun, self.background, self.fog, self.fog_into, self.tags], keyboard=False)
         self.x, self.z, self.yaw, self.pitch = 0.0, 5.5, 0.0, 0.0
         self.t = 0.0
         self.clicked = ""
@@ -472,6 +500,9 @@ class Walk:
         fb = self.renderer.render(objects, camera, lights)
         screen.erase()
         screen.draw_frame(fb)
+        if self.tags.value:  # a name over each thing nearby, hidden behind whatever is in front of it
+            for name, point, objects in self.court.name_tags(eye, TAG_REACH):
+                screen.label(self.renderer, point, name, Color.WHITE, owner=objects, dim=True)
         cy, cx = view_rows // 2, cols // 2
         screen.text(cy, cx, "+", Color.WHITE, bold=True)
         hit = self.renderer.pick(cx, cy)

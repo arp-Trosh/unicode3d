@@ -36,6 +36,30 @@ class Pick:
     distance: float
 
 
+@dataclass
+class Anchor:
+    """Where Renderer.anchor found a point in the frame: the cell (x, y, counted from the frame's top-left), how far
+    the point is from the camera, whether something drawn is in front of it, and whether it was off the frame (or
+    behind the camera) and moved to the frame's edge."""
+    x: int
+    y: int
+    distance: float
+    hidden: bool
+    edge: bool
+
+
+LABEL_MARGIN = 0.01  # how much nearer than a point (a fraction of its distance) a surface must be to hide it
+
+
+def _objects_of(owner):
+    """The ids of the objects in owner: an Object3D, a Model, or a list of either (None: none)."""
+    if owner is None:
+        return set()
+    if hasattr(owner, "mesh"):
+        return {id(owner)}
+    return {id(obj) for part in owner for obj in ([part] if hasattr(part, "mesh") else part)}
+
+
 def _mesh_key(mesh):
     """What a packed mesh depends on, compared by identity (see Renderer._scene_state)."""
     return (mesh, mesh.vertices, mesh.faces, mesh.uvs, mesh.materials, mesh.vertex_colors, mesh.face_colors,
@@ -231,6 +255,7 @@ class Renderer(ShadowMaps, Mirrors):
         self._pack = None  # (mesh keys, _pack_meshes() of those meshes) as last drawn
         self._objects = []  # the render list as last drawn, for pick()
         self._eye = self._axes = None  # the camera's position and its pixels' directions (view_axes) then
+        self._ortho = 0.0  # for an orthographic camera, how far behind it the eye it is drawn from is (Camera.drawn_as)
         self._buffers = _Buffers()
         self._shadows = None  # (what the shadow maps depend on, the maps as _shadow_maps() returns them)
         self.resize(width, height)
@@ -275,10 +300,75 @@ class Renderer(ShadowMaps, Mirrors):
         if self.view_proj is None:
             return None
         with np.errstate(all="ignore"):
-            clip = self.view_proj @ np.array([*point, 1.0])
-            if not clip[3] > 1e-6:  # (also NaN)
-                return None
-            return (clip[0] / clip[3] + 1.0) * 0.5 * self.width, (1.0 - clip[1] / clip[3]) * 0.5 * self.height
+            if self._ortho:  # (exactly orthographic, rather than as drawn from far back: see Camera.drawn_as)
+                nx, ny, ahead = self._in_view(np.asarray(point, dtype=float))[:3]
+                if not ahead > 0.0:
+                    return None
+            else:
+                clip = self.view_proj @ np.array([*point, 1.0])
+                if not clip[3] > 1e-6:  # (also NaN)
+                    return None
+                nx, ny = clip[0] / clip[3], clip[1] / clip[3]
+            return (nx + 1.0) * 0.5 * self.width, (1.0 - ny) * 0.5 * self.height
+
+    def _in_view(self, p):
+        """Where world point p is in the last render's view: (x, y in normalized device coordinates, how far ahead
+        of the camera it is, x and y unscaled by distance, distance from the camera). Call under np.errstate."""
+        a = self._axes
+        # (numpy's numbers, not Python's: a division by zero gives inf or NaN rather than an exception)
+        if self._ortho:  # (the view is _ortho from the eye to the camera's plane, a[1] and a[2] wide there)
+            v = p - self._camera_at
+            ahead = v @ a[0]
+            sx, sy = (v @ a[1]) / (a[1] @ a[1]) / self._ortho, (v @ a[2]) / (a[2] @ a[2]) / self._ortho
+            return sx, sy, ahead, sx, sy, ahead
+        v = p - self._eye
+        ahead = v @ a[0]
+        sx, sy = (v @ a[1]) / (a[1] @ a[1]), (v @ a[2]) / (a[2] @ a[2])
+        return sx / ahead, sy / ahead, ahead, sx, sy, np.sqrt(v @ v)
+
+    def anchor(self, point, owner=None, clamp=False):
+        """Where a world point is in the last render's frame, for drawing a label or a bar there (Screen.label): an
+        Anchor, or None before the first render, and for a point behind the camera or outside the frame unless
+        clamp is set, which moves it to the frame's edge instead, in the direction it lies (for markers pointing at
+        things out of view).
+
+        hidden tells whether a surface drawn there is in front of the point (by more than LABEL_MARGIN of its
+        distance and a pixel or two); owner, an object or objects (or a Model) the point belongs to, doesn't count,
+        so a label on an object's own surface isn't hidden by it."""
+        if self.view_proj is None or self.width < 1 or self.height < 1:
+            return None
+        p = np.asarray(point, dtype=float).reshape(-1)
+        if p.shape != (3,):
+            raise ValueError(f"point must be three numbers, not {np.shape(point)}")
+        with np.errstate(all="ignore"):
+            nx, ny, ahead, sx, sy, distance = self._in_view(p)
+            ahead_ok = ahead > 0.0  # (NaN fails)
+            inside = ahead_ok and -1.0 <= nx <= 1.0 and -1.0 <= ny <= 1.0
+            if not inside:
+                if not clamp:
+                    return None
+                if not ahead_ok:
+                    nx, ny = sx, sy  # behind: towards where it lies
+                most = max(abs(nx), abs(ny))
+                if not (most > 0.0 and most < np.inf):
+                    nx, ny, most = 0.0, -1.0, 1.0  # (straight behind, or numbers that aren't finite: the bottom)
+                nx, ny = nx / most, ny / most
+            x = min(max((nx + 1.0) * 0.5 * self.width, 0.0), self.width - 1.0)
+            y = min(max((1.0 - ny) * 0.5 * self.height, 0.0), self.height - 1.0)
+            hidden = False
+            if inside:
+                fb = self.framebuffer
+                pw, ph = self.cell_pixels
+                px = int(min(max((nx + 1.0) * 0.5 * fb.width, 0.0), fb.width - 1.0))
+                py = int(min(max((1.0 - ny) * 0.5 * fb.height, 0.0), fb.height - 1.0))
+                depth = float(fb.depth[py, px])
+                if depth > 0.0 and int(fb.ids[py, px]) > 0:
+                    surface = 1.0 / np.float64(depth) - self._ortho  # how far ahead the surface drawn there is
+                    pixel = 2.0 * self._view_tan[1] * (ahead + self._ortho) / fb.height  # (in the world, there)
+                    if surface < ahead - LABEL_MARGIN * ahead - 2.0 * pixel:
+                        drawn = self._objects[int(fb.ids[py, px]) - 1]
+                        hidden = id(drawn) not in _objects_of(owner)
+        return Anchor(int(x), int(y), float(distance), bool(hidden), not inside)
 
     def ray(self, x, y):
         """(origin, unit direction) in the world of the line of sight through cell (x, y) as of the last
@@ -289,6 +379,9 @@ class Renderer(ShadowMaps, Mirrors):
         nx, ny = x / self.width * 2.0 - 1.0, 1.0 - y / self.height * 2.0
         with np.errstate(all="ignore"):  # (a degenerate camera gives NaN, not an exception)
             a = self._axes
+            if self._ortho:  # parallel rays, from the camera's plane (the eye is _ortho behind it)
+                forward = normalize(a[0])
+                return self._camera_at + self._ortho * (nx * a[1] + ny * a[2]), forward
             return self._eye.copy(), normalize(a[0] + nx * a[1] + ny * a[2])
 
     def pick(self, x, y):
@@ -308,7 +401,10 @@ class Renderer(ShadowMaps, Mirrors):
         # The pixel's centre, at the depth drawn there: 1/w is the distance along the view direction.
         origin, direction = self.ray((x * pw + px + 0.5) / pw, (y * ph + py + 0.5) / ph)
         with np.errstate(all="ignore"):
-            distance = 1.0 / depth[py, px] / max(float(direction @ self._axes[0]), 1e-12)
+            if self._ortho:  # 1/w less what is behind the camera's plane: the distance from that plane
+                distance = 1.0 / depth[py, px] - self._ortho
+            else:
+                distance = 1.0 / depth[py, px] / max(float(direction @ self._axes[0]), 1e-12)
             return Pick(obj, origin + direction * distance, distance)
 
     def invalidate(self):
@@ -437,6 +533,8 @@ class Renderer(ShadowMaps, Mirrors):
             return self._render(objects, camera, lights)
 
     def _render(self, objects, camera, lights):
+        self._camera_at = np.asarray(camera.position, dtype=float).copy()  # (where an orthographic camera's rays start)
+        camera, self._ortho = camera.drawn_as()  # (an orthographic camera is drawn as a perspective one, far back)
         lights = as_lights(lights)
         self._fit()
         self._objects = objects = list(objects)  # (once: objects may be a generator)
@@ -512,7 +610,8 @@ class Renderer(ShadowMaps, Mirrors):
         if layers is not None:
             self._blend_layers(scene, layers, n)
         outline = float(self.outline) if math.isfinite(self.outline) else 0.0  # (NaN would darken edges into NaN)
-        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, outline, *self._haze)
+        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, float(self._ortho), outline,
+                     *self._haze)
 
     def _bins(self, xs, ys, select, want, height, prefix, span=None):
         """The triangles whose kind (select: 0 solid, 1 see-through, 2 cut-out) is among `want` (SOLID, CLEAR

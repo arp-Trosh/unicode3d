@@ -255,10 +255,21 @@ def blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, l
             depth[c], ids[c] = layer_depth[c, shows], ident[tri_inst[layer_tri[c, shows]]]
 
 
+@njit(cache=True, error_model="numpy")
+def _plane_depth(d, offset):
+    """A depth (1/w) measured from the camera's plane rather than from the eye offset behind it: an orthographic
+    view is drawn as a perspective one from far back (see Camera), and its depths count from the plane the camera
+    is on. d itself for a perspective view (offset 0); 0 (empty) stays 0."""
+    if offset == 0.0:
+        return d
+    return 1.0 / (1.0 / d - offset)
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
-def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear, tan_x, tan_y, outline, sky,
+def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear, tan_x, tan_y, offset, outline, sky,
                  sky_colors, sky_basis, sky_faces, sky_texels, sky_levels, sky_first, haze_lod):
-    """Outlines, then fog, applied in place to a framebuffer's arrays (see Renderer for both).
+    """Outlines, then fog, applied in place to a framebuffer's arrays (see Renderer for both). Depths are measured
+    from `offset` in front of the eye (see _plane_depth).
 
     fog_end > 0: fog in the world (background.Fog): each surface fades from fog_start to fog_end, by its
     distance from the eye (tan_x, tan_y: the tangents of half the view's width and height, which give each
@@ -279,13 +290,15 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
         # darkened, so shapes in front keep their full size.
         for y in prange(h):
             for x in range(w):
-                d = depth[y, x]
+                d = _plane_depth(depth[y, x], offset)
                 if alpha[y, x] <= 0:
                     continue
                 edge = (0 < y < h - 1 and alpha[y - 1, x] > 0 and alpha[y + 1, x] > 0
-                        and depth[y - 1, x] + depth[y + 1, x] - 2 * d > 0.08 * d)
+                        and _plane_depth(depth[y - 1, x], offset) + _plane_depth(depth[y + 1, x], offset) - 2 * d
+                        > 0.08 * d)
                 edge = edge or (0 < x < w - 1 and alpha[y, x - 1] > 0 and alpha[y, x + 1] > 0
-                                and depth[y, x - 1] + depth[y, x + 1] - 2 * d > 0.08 * d)
+                                and _plane_depth(depth[y, x - 1], offset) + _plane_depth(depth[y, x + 1], offset)
+                                - 2 * d > 0.08 * d)
                 if edge:
                     rgb[y, x, :] *= 1.0 - outline
     if fog_end > 0.0:
@@ -293,7 +306,7 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
         for y in prange(h):
             ny = (1.0 - (y + 0.5) / h * 2.0) * tan_y
             for x in range(w):
-                a, d = alpha[y, x], depth[y, x]
+                a, d = alpha[y, x], _plane_depth(depth[y, x], offset)
                 if not (a > 0.0 and d > 0.0):
                     continue
                 nx = ((x + 0.5) / w * 2.0 - 1.0) * tan_x
@@ -326,7 +339,8 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
             lo, hi = np.inf, -np.inf
             for x in range(w):
                 if alpha[y, x] > 0 and depth[y, x] > 0:
-                    lo, hi = min(lo, 1.0 / depth[y, x]), max(hi, 1.0 / depth[y, x])
+                    d = _plane_depth(depth[y, x], offset)
+                    lo, hi = min(lo, 1.0 / d), max(hi, 1.0 / d)
             row_near[y], row_far[y] = lo, hi
         near, far = np.inf, -np.inf
         for y in range(h):
@@ -335,4 +349,4 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
         for y in prange(h):
             for x in range(w):
                 if alpha[y, x] > 0 and depth[y, x] > 0:
-                    rgb[y, x, :] *= 1.0 - fog * (1.0 / depth[y, x] - near) / span
+                    rgb[y, x, :] *= 1.0 - fog * (1.0 / _plane_depth(depth[y, x], offset) - near) / span

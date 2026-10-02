@@ -4,7 +4,8 @@
 
 Shows a Wavefront .obj model with its materials and textures (from the .mtl files it names), or a glTF model
 with its own, playing its animations. WASD moves the camera, arrow keys look around, q/e slow down / speed up
-the spin, c makes the model chrome (reflecting a sky), n plays the model's next animation, Esc or Ctrl-C quits.
+the spin, c makes the model chrome (reflecting a sky), o switches between perspective and an orthographic view
+(everything the same size however far off), n plays the model's next animation, Esc or Ctrl-C quits.
 """
 import argparse
 import sys
@@ -67,6 +68,12 @@ class Viewer:
                     0 if self.playing is None else self.playing + 1)
                 if self.playing is not None:
                     self.clips[self.playing].apply(0.0)
+            elif k == ord("o"):  # orthographic, showing the model at the size it has now, or perspective again
+                ortho = self.camera.projection != "ortho"
+                self.camera.projection = "ortho" if ortho else "perspective"
+                if ortho:
+                    distance = float(np.linalg.norm(self.camera.position))
+                    self.camera.size = 2.0 * distance * np.tan(np.radians(self.camera.fov) / 2)
             elif k == ord("c"):  # chrome, with a sky to reflect
                 chrome = self.renderer.background is None
                 for obj, own in zip(self.model, self.reflectivity):
@@ -88,7 +95,8 @@ class Viewer:
         if self.clips:
             name = "none" if self.playing is None else self.clips[self.playing].name
             playing = f"[n] animation: {name} ({0 if self.playing is None else self.playing + 1}/{len(self.clips)})   "
-        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [c] chrome  {playing}[esc] quit   "
+        view = "ortho" if self.camera.projection == "ortho" else "perspective"
+        self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [c] chrome  [o] {view}  {playing}[esc] quit   "
                               f"{sum(len(obj.mesh.faces) for obj in self.model)} tris   "
                               f"cam {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}   spin {self.spin:.2f}")
         screen.refresh()

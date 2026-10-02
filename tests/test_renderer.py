@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import numpy as np
 from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
+from unicode3d.queries import Colliders
 from unicode3d.background import Fog, Gradient, Sky, SkyBox
 from unicode3d.color import (Color, encode_index, encode_rgb, linear_to_srgb, luminance, put_sgr_color, quantize,
                              sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb)
@@ -19,11 +21,11 @@ from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
 from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
-from unicode3d.scene import Camera, Light, Model, Node, Object3D, PointLight, Renderer
+from unicode3d.scene import Camera, Light, Model, Node, Object3D, PointLight, Renderer, union_bounds
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
 from unicode3d.kernel_signatures import KERNELS
 from unicode3d.precompile import missing_kernels, share_out
-from unicode3d.terminal import Screen, compile_kernels
+from unicode3d.terminal import SETTLE_FRAMES, Screen, compile_kernels
 from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
 from unicode3d.animation import (EASINGS, Animation, RotationTrack, Track, ease_in, ease_out,
@@ -234,6 +236,7 @@ class RenderTests(unittest.TestCase):
                   ([Object3D(make_box(), position=np.array([0.0, 0.0, 4.6]))], Light()),  # camera in front of its near face
                   (crowd, lights),
                   (crowd, shadowed)]
+        ortho = Camera(position=np.array([3.0, 3.0, 4.0]), target=np.zeros(3), projection="ortho", size=4.0)
 
         def draw(threads):
             numba.set_num_threads(threads)
@@ -254,6 +257,15 @@ class RenderTests(unittest.TestCase):
                 renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), fog=fog)
                 fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), lights)
                 frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
+            # Through an orthographic camera, with outlines and fog.
+            renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), outline=0.4, fog=Fog(start=3.0, end=8.0))
+            fb = renderer.render(crowd, ortho, shadowed)
+            frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
+            # Ray queries, many at once (a chunk of rays to each thread).
+            rays = np.random.default_rng(9).normal(size=(2, 3000, 3))
+            objects, *arrays = Colliders(crowd).raycast_many(rays[0] * 3.0, rays[1])
+            index = {id(o): i for i, o in enumerate(crowd)}
+            frame += [np.array([index[id(o)] if o is not None else -1 for o in objects]), *arrays]
             return frame
 
         try:
@@ -263,6 +275,25 @@ class RenderTests(unittest.TestCase):
                     np.testing.assert_array_equal(a, b)
         finally:
             numba.set_num_threads(most)
+
+    def test_world_bounds(self):
+        group = Node(position=np.array([1.0, 2.0, 0.0]), rotation=quat_axis_angle((0, 0, 1), np.pi / 2), scale=2.0)
+        plank = Object3D(make_box(), np.array([0.0, 1.0, 0.0]), scale=(3.0, 0.1, 1.0), parent=group)
+        lo, hi = plank.world_bounds()  # 3 long along x, turned upright by the group, then doubled
+        np.testing.assert_allclose(lo, [1.0 - 2.0 - 0.1, 2.0 - 3.0, -1.0], atol=1e-12)
+        np.testing.assert_allclose(hi, [1.0 - 2.0 + 0.1, 2.0 + 3.0, 1.0], atol=1e-12)
+        ball = Object3D(blob_mesh((1.0, 1.0, 1.0)), np.array([5.0, 0.0, 0.0]))
+        lo, hi = union_bounds([plank, Model(Node(), [ball])])
+        np.testing.assert_allclose(lo, [-1.1, -1.0, -1.0], atol=1e-12)
+        np.testing.assert_allclose(hi, [6.0, 5.0, 1.0], atol=1e-12)
+        np.testing.assert_allclose(Model(Node(), [plank, ball]).world_bounds()[1], hi)
+        holed = make_box()
+        holed.vertices = holed.vertices.copy()
+        holed.vertices[0] = np.nan  # left out
+        np.testing.assert_allclose(Object3D(holed).world_bounds()[1], 0.5)
+        self.assertIsNone(Object3D(make_box(), np.array([np.nan, 0.0, 0.0])).world_bounds())
+        self.assertIsNone(Object3D(Mesh(np.zeros((0, 3)), np.zeros((0, 3), int))).world_bounds())
+        self.assertIsNone(union_bounds([]))
 
     def test_parents_move_turn_scale_and_hide_children(self):
         group = Node(position=np.array([1.0, 0.0, 0.0]), rotation=quat_axis_angle((0, 1, 0), np.pi / 2), scale=2.0)
@@ -721,6 +752,128 @@ class RenderTests(unittest.TestCase):
         self.assertIs(renderer.pick(*renderer.project(np.array([-0.8, 0.8, -1.0]))).object, far)
         self.assertIsNone(renderer.pick(0, 0))
         self.assertIsNone(renderer.pick(100, 5))
+
+    def test_orthographic_camera(self):
+        # Things the same size however far off, where an exact orthographic projection puts them.
+        view = Camera(position=np.array([4.0, 3.0, 5.0]), target=np.zeros(3), projection="ortho", size=6.0)
+        renderer = Renderer(80, 40, cell_pixels=(2, 3), outline=0.0, fog=0.0)
+        near, far = (Object3D(make_box(), position=np.array(p)) for p in ((1.5, 0.0, 1.5), (-1.5, 0.0, -1.5)))
+        fb = renderer.render([near, far], view, Light())
+        self.assertAlmostEqual((fb.ids == 1).sum() / (fb.ids == 2).sum(), 1.0, delta=0.02)
+        forward = -np.array([4.0, 3.0, 5.0]) / np.linalg.norm([4.0, 3.0, 5.0])
+        right = np.cross(forward, (0.0, 1.0, 0.0))
+        right /= np.linalg.norm(right)
+        up = np.cross(right, forward)
+        aspect = 80 * renderer.cell_aspect / 40
+        for point in ((0.0, 0.0, 0.0), (1.0, 2.0, -3.0), (-2.0, 0.5, 1.0)):
+            offset = np.array(point) - view.position
+            expected = ((offset @ right / (3.0 * aspect) + 1) * 40, (1 - offset @ up / 3.0) * 20)
+            np.testing.assert_allclose(renderer.project(point), expected, atol=1e-4)  # (a thousandth of a pixel)
+        self.assertIsNone(renderer.project((8.0, 6.0, 10.0)))  # behind the camera
+        # Rays are parallel, from the camera's plane; pick() measures from that plane too.
+        (o1, d1), (o2, d2) = renderer.ray(10, 10), renderer.ray(60, 30)
+        np.testing.assert_allclose(d1, forward, atol=1e-12)
+        np.testing.assert_allclose(d2, forward, atol=1e-12)
+        self.assertAlmostEqual((o1 - view.position) @ forward, 0.0, places=9)
+        np.testing.assert_allclose(o2 - o1, (50 / 40 * 3.0 * aspect) * right - (20 / 20 * 3.0) * up, atol=1e-9)
+        x, y = renderer.project((1.5, 0.0, 2.0))  # the middle of the near box's front face
+        hit = renderer.pick(x, y)
+        self.assertIs(hit.object, near)
+        np.testing.assert_allclose(hit.position, [1.5, 0.0, 2.0], atol=0.2)  # (somewhere in the cell)
+        self.assertAlmostEqual(hit.distance, (hit.position - view.position) @ forward, places=6)
+        self.assertAlmostEqual(np.abs(hit.position - near.position).max(), 0.5, delta=0.03)  # on its surface (to a pixel)
+        # Clicking with a ray query finds what pick() does.
+        self.assertIs(Colliders([near, far]).raycast(*renderer.ray(x, y)).object, near)
+        # What is behind the camera, or nearer than `near`, isn't drawn.
+        view.position = np.array([1.5, 0.0, 1.5]) + 0.2 * np.array([4.0, 3.0, 5.0]) / np.linalg.norm([4.0, 3.0, 5.0])
+        view.target = view.position + forward
+        fb = renderer.render([near, far], view, Light())
+        self.assertFalse((fb.ids == 1).all())
+        self.assertTrue((fb.ids == 2).any())
+
+    def test_orthographic_fog_outlines_and_depth_cues(self):
+        # Measured from the camera's plane: a box 3 from it is clear of fog that starts at 4, and one 9 off is
+        # wholly in fog that ends at 7, whatever their distance from the eye the view is drawn from.
+        boxes = [Object3D(make_box(), position=np.array([x, 0.0, -z]), color=Color.RED) for x, z in ((-1, 3), (1, 9))]
+        view = Camera(position=np.zeros(3), target=np.array([0.0, 0.0, -1.0]), projection="ortho", size=4.0)
+        fogged = Renderer(60, 30, cell_pixels=(2, 3), fog=Fog(start=3.6, end=7.0, color=(0, 0, 255)), outline=0.0)
+        fb = fogged.render(boxes, view, Light())
+        clear, deep = fb.rgb[fb.ids == 1], fb.rgb[fb.ids == 2]
+        self.assertTrue((clear[:, 2] < 0.05).all())  # no blue in the red box near
+        np.testing.assert_allclose(deep[deep[:, 0] > 0, 0], 0.0, atol=1e-9)  # only fog colour on the far one
+        # Depth cueing dims the far box; outlines darken the edge where the near box passes in front of the far.
+        cued = Renderer(60, 30, cell_pixels=(2, 3), fog=0.5, outline=0.0).render(boxes, view, Light())
+        self.assertLess(cued.rgb[cued.ids == 2, 0].max(), 0.8 * cued.rgb[cued.ids == 1, 0].max())
+        overlapping = [Object3D(make_box(), position=np.array([0.3, 0.0, -3.0])), boxes[1]]
+        lined = Renderer(60, 30, cell_pixels=(2, 3), fog=0.0, outline=0.5).render(overlapping, view, Light()).copy()
+        plain = Renderer(60, 30, cell_pixels=(2, 3), fog=0.0, outline=0.0).render(overlapping, view, Light())
+        darker = (lined.rgb.sum(axis=2) < plain.rgb.sum(axis=2) - 1e-9)
+        self.assertTrue(darker.any())
+        self.assertTrue((lined.ids[darker] == 2).all())  # the far side of the edge
+
+    def test_orthographic_camera_with_bad_numbers(self):
+        renderer = Renderer(30, 15, cell_pixels=(2, 3))
+        for size in (0.0, -3.0, np.nan, np.inf, 1e300, 1e-300):
+            renderer.render([Object3D(make_box())], Camera(projection="ortho", size=size), Light(shadows=True))
+            renderer.ray(5, 5), renderer.pick(15, 7), renderer.project((0.0, 0.0, 0.0))
+        for camera in (Camera(projection="ortho", position=np.zeros(3), target=np.zeros(3)),
+                       Camera(projection="ortho", near=np.nan), Camera(projection="ortho", far=-5.0)):
+            renderer.render([Object3D(make_box())], camera, Light())
+            renderer.ray(5, 5), renderer.pick(15, 7)
+        with self.assertRaises(ValueError):
+            Camera(projection="orthographic")
+
+    def test_labels(self):
+        for camera in (Camera(position=np.array([0.0, 1.0, 6.0])),
+                       Camera(position=np.array([0.0, 1.0, 6.0]), target=np.array([0.0, 1.0, 0.0]), projection="ortho",
+                              size=6.0)):
+            screen = Screen(glyphs="quad", color="truecolor", size=(24, 60))
+            renderer = Renderer(60, 22, screen.cell_pixels)
+            self.assertIsNone(renderer.anchor((0.0, 0.0, 0.0)))  # before the first render
+            wall = Object3D(make_box(), np.array([-1.5, 0.0, 1.0]), scale=(1.2, 3.0, 0.2))
+            hidden, seen = Object3D(make_box(), np.array([-1.5, 0.0, -2.0])), Object3D(make_box(), np.array([1.5, 0, 0]))
+            screen.draw_frame(renderer.render([wall, hidden, seen], camera, Light()), top=1)
+            self.assertIsNone(screen.label(renderer, (-1.5, 0.0, -2.0), "x", top=1))  # behind the wall
+            anchor = renderer.anchor((-1.5, 0.0, -2.0))
+            self.assertTrue(anchor.hidden)
+            self.assertFalse(anchor.edge)
+            self.assertFalse(renderer.anchor((-1.5, 0.0, -2.0), owner=wall).hidden)  # the wall's own surface
+            # Where project() puts it; text centred there, a row of the screen down for the frame's top.
+            anchor = screen.label(renderer, (1.5, 0.9, 0.0), "ball", top=1, dy=-1)
+            x, y = renderer.project((1.5, 0.9, 0.0))
+            self.assertEqual((anchor.x, anchor.y), (int(x), int(y)))
+            self.assertEqual("".join(screen.chars[anchor.y, anchor.x - 2:anchor.x + 2]), "ball")
+            # On its own surface: hidden only where the owner isn't given, never by the surface it is on.
+            self.assertFalse(renderer.anchor((1.5, 0.2, 0.5)).hidden)
+            self.assertFalse(renderer.anchor((1.5, 0.2, -0.5), owner=seen).hidden)  # (its far side)
+            self.assertTrue(renderer.anchor((1.5, 0.2, -0.5)).hidden)
+            # Off the frame, or behind the camera: nothing, or at the edge with clamp, the whole text inside.
+            self.assertIsNone(screen.label(renderer, (40.0, 1.0, 0.0), "far"))
+            anchor = screen.label(renderer, (40.0, 1.0, 0.0), "far right", top=1, clamp=True)
+            self.assertEqual((anchor.x, anchor.edge), (59, True))
+            self.assertEqual("".join(screen.chars[anchor.y + 1, 51:60]), "far right")
+            behind = renderer.anchor((-3.0, -5.0, 30.0), clamp=True)
+            self.assertTrue(behind.edge)
+            self.assertLess(behind.x, 30)  # to the left, and down
+            self.assertEqual(behind.y, 21)
+            for point in ((np.nan, 0.0, 0.0), (np.inf, 0.0, 0.0), (0.0, 1.0, 6.0)):  # (and at the camera)
+                renderer.anchor(point, clamp=True)
+                screen.label(renderer, point, "?", clamp=True)
+        with self.assertRaises(ValueError):
+            renderer.anchor((0.0, 0.0))
+
+    def test_bars(self):
+        screen = Screen(color="truecolor", size=(3, 10))
+        for fraction, expected in ((0.0, "\u2591" * 4), (0.5, "\u2588\u2588\u2591\u2591"),
+                                   (0.3, "\u2588\u258e\u2591\u2591"), (1.0, "\u2588" * 4), (7.0, "\u2588" * 4),
+                                   (np.nan, "\u2591" * 4)):
+            screen.erase()
+            screen.bar(1, 2, 4, fraction)
+            self.assertEqual("".join(screen.chars[1, 2:6]), expected, fraction)
+            self.assertEqual("".join(screen.chars[1, 6:]), "    ")
+        screen.unicode = False
+        screen.bar(0, 0, 4, 0.6)
+        self.assertEqual("".join(screen.chars[0, :4]), "##--")
 
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
@@ -1298,12 +1451,14 @@ class DemoTests(unittest.TestCase):
         lift = Animation(model.objects[1], position=Track([(0.0, (0.0, 0.0, 0.0)), (1.0, (0.0, 1.0, 0.0))]))
         model.animations = {"lift": Clip([lift], name="lift")}
         viewer = Viewer(model)
-        screen = self.run_demo(viewer, [ord("w"), Key.LEFT, ord("e"), ord("c")], Key.ESC)
+        screen = self.run_demo(viewer, [ord("w"), Key.LEFT, ord("e"), ord("c"), ord("o")], Key.ESC)
         self.assertEqual(model.objects[1].reflectivity, 0.85)
         self.assertGreater(model.objects[1].position[1], 0.0)  # playing, looped
         wide = Screen(glyphs="quad", color="256", size=(30, 240))
         viewer.frame(wide, 0.1, [])
         self.assertIn("animation: lift (1/1)", "".join(wide.chars[-1]))
+        self.assertIn("[o] ortho", "".join(wide.chars[-1]))
+        self.assertEqual(viewer.camera.projection, "ortho")
         viewer.frame(screen, 0.1, [ord("n")])
         self.assertIsNone(viewer.playing)
 
@@ -1382,6 +1537,69 @@ class DemoTests(unittest.TestCase):
         demo.fog_into.value = "mist"
         self.assertIsNot(demo.frame(screen, 0.1, []), False)
         self.assertEqual(demo.renderer.fog.color, (225, 228, 232))
+        # Each name just above the top of its thing (all of the objects of that name near each other), however
+        # long or flat the thing is; one for each of four pillars.
+        tags = demo.court.name_tags(np.array([0.0, 1.6, 0.0]), 100.0)
+        for name, point, objects in tags:
+            top = max((o.mesh.vertices @ o.world_matrix()[0].T + o.world_matrix()[1])[:, 1].max() for o in objects)
+            self.assertAlmostEqual(point[1] - top, 0.15, msg=name)
+        self.assertEqual(sum(name == "a pillar" for name, _, _ in tags), 4)
+        self.assertEqual(sum(name == "a lacquered table" for name, _, _ in tags), 1)
+        # Names over the things nearby: the door ahead, from the start.
+        demo.x, demo.z, demo.tags.value = 1.4, 5.5, True
+        demo.frame(screen, 0.1, [])
+        self.assertIn("a door (to nowhere)", "\n".join("".join(row) for row in screen.chars))
+        # Walking into the pedestal stops at it (Colliders), sliding along nothing when square on.
+        demo.x, demo.z, demo.yaw = -4.0, -1.7, 0.0  # (clear of the trellis, facing north)
+        screen.held.exact = True
+        screen.held.update([ord("w")], 0.0)
+        for _ in range(30):
+            demo.frame(screen, 0.1, [])
+        self.assertAlmostEqual(demo.z, -3.0 + 0.6 + 0.35, places=6)
+        self.assertAlmostEqual(demo.x, -4.0, places=6)
+
+    def test_tactics(self):
+        from unicode3d.examples.tactics import HOP, N, Tactics, tile_centre, tile_top
+        demo = Tactics(seed=3)
+        screen = self.run_demo(demo, [ord("e"), ord("+"), ord("-"), ord("o"), ord("o"), ord("w"), Key.TAB,
+                                      MouseEvent(50, 12, MouseEvent.WHEEL_UP, True), MouseEvent(40, 10, 3, False, True)],
+                               Key.ESC)
+        self.assertEqual(demo.camera.projection, "ortho")
+        self.assertIs(demo.selected, demo.pawns[1])  # Tab
+        self.assertGreater(demo.yaw, np.pi / 2)  # turning a quarter, towards 3/4 pi
+        self.assertIn("[o] to perspective", "".join(screen.chars[-1]))
+        self.assertIn("orthographic view   [o] switch to perspective", "".join(screen.chars[0]))
+        demo.frame(screen, 1 / 30, [ord("o")])
+        self.assertEqual(demo.camera.projection, "perspective")
+        self.assertIn("[o] to orthographic", "".join(screen.chars[-1]))
+        self.assertIn("perspective view   [o] switch to orthographic", "".join(screen.chars[0]))
+        # Click a pawn to pick it, then a tile it can reach, found by the ray through that cell: it hops there.
+        demo.frame(screen, 1 / 30, [ord("o")])
+        pawn = demo.pawns[2]
+        x, y = demo.renderer.project(pawn.obj.position + (0.0, 0.3, 0.0))
+        demo.frame(screen, 1 / 30, [MouseEvent(int(x), int(y), MouseEvent.LEFT, True)])
+        self.assertIs(demo.selected, pawn)
+        for tile in sorted(((i, j) for i in range(N) for j in range(N)), key=lambda t: abs(t[0] - pawn.tile[0])
+                           + abs(t[1] - pawn.tile[1]))[3:]:
+            path = demo.path_to(pawn, tile)
+            if not path:
+                continue
+            cx, cz = tile_centre(*tile)
+            x, y = demo.renderer.project((cx, tile_top(demo.levels[tile]), cz))
+            if demo.tile_at(int(x), int(y)) == (None, tile):
+                break
+        demo.frame(screen, 1 / 30, [MouseEvent(int(x), int(y), MouseEvent.LEFT, True)])
+        self.assertEqual(pawn.path, path)
+        self.assertTrue(all(abs(demo.levels[a] - demo.levels[b]) <= 1 for a, b in zip([pawn.tile] + path, path)))
+        for _ in range(int(len(path) * HOP / 0.05) + 3):
+            demo.frame(screen, 0.05, [])
+        self.assertEqual(pawn.tile, tile)
+        self.assertEqual(pawn.path, [])
+        # Zoomed in on a corner, pawns out of view are pointed at from the screen's edge.
+        demo.zoom, demo.pan = 4.0, np.array([N / 2, 0.0, N / 2])
+        demo.frame(screen, 1 / 30, [])
+        text = "\n".join("".join(row) for row in screen.chars)
+        self.assertTrue(any(ch in text for ch in "\u25c0\u25b6\u25b2\u25bc"))
 
     def test_workshop(self):
         from unicode3d.examples.workshop import Workshop
@@ -1402,6 +1620,58 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(demo.renderer.fog.color, (225, 228, 232))
         demo.frame(screen, 1 / 30, [ord("r")])
         self.assertEqual((demo.shape.value, demo.sx.value, demo.fog.value), ("sphere", 1.0, "off"))
+
+
+class Terminal:
+    """What a terminal shows after the escape sequences Screen sends: characters, packed colours (as the Screen's grid
+    holds them) and attributes. Knows only the sequences Screen uses."""
+
+    def __init__(self, rows, cols):
+        self.chars = np.full((rows, cols), " ", dtype="<U1")
+        self.fg = np.full((rows, cols), -1, np.int64)
+        self.bg = np.full((rows, cols), -1, np.int64)
+        self.attrs = np.zeros((rows, cols), np.uint8)
+        self.y = self.x = 0
+        self.style = [-1, -1, 0]  # fg, bg, attributes
+
+    def feed(self, text):
+        for m in re.finditer(r"\x1b\[(\??)([0-9;]*)([A-Za-z])|(.)", text, re.S):
+            if m.group(4) is not None:
+                y, x = self.y, self.x
+                self.chars[y, x], (self.fg[y, x], self.bg[y, x], self.attrs[y, x]) = m.group(4), self.style
+                self.x += 1
+            elif m.group(1):
+                continue  # (synchronized output)
+            elif m.group(3) == "H":
+                self.y, self.x = (int(v) - 1 for v in m.group(2).split(";"))
+            elif m.group(3) == "J":
+                self.chars[:], self.fg[:], self.bg[:], self.attrs[:] = " ", self.style[0], self.style[1], 0
+            elif m.group(3) == "m":
+                codes = [int(v) for v in m.group(2).split(";")] if m.group(2) else [0]
+                while codes:
+                    n = codes.pop(0)
+                    if n == 0:
+                        self.style = [-1, -1, 0]
+                    elif n in (1, 2, 7):
+                        self.style[2] |= {1: 1, 2: 2, 7: 4}[n]
+                    elif n in (38, 48):
+                        kind = codes.pop(0)
+                        color = (int(encode_rgb([codes.pop(0), codes.pop(0), codes.pop(0)])) if kind == 2
+                                 else int(encode_index(codes.pop(0))))
+                        self.style[n == 48] = color
+                    elif n in (39, 49):
+                        self.style[n == 49] = -1
+                    else:  # 30-37, 40-47, 90-97, 100-107
+                        background, n = (n >= 40 and n < 90) or n >= 100, n % 10 + (8 if n >= 90 else 0)
+                        self.style[background] = int(encode_index(n))
+
+    def levels_off(self, screen):
+        """How many levels the terminal's colours are off the screen's grid at most; fails if a character or
+        attribute differs."""
+        np.testing.assert_array_equal(self.chars, screen.chars)
+        np.testing.assert_array_equal(self.attrs, screen.attrs)
+        rgb = lambda p: np.stack([p >> 16 & 255, p >> 8 & 255, p & 255], -1)
+        return int(max(np.abs(rgb(self.fg) - rgb(screen.fg)).max(), np.abs(rgb(self.bg) - rgb(screen.bg)).max()))
 
 
 class ScreenTests(unittest.TestCase):
@@ -1436,6 +1706,77 @@ class ScreenTests(unittest.TestCase):
         self.assertIn("\x1b[2;4H", second)
         self.assertNotIn("\x1b[2J", second)
         self.assertNotIn("hello", second)
+
+    def test_style_sends_only_what_changed(self):
+        screen = Screen(color="truecolor", size=(1, 10))
+        screen.color_tolerance = 0
+        screen.text(0, 0, "ab")
+        screen.fg[0, 0], screen.fg[0, 1] = encode_rgb([(10, 20, 30), (40, 50, 60)])
+        screen.bg[0, :2] = encode_rgb((1, 2, 3))
+        screen.text(0, 2, "c", bold=True)
+        out = screen.render_updates()
+        self.assertIn("\x1b[0;38;2;10;20;30;48;2;1;2;3ma\x1b[38;2;40;50;60mb", out)  # only the foreground changes
+        self.assertIn("b\x1b[0;1;39;49mc", out)  # bold, after none: reset
+        terminal = Terminal(1, 10)
+        terminal.feed(out)
+        self.assertEqual(terminal.levels_off(screen), 0)
+
+    def test_colour_tolerance(self):
+        screen = Screen(color="truecolor", size=(2, 10))
+        self.assertEqual(screen.color_tolerance, 1)  # the default
+        terminal = Terminal(2, 10)
+        screen.text(0, 0, "abc")
+        screen.fg[0, :3] = encode_rgb((100, 100, 100))
+        terminal.feed(screen.render_updates())
+        screen.fg[0, 0] = encode_rgb((101, 99, 100))  # a level: left as it is while something else changes
+        screen.fg[0, 2] = encode_rgb((102, 100, 100))  # two levels: sent
+        screen.text(1, 0, "x")
+        out = screen.render_updates()
+        terminal.feed(out)
+        self.assertIn("\x1b[1;3H", out)
+        self.assertNotIn("\x1b[1;1H", out)
+        self.assertEqual(terminal.levels_off(screen), 1)
+        terminal.feed(screen.render_updates())  # nothing else changed: the cell left over is sent
+        self.assertEqual(terminal.levels_off(screen), 0)
+        self.assertEqual(screen.render_updates(), "")
+
+        # A cell kept within the tolerance while other cells keep changing is sent after SETTLE_FRAMES refreshes.
+        screen.fg[0, 0] = encode_rgb((100, 100, 100))
+        for i in range(SETTLE_FRAMES + 1):
+            screen.text(1, 0, "yx"[i % 2])  # (row 1 shows "x" already)
+            terminal.feed(screen.render_updates())
+            self.assertEqual(terminal.levels_off(screen), int(i < SETTLE_FRAMES - 1), i)
+
+        # 0, or anything that isn't a positive number, sends every change; so do the palette modes.
+        for tolerance, mode in ((0, "truecolor"), (float("nan"), "truecolor"), ("x", "truecolor"), (5, "256")):
+            screen = Screen(color=mode, size=(1, 4))
+            screen.color_tolerance = tolerance
+            screen.text(0, 0, "ab")
+            screen.fg[0, 0] = int(encode_rgb((100, 100, 100)) if mode == "truecolor" else encode_index(100))
+            screen.render_updates()
+            screen.fg[0, 0] += 1
+            screen.text(0, 1, "c")
+            self.assertIn("\x1b[1;1H", screen.render_updates(), (tolerance, mode))
+
+    def test_terminal_shows_frames_within_the_tolerance(self):
+        # What the terminal shows, replayed from the output, is at most color_tolerance levels off each frame of
+        # a spinning scene, and exact once it stops.
+        for tolerance in (0, 1, 2):
+            screen = Screen(glyphs="sextant", color="truecolor", size=(20, 40))
+            screen.color_tolerance = tolerance
+            renderer = Renderer(40, 20, screen.cell_pixels)
+            terminal = Terminal(20, 40)
+            balls = [Object3D(blob_mesh((0.5, 0.5, 0.5)), np.array([x, 0.0, 0.0]), color=(200, 90, 60 + 40 * x))
+                     for x in (-1.0, 0.0, 1.0)]
+            for i in range(12):
+                for ball in balls:
+                    ball.rotation = quat_axis_angle((0.3, 1.0, 0.2), 0.05 * i)
+                screen.draw_frame(renderer.render(balls, Camera(), Light(direction=(np.sin(0.1 * i), -1.0, -0.5))))
+                terminal.feed(screen.render_updates())
+                self.assertLessEqual(terminal.levels_off(screen), tolerance)
+            screen.draw_frame(renderer.render(balls, Camera(), Light(direction=(np.sin(1.1), -1.0, -0.5))))
+            terminal.feed(screen.render_updates())
+            self.assertEqual(terminal.levels_off(screen), 0)
 
     def test_colour_codes_written_as_bytes(self):
         buf = np.zeros(64, np.uint8)

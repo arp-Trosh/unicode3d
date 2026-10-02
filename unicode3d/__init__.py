@@ -15,8 +15,9 @@ from .keys import HeldKeys, Key, KeyRelease, MouseEvent
 from .mesh import Mesh, make_box
 from .gltf import load_gltf
 from .models import Material, load_model, load_mtl, load_obj
+from .queries import Colliders, Contact, Hit
 from .raster import FrameBuffer
-from .scene import Camera, Light, Model, Node, Object3D, Pick, PointLight, Renderer
+from .scene import Anchor, Camera, Light, Model, Node, Object3D, Pick, PointLight, Renderer, union_bounds
 from .terminal import Screen, add_display_args, compile_kernels, display_options, frame_to_text, run
 from .texture import load_image
 from .ui import Button, Choice, DisplayControls, Panel, Slider, Toggle

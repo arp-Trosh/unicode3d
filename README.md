@@ -69,6 +69,7 @@ python3 -m unicode3d.examples.balls [-n BALLS]           # balls bouncing around
 python3 -m unicode3d.examples.maze [--size N]            # the Windows 98 maze screensaver
 python3 -m unicode3d.examples.room                       # walk around a courtyard of things to look at (WASD)
 python3 -m unicode3d.examples.workshop                   # try materials, scale, fog and animation on one object
+python3 -m unicode3d.examples.tactics [--seed N]         # an isometric tactics board (orthographic camera; o compares)
 ```
 
 Every demo takes the [display options](#display-options), `--fps` included, and shows the display
@@ -80,8 +81,8 @@ clicked too. A small font and a large terminal give the most detail.
   land on a chosen face; f changes what they are made of (plastic, rubber, chrome, pearl), g makes
   them glass, m polishes the table so that it mirrors them.
 - **viewer**: spins a model (OBJ or glTF, with its materials and textures), or a die when given none,
-  and plays a glTF model's animations (n moves to the next); c makes it chrome, reflecting a sky;
-  `--still` stops the spin, `--double-sided` draws back faces for meshes with inconsistent winding.
+  and plays a glTF model's animations (n moves to the next); c makes it chrome, reflecting a sky,
+  and o switches to an orthographic view; `--still` stops the spin, `--double-sided` draws back faces for meshes with inconsistent winding.
 - **balls**: up to 500 balls of many colours drift and bounce around a room seen from outside (the
   near walls are see-through, since only the insides of the walls are drawn). The panel on the left
   sets the number of balls, their size, the room's size and their speed, and switches collisions,
@@ -116,7 +117,8 @@ clicked too. A small font and a large terminal give the most detail.
   and the sun, picks the background (a sky, a starry sky box, a gradient or none), and sets how
   thick the fog is and whether it fades things into the background or into white mist. Walking is
   smooth in terminals that report key releases (see [Input](#input)); elsewhere a tap walks for
-  about half a second. Esc quits. Shows: nearly everything.
+  about half a second. You bump into things and slide along them, and n puts names over the things
+  nearby. Esc quits. Shows: nearly everything, ray and overlap queries and labels included.
 - **workshop**: one object on a turntable, and a panel to change it: the object (a sphere, a cube, a
   die, a sign, a blob), its colour, its material (specular, shininess, reflectivity, opacity), its
   scale along x, y and z (0 squashes it flat, below 0 mirrors it), the fog (off, or fading into the
@@ -124,6 +126,17 @@ clicked too. A small font and a large terminal give the most detail.
   backdrop, and an easing curve. Hop (h or space) throws the object up and spins it once, the spin
   shaped by the easing curve, which is drawn under the panel. a/d orbit the camera, w/s tilt it,
   z/x zoom, r resets. Shows: materials, scaling, fog and animation, by hand.
+- **tactics**: what an orthographic camera is for. A small island of terraced tiles, houses, trees
+  and four pawns, seen as strategy, tactics and board games show their maps: orthographic, at the
+  isometric angle, so every tile is the same size wherever it is, the grid's lines stay parallel and
+  a pawn looks the same on any tile. o switches to a perspective camera framed the same way, to
+  compare: near tiles grow, the lines converge, houses lean outward. Click a pawn, then a tile, and
+  it hops there along the shortest way (climbing at most one level a step); the tile under the
+  pointer lights up, found by a ray query along `renderer.ray()` (parallel rays, in an orthographic
+  view). Names and health bars float over the pawns (dim where something hides one, and pointing
+  from the screen's edge at those out of view). q/e turn the view a quarter, +/- or the wheel zoom,
+  WASD or the arrows pan, Tab picks the next pawn. Shows: the orthographic camera, ray queries,
+  labels, shadows, a mirror of a sea.
 
 </details>
 
@@ -193,13 +206,21 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
 - **Fog and depth cues:** fog by distance in the world, fading far surfaces into the sky or
   background (or a colour), or simple depth cueing; and where one surface passes in front of another
   the far side gets a dark outline.
+- **Cameras:** perspective, or orthographic for isometric and top-down views.
+- **Labels:** terminal text anchored to points in the scene (names, numbers, health bars, markers
+  at the screen's edge for things out of view), hidden behind what is in front of them.
 - **Shapes and motion:** a scene graph of nodes and objects, scaling along each axis separately,
   mesh builders (extruded text, ellipsoids, boxes, cushions), and animation along keyframes with
   easing, steps or splines, in clips that move many parts at once.
+- **Queries:** what a ray hits and what a sphere, capsule or box touches, against the meshes
+  themselves (a tree of boxes per mesh, so a loaded level answers in microseconds), for line of
+  sight, walls, the ground under a walker and clicking the world.
 - **Backgrounds:** behind the scene, a colour, a vertical gradient, a sky that follows the camera
   (zenith, horizon and ground colours), or a sky box of six pictures.
 - **Output:** the screen is a grid of cells, and each refresh sends only the cells that changed, as
   VT escape sequences, wrapped in synchronized-output markers where the terminal supports them.
+  A colour is sent only when it changes, and in truecolor a cell whose colours moved by a single
+  level is left for a moment (`color_tolerance`), which halves the output for busy scenes.
   There is no curses: on Windows the console is put in VT mode, and keys and mouse clicks are read
   as console input records.
 - **Speed:** the per-pixel work (projecting and clipping triangles, rasterizing, shading, fog and
@@ -242,6 +263,11 @@ run(frame, fps=30)
 ```
 
 `Camera(position, target, up, fov=50, near=0.1, far=100)` looks from `position` at `target`.
+`Camera(..., projection="ortho", size=10)` is orthographic: things are the same size however far
+off, in a view `size` units of the world tall, as in isometric and top-down games, board games and
+technical drawings (the tactics demo shows why; it and the viewer switch with `o`). Fog, outlines,
+`pick()` and `ray()` then measure from the camera's plane, and `ray()` gives parallel rays starting
+there.
 Objects take a `Mesh` (build one from `vertices` and `faces`, or use `make_box` or the
 [shapes](#shapes); `load_model` loads a whole [model](#models) with its materials), and a pose:
 `position`, `rotation` (a quaternion, w first; `transforms.quat_axis_angle(axis, angle)` makes one)
@@ -313,7 +339,7 @@ between frames:
 `render(objects, camera, lights)` takes one light or a list of them. It returns the renderer's own
 `FrameBuffer`, which the next render reuses; `copy()` it to keep a frame. `fb.ids` tells you which
 object (its index in the render list plus one) covers each pixel. `renderer.project(point)` gives
-the cell a world point landed on, for placing text labels. An unchanged scene isn't drawn again:
+the cell a world point landed on (see [Labels](#labels) for text placed there). An unchanged scene isn't drawn again:
 `render()` hands back the last frame, and `renderer.draws` counts only the renders that rasterized.
 After editing a mesh's arrays in place, call `renderer.invalidate()`.
 
@@ -336,6 +362,97 @@ for ev in events:
         if hit:
             selected = hit.object
 ```
+
+`pick()` answers what the last frame drew. To ask about the world as it is now, including things
+off screen or not drawn at all, use ray and overlap queries.
+
+</details>
+
+<details>
+<summary><h3 id="labels">Labels</h3></summary>
+
+Text anchored to points in the scene, drawn as terminal text (sharper than anything textured at
+terminal resolution): names over characters, damage numbers, health bars, markers on things off
+screen. `screen.label(renderer, point, text, color, top=0, left=0)` writes `text` centred on the
+cell the point landed on in the renderer's last frame (drawn at `top`, `left`), `dy` rows lower,
+and returns an `Anchor`, or `None` if it wrote nothing:
+
+```python
+screen.draw_frame(fb, top=1)
+for enemy in enemies:
+    head = enemy.position + (0.0, 1.2, 0.0)
+    if screen.label(renderer, head, enemy.name, Color.RED, top=1, owner=enemy):
+        a = renderer.anchor(head)
+        screen.bar(1 + a.y + 1, a.x - 3, 6, enemy.health)   # a bar under the name
+screen.label(renderer, goal, "goal", Color.YELLOW, top=1, clamp=True, hide=False)
+```
+
+- A point behind something drawn is hidden (the depth buffer says so); `owner` (an object, objects
+  or a Model) is what the point belongs to, whose own surface doesn't hide it. `hide=False` writes
+  the label anyway.
+- A point behind the camera or outside the frame gets nothing, unless `clamp=True`, which puts the
+  label at the frame's edge in the direction the point lies, kept whole inside the frame.
+- `renderer.anchor(point, owner=None, clamp=False)` is the part without the text: an `Anchor` with
+  the cell (`x`, `y`, from the frame's top-left), `distance` from the camera, `hidden`, and `edge`
+  (moved to the edge), for drawing something else there.
+- `screen.bar(y, x, width, fraction, color, empty)` is a bar filled to an eighth of a cell
+  (`#` and `-` without Unicode).
+- To put a label just above a thing, take the top of its box in the world: `obj.world_bounds()`
+  (and `model.world_bounds()`) give its corners `(low, high)` as it stands now, through its
+  parents, and `union_bounds(objects)` the box around several. A bounding sphere's radius puts the
+  label far too high over anything long and flat.
+
+The room demo's `n` puts names over the things nearby.
+
+</details>
+
+<details>
+<summary><h3 id="queries">Ray and overlap queries</h3></summary>
+
+`Colliders(objects)` is a set of objects (and Models) to ask questions about: what a ray hits
+(line of sight, bullets, the floor under a walker, clicking the world) and what a sphere, capsule
+or box touches (walls, pickups). It reads where its objects are when made and on each `update()`:
+call that after moving things, once a frame, for any number of queries.
+
+```python
+walls = Colliders([*level, door, *crates])
+...
+walls.update()
+hit = walls.raycast(eye, forward, max_distance=20, ignore=[player])
+if hit:
+    print(hit.object, hit.position, hit.normal, hit.distance)
+walker += walls.push_out(walker, 0.3)                            # out of anything it walked into
+ground = walls.raycast(feet + (0, 0.5, 0), (0, -1, 0))            # what it stands on
+under_mouse = walls.raycast(*renderer.ray(ev.x, ev.y - top))      # clicking the world
+```
+
+- `raycast(origin, direction, max_distance=inf, ignore=(), all=False)` gives the nearest `Hit`
+  (`object`, `position`, `normal` on the side the ray came from, `distance`, `face`, and `front`:
+  whether it met the face's outside), or `None`. With `all=True`, every hit along the ray, nearest
+  first.
+- `raycast_many(origins, directions, max_distance=inf)` casts many rays at once on all cores and
+  returns arrays: objects (`None` for a miss), distances (`inf`), positions, normals and faces.
+- `overlap_sphere(centre, radius)`, `overlap_capsule(a, b, radius)` (the points within `radius`
+  of the segment a-b: the usual shape for a character) and `overlap_box(centre, size, rotation)`
+  give `Contact`s, deepest first: `object`, `point` (on the face), `normal` (which way to move the
+  shape out), `depth` (how far) and `face`. Faces of one object pushing nearly the same way give
+  one contact, so a sphere in a corner of a room gets one for each wall.
+- `push_out(centre, radius, end=None)` is the move that takes a sphere (or a capsule from
+  `centre` to `end`) out of everything it cuts into. Sliding, gravity and steps are up to the game;
+  the room demo's walker is a capsule pushed out along the ground.
+
+Being in a set is what makes something solid. `visible` and `opacity` don't matter, so an
+invisible box can stand in for a detailed model (as one stands in for the room demo's pool), and
+holes in textures count as solid. Rays hit faces from either side. Separate sets work as layers
+(walls, enemies, pickups), and `ignore=` passes over objects such as the one casting the ray.
+Objects can be added to or taken out of `colliders.objects` before an `update()`.
+
+Each mesh gets a bounding volume hierarchy, a tree of boxes around its triangles, built the first
+time a set holding it updates (0.07 s for 140,000 triangles) and shared by every object and set
+that uses the mesh, so a big level is indexed once. A query then costs about 10 µs from Python,
+and `update()` about 7 µs an object. After editing a mesh's arrays in place, call
+`colliders.invalidate()`. An object with a pose that isn't finite, or scaled to nothing, is never
+hit, and faces with a corner at NaN are left out.
 
 </details>
 
@@ -779,6 +896,12 @@ would, unless the program handles that signal itself). `frame_fn(screen, dt, key
   (`screen.glyph_modes` lists the glyph sets the terminal can take).
 - `screen.fps` is the target frame rate, which `run()` re-reads every frame (0: as fast as it can);
   `screen.measured_fps` is the rate it achieved over the last second.
+- `screen.color_tolerance` (truecolor only; default 1): a cell whose character and style are the
+  same and whose colours moved by at most this many levels (of 255) is not sent again. That sends
+  half the cells for 400 small spinning balls, and a fifth for one big sphere, which counts most
+  over SSH. The terminal is then up to that many levels off, less than half a just-noticeable
+  difference at 1, and only for a moment: the cells still off are sent once the picture stops
+  changing, or after 30 refreshes. 0 sends every change.
 - `Screen(size=(rows, cols))` with no console gives an off-screen grid, for tests;
   `render_updates()` returns the escape sequences a refresh would send.
 
@@ -981,6 +1104,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `models.py`     | loading models (`load_model`): OBJ files with their MTL materials and textures (`load_obj` as one mesh) |
 | `gltf.py`       | loading glTF 2.0 models (`load_gltf`): nodes, meshes, PBR materials as unicode3d's, textures, animations as clips |
 | `texture.py`    | loading images, mipmap chains, trilinear sampling, repeating textures |
+| `queries.py`    | `Colliders`: ray casts and sphere, capsule and box overlaps against meshes, with a bounding volume hierarchy per mesh |
 | `transforms.py` | projection and view matrices, quaternions, `quat_slerp` |
 | `background.py` | what is drawn behind the scene: `Gradient`, `Sky`, `SkyBox`; and `Fog` |
 | `animation.py`  | easing curves, keyframe `Track`s, `RotationTrack`s and `SplineTrack`s, `Animation`, which moves an object along them, and `Clip`, which plays several together |
@@ -1001,6 +1125,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `examples/maze.py`   | the maze screensaver |
 | `examples/room.py`   | the walk-around courtyard |
 | `examples/workshop.py` | one object and a panel of materials, scale, fog and animation to try |
+| `examples/tactics.py` | the isometric tactics board (orthographic camera, ray queries, labels) |
 
 </details>
 

@@ -292,11 +292,42 @@ notices the flipped handedness and flips which side of each face counts as the f
 *A plank, a tall box and an egg made from a cube and a sphere; a die with a negative scale (its pips
 mirrored); and a box turned inside a stretched group, which shears it.*
 
+## Orthographic views
+
+An orthographic camera (isometric and top-down games, board games) shows things the same size however far
+off. Every kernel assumes a perspective view, though: depth is 1/w, faces are clipped where w reaches the
+near plane, and shading looks from the eye. Rather than a second path through all of them, an orthographic
+view is drawn as a perspective one from a hundred thousand view sizes back, through an angle narrow enough
+that what is `size` tall at the camera fills the picture. Things then differ in size with distance by a
+hundred-thousandth at most, far under a pixel, and shading, culling, shadows and mirrors all work
+unchanged. Double precision has room for it: depths that differ by a millimetre still differ by about
+10^-10 of themselves, a million times more than the rounding. The only parts that care are those measuring
+distance from the eye (fog, outlines, depth cueing, `pick()` and `ray()`), which subtract the distance back
+and measure from the camera's plane.
+
+## Asking about the scene
+
+`pick()` reads the framebuffer: what the last frame drew in a cell. Programs also need to ask about the world
+itself, including what isn't on screen: what a ray hits, or what a sphere or capsule around a walker cuts
+into. `Colliders` answers those against the meshes. Each mesh gets a bounding volume hierarchy, a tree of
+boxes around its triangles split by the surface area heuristic, built in a kernel in the mesh's own space.
+It is built once and shared by every object showing the mesh, so a ray goes into each object's space through
+the inverse of its matrix rather than the triangles coming out into the world. A ray tests each object's
+bounding sphere first, then walks the tree; casting many at once splits them among threads, each writing only
+its own rays' answers. Overlaps go the other way: the shape's box is taken into the object's space to narrow
+down the tree, and the triangles left are tested in the world, where a sphere is still a sphere. Contacts
+pushing out nearly the same way are merged, so a dense mesh gives a few, not thousands.
+
 ## Getting it onto the screen
 
 The screen is a grid of cells (character, foreground, background). Each refresh compares the grid to
 what was last sent and writes only the changed cells, as VT escape sequences, from a Numba kernel
-straight into a byte buffer. The update is wrapped in synchronized-output markers, which terminals
+straight into a byte buffer. A style is sent only as far as it changed: a new foreground on its own,
+the reset only when bold, dim or reverse change. In truecolor, a cell whose colours moved by at most
+`color_tolerance` levels (1 by default) is left as it is: a turning sphere changes most of its cells
+by a level or so each frame, which no one can see, and leaving them saves four fifths of its output.
+Those cells are sent once the picture stops changing, or after 30 refreshes, so a still picture is
+always exact. The update is wrapped in synchronized-output markers, which terminals
 that support them use to show the whole update at once, with no tearing. There is no curses. On
 Windows the console is switched into VT mode, and keys and mouse clicks are read as console input
 records.

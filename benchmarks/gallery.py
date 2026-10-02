@@ -23,7 +23,8 @@ The scenes: a cube; a textured die in each glyph set and colour mode; overlappin
 cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor running to the horizon
 (mipmapping); many small balls; a finely divided sphere; the room demo's courtyard; and, added after 0.4.1,
 world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
-floor whose texture repeats, and fog over a starry sky box.
+floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; and, after 0.7.1, the
+courtyard through an orthographic camera.
 """
 import argparse
 import os
@@ -460,6 +461,20 @@ def gltf():
                 {"background": Sky()})
 
 
+def ortho():
+    """The courtyard from above and to one side through an orthographic camera (added after 0.7.1), as in an
+    isometric game: everything the same size however far off, with sun shadows, mirrors, outlines and fog
+    measured from the camera's plane."""
+    from unicode3d.examples.room import Courtyard
+    from unicode3d.background import Fog
+    court = Courtyard(1)
+    court.animate(2.0)
+    view = Camera(position=np.array([14.0, 16.0, 14.0]), target=np.zeros(3), projection="ortho", size=17.0, near=1.0)
+    sun = Light(direction=np.array([0.5, -1.0, -0.35]), ambient=0.3, diffuse=0.6, shadows=True)
+    return Shot(list(court.objects), view, sun,
+                {"background": Sky(), "outline": 0.3, "fog": Fog(start=26.0, end=60.0, color=(200, 210, 230))})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -484,6 +499,7 @@ SCENES = {
     "stretched": stretched,
     "model": model,
     "gltf": gltf,
+    "ortho": ortho,
 }
 
 

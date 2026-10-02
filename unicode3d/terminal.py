@@ -29,12 +29,13 @@ import unicodedata
 import numpy as np
 from numba import njit
 
-from .color import COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
+from .color import _RGB, COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
 from .console import detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from .background import Sky
 from .mesh import Mesh, make_box
+from .queries import Colliders
 from .scene import Camera, Light, Object3D, PointLight, Renderer
 
 __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
@@ -43,6 +44,7 @@ __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile
 BOLD, DIM, REVERSE = 1, 2, 4
 MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
 CELL_BYTES = 64  # the most one cell can take to send: a cursor move, a style with two RGB colours, a character
+SETTLE_FRAMES = 30  # refreshes a cell may stay within Screen.color_tolerance of its colour before it is sent anyway
 COMPILE_MESSAGE = "First run compile, please wait..."
 COMPILE_NOTICE_DELAY = 0.5  # seconds: loading compiled kernels from Numba's cache takes less, compiling them more
 CRASH_LOG_LIMIT = 1 << 20  # bytes: a longer crash log is cut down to its last quarter when run() opens it
@@ -58,32 +60,80 @@ def _printable(ch):
 
 
 @njit(cache=True, error_model="numpy")
-def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown_attrs, full, mono, ascii_only, buf):
-    """Write the escape sequences that bring the terminal from the shown_* grid to the current one into
-    byte buffer buf (CELL_BYTES a cell, plus a little); returns how many bytes were written.
+def _near(a, b, tolerance):
+    """Whether packed colours a and b are both RGB, with each channel within `tolerance` levels of the other's."""
+    if a < 0 or b < 0 or not (a & _RGB) or not (b & _RGB):
+        return False
+    return (abs((a >> 16 & 255) - (b >> 16 & 255)) <= tolerance and abs((a >> 8 & 255) - (b >> 8 & 255)) <= tolerance
+            and abs((a & 255) - (b & 255)) <= tolerance)
+
+
+@njit(cache=True, error_model="numpy")
+def _mark_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown_attrs, age, tolerance, send):
+    """Mark in `send` the cells to send: those whose character or style changed, or whose colours moved by more
+    than `tolerance` levels, and also those within it that have been off for SETTLE_FRAMES refreshes (counted in
+    `age`), or all that are off at all when nothing moved by more (the picture has settled)."""
+    rows, cols = chars.shape
+    moved = 0
+    for y in range(rows):
+        for x in range(cols):
+            f, b = fg[y, x], bg[y, x]
+            sf, sb = shown_fg[y, x], shown_bg[y, x]
+            send[y, x] = 0
+            if chars[y, x] != shown_chars[y, x] or attrs[y, x] != shown_attrs[y, x]:
+                send[y, x] = 1
+            elif f == sf and b == sb:
+                age[y, x] = 0
+            elif (f == sf or _near(f, sf, tolerance)) and (b == sb or _near(b, sb, tolerance)):
+                if age[y, x] < 255:
+                    age[y, x] += 1
+                if age[y, x] >= SETTLE_FRAMES:
+                    send[y, x] = 2
+                continue
+            else:
+                send[y, x] = 1
+            moved += send[y, x]
+    if moved == 0:  # still: send what is off, so that a picture that stops changing ends up exact
+        for y in range(rows):
+            for x in range(cols):
+                if fg[y, x] != shown_fg[y, x] or bg[y, x] != shown_bg[y, x]:
+                    send[y, x] = 2
+
+
+@njit(cache=True, error_model="numpy")
+def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown_attrs, age, send, full, mono,
+                    ascii_only, tolerance, buf):
+    """Write the escape sequences that bring the terminal from the shown_* grid towards the current one into
+    byte buffer buf (CELL_BYTES a cell, plus a little), and update shown_* to what they leave on screen; returns
+    how many bytes were written.
 
     chars and shown_chars are code points. With `full`, everything is redrawn
-    after clearing the screen, whatever shown_* hold. ascii_only replaces
-    characters outside ASCII with '?'.
+    after clearing the screen, whatever shown_* hold. A cell whose colours moved
+    by at most `tolerance` levels (of 255, both RGB) is left as it is, up to
+    SETTLE_FRAMES refreshes or until the picture stops changing (see
+    _mark_updates; age counts the refreshes, and send is scratch space). A style
+    sends only what changed: a colour on its own, the reset only when bold, dim
+    or reverse change. ascii_only replaces characters outside ASCII with '?'.
     """
     rows, cols = chars.shape
     k = 0
     if full:
         buf[:len(_CLEAR)] = _CLEAR
         k = len(_CLEAR)
+        send[:] = 1
+    else:
+        _mark_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown_attrs, age, tolerance, send)
     styled, style_fg, style_bg, style_attrs = False, 0, 0, 0
     for y in range(rows):
         x = 0
         while x < cols:
-            if not (full or chars[y, x] != shown_chars[y, x] or fg[y, x] != shown_fg[y, x]
-                    or bg[y, x] != shown_bg[y, x] or attrs[y, x] != shown_attrs[y, x]):
+            if not send[y, x]:
                 x += 1
                 continue
-            # A run of changed cells, rewriting gaps of up to MERGE_GAP unchanged ones rather than moving past them.
+            # A run of cells to send, rewriting gaps of up to MERGE_GAP others rather than moving past them.
             last = x
             for j in range(x + 1, cols):
-                if full or chars[y, j] != shown_chars[y, j] or fg[y, j] != shown_fg[y, j] \
-                        or bg[y, j] != shown_bg[y, j] or attrs[y, j] != shown_attrs[y, j]:
+                if send[y, j]:
                     if j - last > MERGE_GAP:
                         break
                     last = j
@@ -95,7 +145,7 @@ def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown
             k += 1
             for c in range(x, last + 1):
                 f, b, a = fg[y, c], bg[y, c], attrs[y, c]
-                if not styled or f != style_fg or b != style_bg or a != style_attrs:
+                if not styled or a != style_attrs:
                     styled, style_fg, style_bg, style_attrs = True, f, b, a
                     buf[k], buf[k + 1], buf[k + 2] = 27, 91, 48  # ESC [ 0
                     k += 3
@@ -110,6 +160,19 @@ def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown
                         k = put_sgr_color(buf, k + 1, b, True)
                     buf[k] = 109  # m
                     k += 1
+                elif not mono and (f != style_fg or b != style_bg):
+                    buf[k], buf[k + 1] = 27, 91  # ESC [
+                    k += 2
+                    if f != style_fg:
+                        k = put_sgr_color(buf, k, f, False)
+                        if b != style_bg:
+                            buf[k] = 59
+                            k += 1
+                    if b != style_bg:
+                        k = put_sgr_color(buf, k, b, True)
+                    buf[k] = 109  # m
+                    k += 1
+                    style_fg, style_bg = f, b
                 cp = chars[y, c]
                 if cp < 0x80 or ascii_only:
                     buf[k] = cp if cp < 0x80 else 63  # ?
@@ -124,6 +187,8 @@ def _encode_updates(chars, fg, bg, attrs, shown_chars, shown_fg, shown_bg, shown
                     buf[k], buf[k + 1] = 0xF0 | cp >> 18, 0x80 | cp >> 12 & 0x3F
                     buf[k + 2], buf[k + 3] = 0x80 | cp >> 6 & 0x3F, 0x80 | cp & 0x3F
                     k += 4
+                shown_chars[y, c], shown_fg[y, c], shown_bg[y, c], shown_attrs[y, c] = chars[y, c], f, b, a
+                age[y, c] = 0
             x = last + 1
     return k
 
@@ -135,6 +200,12 @@ class Screen:
     glyphs, color: force a glyph set / colour mode instead of detecting one.
     background: (r, g, b) to fill the screen with, or None for the terminal's own
     background. Knowing the background lets anti-aliased edges blend into it exactly.
+
+    color_tolerance (in truecolor): a cell whose character and style are the same and whose colours moved by at
+    most this many levels (of 255) is not sent again, which saves output (half the cells for many small moving
+    objects at 1). What the terminal shows is then up to that many levels off, under half a just-noticeable
+    difference at 1, and only for a moment: cells still off are sent once the picture stops changing, or after
+    SETTLE_FRAMES refreshes. 0 sends every change.
     """
 
     def __init__(self, console=None, glyphs=None, color=None, background=None, size=(24, 80)):
@@ -149,6 +220,7 @@ class Screen:
         self.background = None if background is None else to_linear_rgb(background)
         self.fps = 30               # frames a second run() aims for; change it any time
         self.measured_fps = None    # frames run() actually drew in the last second
+        self.color_tolerance = 1    # levels a cell's colours may be off before it's sent again (truecolor only)
         self.key_release = console is not None and console.key_release  # keys() returns KeyRelease events
         self.held = HeldKeys()      # which keys are down, updated by keys()
         self._decoder = InputDecoder()
@@ -200,6 +272,8 @@ class Screen:
         self.attrs = np.zeros((rows, cols), dtype=np.uint8)
         self._shown = None  # unknown: the next refresh redraws everything
         self._out = np.empty(rows * cols * CELL_BYTES + 64, np.uint8)
+        self._age = np.zeros((rows, cols), np.uint8)   # refreshes each cell has been left within the tolerance
+        self._send = np.zeros((rows, cols), np.uint8)  # scratch space for _encode_updates
 
     def poll_size(self):
         """Pick up a change in terminal size (run() calls this before every frame)."""
@@ -259,6 +333,43 @@ class Screen:
         self.bg[y, x:x + n] = self._bg_cell
         self.attrs[y, x:x + n] = BOLD * bold | DIM * dim | REVERSE * reverse
 
+    def label(self, renderer, point, text, color=Color.WHITE, top=0, left=0, owner=None, clamp=False, hide=True,
+              dy=0, bold=False, reverse=False, dim=False):
+        """Write text at a point in the world, as the renderer's last frame (drawn at top, left) shows it: centred on
+        the cell the point lands on, dy rows lower (negative: higher). A name over a character, a number where a
+        hit landed, a marker on a goal.
+
+        Nothing is written for a point behind the camera or outside the frame, unless clamp is set, which puts
+        the text at the frame's edge in the direction the point lies, kept whole inside the frame; nor, with hide,
+        for one behind something drawn (owner: the object, objects or Model the point belongs to, whose own
+        surface doesn't count). Returns the Anchor (see Renderer.anchor), or None if nothing was written."""
+        anchor = renderer.anchor(point, owner, clamp)
+        if anchor is None or (hide and anchor.hidden):
+            return None
+        x, y = left + anchor.x - len(text) // 2, top + anchor.y + int(dy)
+        if clamp:  # whole, inside the frame
+            x = max(min(x, left + renderer.width - len(text)), left)
+            y = max(min(y, top + renderer.height - 1), top)
+        self.text(y, x, text, color, bold=bold, reverse=reverse, dim=dim)
+        return anchor
+
+    def bar(self, y, x, width, fraction, color=Color.GREEN, empty=Color.DEFAULT):
+        """A bar `width` cells long at row y, column x, filled `fraction` (0..1) of the way in `color`, to an eighth
+        of a cell (with Unicode; # and - without), the rest in `empty` (dim): a health bar, say, at a label's
+        Anchor."""
+        width = max(int(width), 0)
+        fraction = min(1.0, max(0.0, float(fraction)))  # (NaN as 0)
+        eighths = int(round(fraction * width * 8))
+        full, part = divmod(eighths, 8)
+        if self.unicode:
+            filled = "\u2588" * full + (" \u258f\u258e\u258d\u258c\u258b\u258a\u2589"[part] if part else "")
+            self.text(y, x, filled, color)
+            self.text(y, x + len(filled), "\u2591" * (width - len(filled)), empty, dim=True)
+        else:
+            filled = "#" * (full + (part >= 4))
+            self.text(y, x, filled, color)
+            self.text(y, x + len(filled), "-" * (width - len(filled)), empty, dim=True)
+
     def draw_frame(self, fb, top=0, left=0):
         """Draw a Renderer's framebuffer with its top-left cell at (top, left)."""
         if fb.cell_pixels != self.cell_pixels:
@@ -289,13 +400,23 @@ class Screen:
             self._shown = (self.chars.copy(), self.fg.copy(), self.bg.copy(), self.attrs.copy())
         chars, fg, bg, attrs = self._shown
         n = _encode_updates(self.chars.view(np.uint32), self.fg, self.bg, self.attrs, chars.view(np.uint32), fg, bg,
-                            attrs, full, self.color_mode == "mono", not self.unicode, self._out)
+                            attrs, self._age, self._send, full, self.color_mode == "mono", not self.unicode,
+                            self._tolerance(), self._out)
         if not n:
             return b""
-        for shown, now in zip(self._shown, (self.chars, self.fg, self.bg, self.attrs)):
-            np.copyto(shown, now)
         # Synchronized output: terminals that support it show the whole update at once, others ignore it.
         return SYNC_BEGIN + self._out[:n].tobytes() + SYNC_END
+
+    def _tolerance(self):
+        """color_tolerance as an int in 0..255; 0 outside truecolor (where colours are palette entries already) or
+        for anything that isn't a positive number."""
+        if self.color_mode != "truecolor":
+            return 0
+        try:
+            tolerance = float(self.color_tolerance)
+        except (TypeError, ValueError):
+            return 0
+        return int(min(tolerance, 255.0)) if tolerance > 0 else 0  # (NaN fails the comparison)
 
     def render_updates(self):
         """The escape sequences that bring the terminal up to date with the grid, and mark it as shown."""
@@ -343,6 +464,13 @@ def compile_kernels():
     renderer.max_pixels = 16 * 8  # drawn smaller than the screen needs, and stretched (as in huge terminals)
     screen.draw_frame(renderer.render(objects, Camera(), lights))
     screen.render_updates()
+    # Ray and overlap queries.
+    solid = Colliders(objects)
+    solid.raycast((0.0, 0.0, 5.0), (0.0, 0.0, -1.0))
+    solid.raycast((0.0, 0.0, 5.0), (0.0, 0.0, -1.0), all=True)
+    solid.raycast_many(np.zeros((4, 3)), np.eye(4, 3) - 0.5)
+    solid.push_out((0.0, 0.0, 0.0), 0.5, end=(0.0, 1.0, 0.0))
+    solid.overlap_box((0.0, 0.0, 0.0), 1.0)
 
 
 def _compile_with_notice(console):
