@@ -5,11 +5,15 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+import unittest.mock
 
 import numba
 import numpy as np
 
+from unicode3d import terminal
 from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
@@ -1853,6 +1857,102 @@ class ScreenTests(unittest.TestCase):
         screen = Screen(color="mono", size=(2, 10))
         screen.text(0, 0, "a\u4e2db\u0301")
         self.assertEqual("".join(screen.chars[0, :4]), "a?b?")
+
+
+class SlowConsole:
+    """A console for run() whose writes of frames wait until `release` is set, as a slow terminal's would."""
+
+    unicode, key_release, reports_releases = True, False, False
+
+    def __init__(self, fail=False):
+        self.writes, self.fail = [], fail
+        self.writing, self.release = threading.Event(), threading.Event()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.writes.append("restored")
+
+    def size(self):
+        return 20, 4
+
+    def read(self):
+        return ""
+
+    def key_is_down(self, key):
+        return None
+
+    def write(self, data):
+        if isinstance(data, bytes):  # a frame (the compile notice is text)
+            self.writing.set()
+            self.release.wait(2)
+            if self.fail:
+                raise OSError("terminal gone")
+        self.writes.append(data)
+
+
+class OutputTests(unittest.TestCase):
+    """run() sends each frame to the terminal while the next one is drawn."""
+
+    def run_frames(self, console, frame_fn):
+        with tempfile.TemporaryDirectory() as cache, \
+                unittest.mock.patch.dict(os.environ, {"XDG_CACHE_HOME": cache}), \
+                unittest.mock.patch.object(terminal, "open_console", lambda **kw: console):
+            terminal.run(frame_fn)
+
+    def test_the_next_frame_is_drawn_while_the_last_is_written(self):
+        console, seen = SlowConsole(), []
+        frames_written = lambda: sum(isinstance(w, bytes) for w in console.writes)
+
+        def frame(screen, dt, keys):
+            screen.text(0, 0, f"frame {len(seen)}")
+            if not seen:
+                screen.refresh()  # returns with the frame still being written
+                seen.append(frames_written() == 0 and console.writing.wait(10))
+                return True
+            seen.append(frames_written() == 0)  # drawn while the terminal still takes in the first frame
+            console.release.set()
+            screen.text(0, 0, "last")
+            screen.refresh()
+            return False
+
+        self.run_frames(console, frame)
+        self.assertEqual(seen, [True, True])
+        frames = [w for w in console.writes if isinstance(w, bytes)]
+        self.assertEqual(len(frames), 2)
+        self.assertIn(b"frame 0", frames[0])
+        self.assertIn(b"last", frames[1])
+        self.assertEqual(console.writes[-1], "restored")  # after the last frame was written in full
+
+    def test_an_error_writing_is_raised_by_the_next_refresh(self):
+        console = SlowConsole(fail=True)
+        console.release.set()
+        frames = []
+
+        def frame(screen, dt, keys):
+            frames.append(dt)
+            screen.text(0, 0, str(len(frames)))
+            screen.refresh()
+
+        with self.assertRaisesRegex(OSError, "terminal gone"), unittest.mock.patch("sys.stderr"):
+            self.run_frames(console, frame)
+        self.assertEqual(len(frames), 2)  # the first frame's error, raised by the second's refresh
+        self.assertEqual(console.writes[-1], "restored")
+
+    def test_writes_keep_their_order(self):
+        written = []
+
+        class Console:
+            def write(self, data):
+                time.sleep(0.001 * (len(written) % 3))
+                written.append(data)
+
+        writer = terminal._Writer(Console())
+        for i in range(50):
+            writer.write(i)
+        writer.close()
+        self.assertEqual(written, list(range(50)))
 
 
 if __name__ == "__main__":

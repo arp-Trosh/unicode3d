@@ -222,6 +222,8 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   VT escape sequences, wrapped in synchronized-output markers where the terminal supports them.
   A colour is sent only when it changes, and in truecolor a cell whose colours moved by a single
   level is left for a moment (`color_tolerance`), which halves the output for busy scenes.
+  Under `run()`, a frame is sent from a thread of its own while the next one is drawn, so a
+  terminal slow to take in big frames costs less frame rate.
   There is no curses: on Windows the console is put in VT mode, and keys and mouse clicks are read
   as console input records.
 - **Speed:** the per-pixel work (projecting and clipping triangles, rasterizing, shading, fog and
@@ -911,6 +913,12 @@ would, unless the program handles that signal itself). `frame_fn(screen, dt, key
   over SSH. The terminal is then up to that many levels off, less than half a just-noticeable
   difference at 1, and only for a moment: the cells still off are sent once the picture stops
   changing, or after 30 refreshes. 0 sends every change.
+- `screen.refresh()` sends what changed in the grid. Under `run()` it returns once the changes are
+  worked out, and they are written to the terminal while the next frame is drawn; the grid is
+  free to change as soon as it returns. At most one frame is on its way at a time, so a slow
+  terminal lowers the frame rate rather than falling behind. With 200 KB frames and a terminal
+  taking in 20 MB a second, that is about a quarter more frames; terminals that read quickly
+  (kitty, and most where a frame fits in the system's buffer) gain little.
 - `Screen(size=(rows, cols))` with no console gives an off-screen grid, for tests;
   `render_updates()` returns the escape sequences a refresh would send.
 

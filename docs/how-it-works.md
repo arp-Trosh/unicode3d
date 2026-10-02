@@ -348,7 +348,11 @@ the reset only when bold, dim or reverse change. In truecolor, a cell whose colo
 by a level or so each frame, which no one can see, and leaving them saves four fifths of its output.
 Those cells are sent once the picture stops changing, or after 30 refreshes, so a still picture is
 always exact. The update is wrapped in synchronized-output markers, which terminals
-that support them use to show the whole update at once, with no tearing. There is no curses. On
+that support them use to show the whole update at once, with no tearing. `run()` hands the finished
+bytes to a thread of its own that writes them while the next frame is drawn: a big frame can take a
+slow terminal as long to read as it takes to draw, and the system's buffer between the two holds
+only some tens of kilobytes. One frame is on its way at a time, so a terminal that can't keep up
+slows the frame rate instead of building a queue. There is no curses. On
 Windows the console is switched into VT mode, and keys and mouse clicks are read as console input
 records.
 

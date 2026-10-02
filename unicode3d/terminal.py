@@ -46,6 +46,7 @@ BOLD, DIM, REVERSE = 1, 2, 4
 MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
 CELL_BYTES = 64  # the most one cell can take to send: a cursor move, a style with two RGB colours, a character
 SETTLE_FRAMES = 30  # refreshes a cell may stay within Screen.color_tolerance of its colour before it is sent anyway
+BACKGROUND_OUTPUT = True  # run() sends each frame to the terminal while drawing the next (see _Writer)
 COMPILE_MESSAGE = "First run compile, please wait..."
 COMPILE_NOTICE_DELAY = 0.5  # seconds: loading compiled kernels from Numba's cache takes less, compiling them more
 CRASH_LOG_LIMIT = 1 << 20  # bytes: a longer crash log is cut down to its last quarter when run() opens it
@@ -439,9 +440,13 @@ class Screen:
         return self._updates().decode("utf-8")
 
     def refresh(self):
+        """Send the terminal what changed in the grid since the last refresh. Under run(), the sending goes on in
+        the background while the next frame is drawn (see _Writer); the grid is free to change once this returns."""
         data = self._updates()
         if data and self.console is not None:
-            self.console.write(data)
+            (self._writer or self.console).write(data)
+
+    _writer = None  # set by run(): the _Writer that sends refresh()'s output
 
 
 # ----- running an app ------------------------------------------------------------------------
@@ -550,6 +555,68 @@ def _frame_period(fps):
         return 0.0
 
 
+class _Writer:
+    """Writes to a console from a thread of its own, one write at a time, so that run() draws the next frame
+    while the terminal takes in the last one (writing a big frame can take as long as drawing it).
+
+    write() returns once the data is queued, after waiting for the write before it to finish: at most one frame is
+    on its way at a time, so a slow terminal slows the frame rate rather than letting frames pile up. refresh()
+    hands over bytes it has finished with, so the grid is free to change while they are sent. An error the console
+    raised in the background is raised by the next write()."""
+
+    WAIT = 0.1  # seconds between checks while waiting (an untimed wait can't be interrupted by Ctrl-C on Windows)
+
+    def __init__(self, console):
+        self._console = console
+        self._pending = None  # the data being written, until it has been
+        self._error = None
+        self._closing = False
+        self._done = threading.Condition()
+        self._thread = threading.Thread(target=self._send, name="unicode3d output", daemon=True)
+        self._thread.start()
+
+    def write(self, data):
+        with self._done:
+            self._wait()
+            self._pending = data
+            self._done.notify_all()
+
+    def close(self):
+        """Wait for the write on its way, then stop the thread. An error it raised is dropped: the console's
+        own write on closing (restoring the terminal) meets the same trouble and raises it."""
+        with self._done:
+            while self._pending is not None:
+                self._done.wait(self.WAIT)
+            self._closing = True
+            self._done.notify_all()
+        self._thread.join()
+
+    def _wait(self):
+        """Wait (holding the lock) until no write is on its way, and raise what the last one raised."""
+        while self._pending is not None:
+            self._done.wait(self.WAIT)
+        error, self._error = self._error, None
+        if error is not None:
+            raise error
+
+    def _send(self):
+        while True:
+            with self._done:
+                while self._pending is None and not self._closing:
+                    self._done.wait()
+                if self._pending is None:
+                    return
+                data = self._pending
+            error = None
+            try:
+                self._console.write(data)
+            except BaseException as e:  # (for the program's own thread to raise)
+                error = e
+            with self._done:
+                self._pending, self._error = None, error
+                self._done.notify_all()
+
+
 @contextlib.contextmanager
 def _exit_on_sigterm():
     """While the loop runs, SIGTERM (kill, a closing session) ends the program as SystemExit does, so that the
@@ -600,21 +667,28 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
                 log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} started {_describe(screen)}\n")
                 log.flush()
             _compile_with_notice(console)
-            last = time.perf_counter()
-            second, frames = last, 0
-            while True:
-                start = time.perf_counter()
-                dt, last = start - last, start
-                if start - second >= 1.0:
-                    screen.measured_fps, second, frames = frames / (start - second), start, 0
-                frames += 1
-                frame += 1
-                screen.poll_size()
-                if frame_fn(screen, dt, screen.keys()) is False:
-                    return
-                remaining = _frame_period(screen.fps) - (time.perf_counter() - start)
-                if remaining > 0:
-                    time.sleep(remaining)
+            if BACKGROUND_OUTPUT:
+                screen._writer = _Writer(console)
+            try:
+                last = time.perf_counter()
+                second, frames = last, 0
+                while True:
+                    start = time.perf_counter()
+                    dt, last = start - last, start
+                    if start - second >= 1.0:
+                        screen.measured_fps, second, frames = frames / (start - second), start, 0
+                    frames += 1
+                    frame += 1
+                    screen.poll_size()
+                    if frame_fn(screen, dt, screen.keys()) is False:
+                        return
+                    remaining = _frame_period(screen.fps) - (time.perf_counter() - start)
+                    if remaining > 0:
+                        time.sleep(remaining)
+            finally:
+                if screen._writer is not None:  # the last frame sent before the terminal is restored
+                    screen._writer.close()
+                    screen._writer = None
     except Exception:  # (the terminal is restored by now)
         if log is not None:
             where = _describe(screen) if screen is not None else " ".join(sys.argv)
