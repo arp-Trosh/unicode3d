@@ -419,7 +419,7 @@ class Walk:
                             "gradient": Gradient((70, 90, 140), (20, 20, 30)), "none": None}
         self.background = Choice("Background (b)", tuple(self.backgrounds), key="b")
         self.fog = Slider("Fog", 0.3, 0.0, 0.9, step=0.05, keys="[]", length=8, fmt=lambda v: f"{v:.2f}")
-        self.fog_into = Choice("into (f)", ("background", "mist"), key="f")
+        self.fog_into = Choice("fades into (f)", ("background", "mist"), key="f")
         self.panel = Panel([self.lamp, self.sun, self.background, self.fog, self.fog_into], keyboard=False)
         self.x, self.z, self.yaw, self.pitch = 0.0, 5.5, 0.0, 0.0
         self.t = 0.0
