@@ -133,7 +133,7 @@ clicked too. A small font and a large terminal give the most detail.
   compare: near tiles grow, the lines converge, houses lean outward. Click a pawn, then a tile, and
   it hops there along the shortest way (climbing at most one level a step); the tile under the
   pointer lights up, found by a ray query along `renderer.ray()` (parallel rays, in an orthographic
-  view). Names and health bars float over the pawns (dim where something hides one, and pointing
+  view). Names and health meters float over the pawns (dim where something hides one, and pointing
   from the screen's edge at those out of view). q/e turn the view a quarter, +/- or the wheel zoom,
   WASD or the arrows pan, Tab picks the next pawn. Shows: the orthographic camera, ray queries,
   labels, shadows, a mirror of a sea.
@@ -207,8 +207,8 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   background (or a colour), or simple depth cueing; and where one surface passes in front of another
   the far side gets a dark outline.
 - **Cameras:** perspective, or orthographic for isometric and top-down views.
-- **Labels:** terminal text anchored to points in the scene (names, numbers, health bars, markers
-  at the screen's edge for things out of view), hidden behind what is in front of them.
+- **Labels:** terminal text anchored to points in the scene (names, numbers, meters, markers at
+  the screen's edge for things out of view), hidden behind what is in front of them.
 - **Shapes and motion:** a scene graph of nodes and objects, scaling along each axis separately,
   mesh builders (extruded text, ellipsoids, boxes, cushions), and animation along keyframes with
   easing, steps or splines, in clips that move many parts at once.
@@ -372,8 +372,8 @@ off screen or not drawn at all, use ray and overlap queries.
 <summary><h3 id="labels">Labels</h3></summary>
 
 Text anchored to points in the scene, drawn as terminal text (sharper than anything textured at
-terminal resolution): names over characters, damage numbers, health bars, markers on things off
-screen. `screen.label(renderer, point, text, color, top=0, left=0)` writes `text` centred on the
+terminal resolution): names over characters, damage numbers, meters (a character's health, say),
+markers on things off screen. `screen.label(renderer, point, text, color, top=0, left=0)` writes `text` centred on the
 cell the point landed on in the renderer's last frame (drawn at `top`, `left`), `dy` rows lower,
 and returns an `Anchor`, or `None` if it wrote nothing:
 
@@ -383,7 +383,7 @@ for enemy in enemies:
     head = enemy.position + (0.0, 1.2, 0.0)
     if screen.label(renderer, head, enemy.name, Color.RED, top=1, owner=enemy):
         a = renderer.anchor(head)
-        screen.bar(1 + a.y + 1, a.x - 3, 6, enemy.health)   # a bar under the name
+        screen.bar(1 + a.y + 1, a.x - 3, 6, enemy.health)   # a meter under the name
 screen.label(renderer, goal, "goal", Color.YELLOW, top=1, clamp=True, hide=False)
 ```
 
@@ -395,8 +395,8 @@ screen.label(renderer, goal, "goal", Color.YELLOW, top=1, clamp=True, hide=False
 - `renderer.anchor(point, owner=None, clamp=False)` is the part without the text: an `Anchor` with
   the cell (`x`, `y`, from the frame's top-left), `distance` from the camera, `hidden`, and `edge`
   (moved to the edge), for drawing something else there.
-- `screen.bar(y, x, width, fraction, color, empty)` is a bar filled to an eighth of a cell
-  (`#` and `-` without Unicode).
+- A meter drawn at an anchor (`screen.bar`, see [Screen and run()](#screen-and-run)) shows a
+  level beside the name: health, charge, progress.
 - To put a label just above a thing, take the top of its box in the world: `obj.world_bounds()`
   (and `model.world_bounds()`) give its corners `(low, high)` as it stands now, through its
   parents, and `union_bounds(objects)` the box around several. A bounding sphere's radius puts the
@@ -890,6 +890,10 @@ would, unless the program handles that signal itself). `frame_fn(screen, dt, key
 - `screen.text(y, x, s, color, bold=False, reverse=False, dim=False)` draws in the terminal's own
   ANSI colours, so text follows the user's theme. Characters that aren't exactly one cell wide are
   shown as `?`.
+- `screen.bar(y, x, width, fraction, color=Color.GREEN, empty=Color.DEFAULT)` draws a meter: a bar
+  `width` cells long filled `fraction` (0..1) of the way, to an eighth of a cell (`#` and `-`
+  without Unicode), for progress and levels of any kind (loading, memory or disk in use, a volume,
+  a frame-time gauge, a character's health over its [label](#labels)).
 - `background=(r, g, b)` fills the screen with a known colour so antialiased edges blend into it
   exactly; by default, edges blend toward black over the terminal's own background.
 - `screen.set_glyphs(name)` and `screen.set_color(mode)` switch modes while running

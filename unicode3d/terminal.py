@@ -354,9 +354,10 @@ class Screen:
         return anchor
 
     def bar(self, y, x, width, fraction, color=Color.GREEN, empty=Color.DEFAULT):
-        """A bar `width` cells long at row y, column x, filled `fraction` (0..1) of the way in `color`, to an eighth
-        of a cell (with Unicode; # and - without), the rest in `empty` (dim): a health bar, say, at a label's
-        Anchor."""
+        """A meter: a bar `width` cells long at row y, column x, filled `fraction` (0..1) of the way in `color`, to
+        an eighth of a cell (with Unicode; # and - without), the rest in `empty` (dim). For progress and levels of
+        any kind (loading, memory or disk in use, a volume, frame time), on its own or at a label's Anchor (a
+        character's health, say)."""
         width = max(int(width), 0)
         fraction = min(1.0, max(0.0, float(fraction)))  # (NaN as 0)
         eighths = int(round(fraction * width * 8))
