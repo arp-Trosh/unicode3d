@@ -41,7 +41,7 @@ Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it.
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.7.1
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.8.0
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
@@ -1003,23 +1003,24 @@ built but not written to a terminal) on this machine:
 CPU:      AMD Ryzen 5 5600X 6-Core Processor (12 logical cores)
 Threads:  12 (Numba's tbb threading layer)
 System:   Linux 7.2.7-arch1-1 (x86_64)
-Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.7.1
+Software: Python 3.14.7, NumPy 2.5.3, Numba 0.67.0, unicode3d 0.8.0
 Frames:   180x50 cells, sextant glyphs, truecolor; median of 40 frames, ms
 
 scene        objects    tris   first          render      draw_frame  render_updates    total    fps  KB out
-dice               3      36     6.8            2.62            0.49            0.24     3.36  297.7    33.9
-dice-sun           4      38     8.9            4.46            0.54            0.32     5.33  187.6    46.2
-dice-lamp          4      38     7.6            4.50            0.54            0.38     5.42  184.5    56.8
-dice-glass         4      38    12.5            6.70            0.56            0.36     7.62  131.3    54.0
-dice-mirror        4      38    10.8            7.26            0.54            0.38     8.19  122.1    57.9
-balls-400        400  140800    19.3           12.99            0.68            0.88    14.55   68.7   148.1
-sphere-3k          1    2976     4.6            2.33            0.45            0.13     2.92  342.0    12.2
-sphere-27k         1   27360    13.5            3.87            0.45            0.12     4.43  225.6     9.5
+dice               3      36     6.6            2.59            0.49            0.22     3.29  303.8    29.5
+dice-sun           4      38     8.5            4.49            0.53            0.27     5.30  188.8    38.7
+dice-lamp          4      38     7.4            4.53            0.53            0.32     5.40  185.2    46.4
+dice-glass         4      38    12.7            6.72            0.55            0.31     7.58  131.9    45.1
+dice-mirror        4      38    10.3            7.17            0.53            0.32     8.03  124.5    45.6
+balls-400        400  140800    19.2           12.82            0.68            0.52    14.02   71.3    76.2
+sphere-3k          1    2976     4.5            2.34            0.44            0.06     2.84  351.8     2.1
+sphere-27k         1   27360    13.0            3.77            0.44            0.06     4.28  233.4     1.7
 ```
 
 `render` is `Renderer.render` (projecting, rasterizing and shading, shadow maps included),
 `draw_frame` matching pixels to glyphs and colours, and `render_updates` encoding the changed cells
-as escape sequences; `first` is each scene's first frame (setting up buffers, and drawing its shadow
+as escape sequences (`KB out` is what that sends a frame, with the default `color_tolerance` of 1);
+`first` is each scene's first frame (setting up buffers, and drawing its shadow
 maps), left out of the medians. The `-sun` and `-lamp` scenes have a shadowed light over a floor,
 and their dice turn, so the shadow map is redrawn every frame. Run it with `--size`, `--glyphs`,
 `--color`, `--threads` or `--scene` to measure other cases; its first lines say what it ran on, so
@@ -1158,7 +1159,7 @@ Releases are git tags (`v0.1.0`, ...) following [semantic versioning](https://se
 release (`0.1.1`) fixes bugs, a minor release (`0.2.0`) adds features, and before 1.0 a minor release
 may also change the API. `unicode3d.__version__` holds the version. The `main` branch can be ahead
 of the latest tag; pin a tag in a game. To release: bump `__version__` in `unicode3d/__init__.py`,
-commit, then tag it and push the tag (`git tag v0.7.1 && git push --tags`).
+commit, then tag it and push the tag (`git tag v0.8.0 && git push --tags`).
 
 </details>
 
