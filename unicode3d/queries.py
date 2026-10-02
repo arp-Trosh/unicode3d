@@ -729,6 +729,14 @@ def _point(value, name):
     return np.ascontiguousarray(point)
 
 
+def _lengths(directions):
+    """The lengths of directions (N, 3), added up one coordinate at a time: the same bits on any machine, so a ray
+    gives the same answer from raycast and raycast_many (numpy's sums and dot products round differently with the
+    processor's vector instructions)."""
+    d = np.asarray(directions, dtype=np.float64)
+    return np.sqrt(d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1] + d[:, 2] * d[:, 2])
+
+
 def _limit(value):
     """A distance limit as a float: NaN and anything below 0 as 0."""
     value = float(value)
@@ -869,7 +877,7 @@ class Colliders:
         Models) to pass through, such as the one casting it. With all=True, every Hit along it, nearest first (a
         ray through a closed mesh hits it going in and coming out)."""
         origin, direction = _point(origin, "origin"), _point(direction, "direction")
-        length = float(np.sqrt(direction @ direction))
+        length = float(_lengths(direction[None])[0])
         if not (length > 0.0 and np.isfinite(length) and np.isfinite(origin).all()):
             return [] if all else None
         direction = direction / length
@@ -921,7 +929,7 @@ class Colliders:
         origins = np.ascontiguousarray(np.broadcast_to(origins, (n, 3)), np.float64)
         directions = np.broadcast_to(directions, (n, 3))
         with np.errstate(all="ignore"):
-            lengths = np.sqrt((directions ** 2).sum(axis=1))
+            lengths = _lengths(directions)
             usable = (lengths > 0.0) & np.isfinite(lengths) & np.isfinite(origins).all(axis=1)
             directions = np.ascontiguousarray(np.where(usable[:, None], directions / lengths[:, None], 0.0), np.float64)
             limit = np.broadcast_to(np.asarray(max_distance, dtype=np.float64), (n,))

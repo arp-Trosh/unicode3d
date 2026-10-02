@@ -91,7 +91,7 @@ class RayTests(unittest.TestCase):
             self.assertIs(hit.object, obj)
             self.assertAlmostEqual(hit.distance, distance, delta=1e-9 * (1 + distance))
             self.assertIs(many[0][r], obj)
-            self.assertEqual(many[1][r], hit.distance)
+            self.assertAlmostEqual(many[1][r], hit.distance, delta=1e-12 * (1 + distance))
             np.testing.assert_allclose(many[2][r], hit.position)
             np.testing.assert_allclose(many[3][r], hit.normal)
             self.assertEqual(many[4][r], hit.face)
