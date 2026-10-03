@@ -6,7 +6,7 @@ Draws with Unicode block characters in 24-bit, 256 or 16 colours, whatever the
 terminal supports, with an ASCII fallback; runs in Windows Terminal and Unix
 terminals alike. Ported in spirit from https://github.com/ShakedAp/ASCII-renderer.
 """
-__version__ = "0.8.3"
+__version__ = "0.9.0"
 
 from .animation import Animation, Clip, RotationTrack, SplineTrack, Track
 from .background import Fog, Gradient, Sky, SkyBox
