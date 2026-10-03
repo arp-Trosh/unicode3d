@@ -550,6 +550,19 @@ for warning in ship.warnings:                    # a texture that isn't there, s
 fb = renderer.render([*ship, ground], camera, lights)
 ```
 
+For several of one model, load it once and copy it: `model.copy()` gives another with parts, nodes
+and animations of its own (posed as the original is now, its clips with their own clocks), sharing
+the meshes, textures, materials and keyframes, so a copy costs a fraction of a millisecond and
+little memory. Its root hangs from the same parent as the original's.
+
+```python
+goblin = load_model("goblin.glb").fit(1.0)
+horde = [goblin.copy() for _ in range(10)]
+for i, g in enumerate(horde):
+    g.root.position = np.array([i * 1.5, 0.0, 0.0])
+    g.animations["Walk"].time = i * 0.1          # out of step with each other
+```
+
 glTF is the format to prefer: it is Blender's own export, loads fast (its arrays go straight into
 numpy), and keeps a model's parts, their hierarchy and its animations:
 

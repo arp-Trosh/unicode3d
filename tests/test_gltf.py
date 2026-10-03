@@ -459,6 +459,34 @@ class GltfTests(unittest.TestCase):
         # A Model's parts draw wherever the animation has put them.
         fb = Renderer(40, 20).render([*model], Camera(position=np.array([0.0, 2.0, 12.0])), Light())
         self.assertTrue(fb.drawn.any())
+        # A copy shares meshes and keyframes, but has parts, nodes and clocks of its own.
+        table = Node()
+        model.root.parent = table
+        twin = model.copy()
+        self.assertIs(twin.root.parent, table)
+        self.assertIsNot(twin.root, model.root)
+        twin_door = twin.nodes["Door"]
+        self.assertIsNot(twin_door, door_obj)
+        self.assertIs(twin_door.mesh, door_obj.mesh)
+        self.assertEqual({id(o) for o in twin}, {id(o) for o in twin.nodes.values()})
+        self.assertTrue(all(o.parent is twin.root for o in twin))
+        self.assertEqual(set(map(id, twin.animations["Open"].targets)), set(map(id, twin.nodes.values())))
+        self.assertIs(twin.animations["Open"].animations[0].tracks["rotation"],
+                      clip.animations[0].tracks["rotation"])
+        self.assertEqual(twin.animations["Open"].time, clip.time)
+        np.testing.assert_allclose(twin_door.position, door_obj.position)
+        before = door_obj.position.copy()
+        twin.animations["Open"].apply(1.0)
+        np.testing.assert_allclose(twin_door.position, (2, 0, 0))
+        np.testing.assert_allclose(door_obj.position, before)
+        self.assertEqual(clip.time, 2.5)
+        twin.root.position = np.array([3.0, 0.0, 0.0])
+        np.testing.assert_allclose(twin_door.world_matrix()[1] - door_obj.world_matrix()[1],
+                                   np.array([3.0, 0.0, 0.0]) + (2, 0, 0) - before)
+        camera = Camera(position=np.array([0.0, 2.0, 12.0]))
+        drawn = [Renderer(40, 20).render([*m], camera, Light()).drawn.copy() for m in (model, twin)]
+        self.assertTrue(drawn[1].any())
+        self.assertFalse((drawn[0] == drawn[1]).all())
 
 
 class AnimationPieceTests(unittest.TestCase):

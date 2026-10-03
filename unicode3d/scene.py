@@ -4,10 +4,12 @@
 
 Lights are in lights.py and the Renderer, which draws all this, in renderer.py; both are importable from here too.
 """
+import copy as _copy
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from .animation import Animation, Clip
 from .lights import Light, PointLight, _vec3
 from .mesh import Mesh
 from .renderer import Anchor, Pick, Renderer
@@ -209,6 +211,46 @@ class Model:
 
     def __len__(self):
         return len(self.objects)
+
+    def copy(self):
+        """Another of the same model, to place, pose, hide and animate on its own: ten goblins from one file loaded
+        once. Its root, parts and nodes are new (posed as these are now), and so are its animations, with clocks of
+        their own; meshes, textures, materials and animation keyframes are shared, so a copy costs little memory
+        and no loading. Its root hangs from the same parent as this one's (move it, or set root.parent)."""
+        made = {}  # id(node): its copy, for nodes under root (root's own parent and above are shared)
+
+        def inside(node):
+            while node is not None:
+                if node is self.root:
+                    return True
+                node = node.parent
+            return False
+
+        def clone(node):
+            if node is None or (id(node) not in made and not inside(node)):
+                return node
+            if id(node) not in made:
+                twin = made[id(node)] = _copy.copy(node)
+                twin.position = np.array(node.position, dtype=float)
+                twin.rotation = np.array(node.rotation, dtype=float)
+                if isinstance(node.scale, np.ndarray):
+                    twin.scale = node.scale.copy()
+                if node is not self.root:
+                    twin.parent = clone(node.parent)
+            return made[id(node)]
+
+        animations = {}
+        for name, clip in self.animations.items():
+            moves = []
+            for a in clip.animations:
+                move = Animation(clone(a.target), speed=a.speed, **a.tracks)
+                move.time = a.time
+                moves.append(move)
+            animations[name] = Clip(moves, name=clip.name, loop=clip.loop, speed=clip.speed)
+            animations[name].time = clip.time
+        return Model(clone(self.root), [clone(o) for o in self.objects],
+                     {name: [clone(o) for o in parts] for name, parts in self.names.items()}, dict(self.materials),
+                     list(self.warnings), {name: clone(n) for name, n in self.nodes.items()}, animations)
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the model's parts as they stand in the world (see
