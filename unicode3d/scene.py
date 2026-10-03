@@ -16,7 +16,7 @@ from .mesh import Mesh, _srgb01
 from .shapes import merge_meshes
 from .texture import alpha_kind
 from .renderer import Anchor, Pick, Renderer
-from .transforms import look_at, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
+from .transforms import look_at, quat_from_matrix, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
 __all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer", "union_bounds"]
 
@@ -33,6 +33,11 @@ class Camera:
     "ortho" (orthographic) shows them the same size however far off, in a view `size` units of the world tall, as
     in isometric and top-down games, board games and technical drawings. Either shows what is between `near` and
     `far` in front of the camera.
+
+    A camera can be an object's (or a Node's) parent, to keep it in place in front of the camera wherever that
+    goes: 3D lettering over the scene, a held lantern, a cockpit. In the camera's own space x is to the right of
+    the picture, y up and -z straight ahead, so Object3D(mesh, position=(0, 0, -5), parent=camera) stays in the
+    middle of the view, 5 units ahead; height_at(5) says how much of the world the view is tall there.
     """
     position: np.ndarray = _vec3(0.0, 0.0, 5.0)
     target: np.ndarray = _vec3(0.0, 0.0, 0.0)
@@ -43,9 +48,38 @@ class Camera:
     projection: str = "perspective"  # or "ortho"
     size: float = 10.0  # how tall the view is in the world (ortho)
 
+    # As a parent (see above), a camera is at `position`, turned by `rotation`, unscaled, shown, with no parent.
+    scale = 1.0
+    visible = True
+    parent = None
+
     def __post_init__(self):
         if self.projection not in ("perspective", "ortho"):
             raise ValueError(f'projection must be "perspective" or "ortho", not {self.projection!r}')
+
+    def basis(self):
+        """(right, up, forward): unit vectors in the world towards the right and top of the picture and straight
+        ahead, as the renderer draws the view (looking straight up or down, `up` is taken as -z). Zero vectors
+        for a camera at its target."""
+        with np.errstate(all="ignore"):
+            view = look_at(self.position, self.target, self.up)
+        return view[0, :3].copy(), view[1, :3].copy(), -view[2, :3]
+
+    @property
+    def rotation(self):
+        """The camera's turn as a quaternion (w first): from its own space (x right, y up, -z ahead) to the world's,
+        as a parent's rotation is (see above)."""
+        right, up, forward = self.basis()
+        with np.errstate(all="ignore"):
+            return quat_from_matrix(np.column_stack([right, up, -forward]))
+
+    def height_at(self, distance=1.0):
+        """How tall the view is, in units of the world, `distance` ahead of the camera: what fills the picture from
+        bottom to top there (`size` at any distance for an orthographic camera). Times the picture's width over
+        its height for how wide."""
+        if self.projection == "ortho":
+            return float(self.size)
+        return 2.0 * float(distance) * float(np.tan(np.radians(float(self.fov)) / 2.0))
 
     def view_matrix(self):
         return look_at(self.position, self.target, self.up)

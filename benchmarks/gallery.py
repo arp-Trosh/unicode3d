@@ -474,6 +474,26 @@ def ortho():
                 {"background": Sky(), "outline": 0.3, "fog": Fog(start=26.0, end=60.0, color=(200, 210, 230))})
 
 
+def lettering():
+    """3D lettering in the built-in font (added after 0.10.0): a sign extruded from merged runs and a line of
+    stone blocks, a box per pixel each its own shade, hanging from the camera (so placed in its space) over a
+    floor, with sun shadows."""
+    from unicode3d.shapes import text_mesh
+    view = Camera(position=np.array([2.0, 3.0, 9.0]), target=np.array([0.0, 0.5, 0.0]))
+    sign, width = text_mesh("Hello, 3D!", depth=2.0)
+    stones, across = text_mesh("Stone", depth=1.0, blocks=True, gap=0.2)
+    shades = np.random.default_rng(3).uniform(0.55, 1.0, len(stones.faces) // 12)
+    stones.face_colors = np.repeat(shades[:, None] * [0.8, 0.75, 0.68], 12, axis=0)
+    tall = view.height_at(6.0)  # (of the view, 6 units in front of the camera)
+    objects = [Object3D(block_mesh((0, -2.5, -2), (16, 0.1, 10)), color=(120, 110, 100)),
+               Object3D(sign, np.array([0.0, tall * 0.2, -6.0]), color=(230, 180, 60), scale=tall * 1.3 / width,
+                        parent=view),
+               Object3D(stones, np.array([0.0, -tall * 0.2, -6.0]), scale=tall * 0.9 / across, parent=view,
+                        color=(255, 255, 255))]
+    sun = Light(direction=np.array([-0.3, -1.0, -0.5]), ambient=0.35, diffuse=0.7, shadows=True)
+    return Shot(objects, view, sun, {"background": Gradient((40, 50, 80), (10, 10, 20))})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -499,6 +519,7 @@ SCENES = {
     "model": model,
     "gltf": gltf,
     "ortho": ortho,
+    "lettering": lettering,
 }
 
 

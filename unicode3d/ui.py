@@ -421,11 +421,21 @@ class DisplayControls(Panel):
     screen it changes), e.g. at the bottom right:
 
         controls.draw(screen, rows - 1, cols - controls.width - 1)
+
+    show: the names of the widgets to draw, of SETTINGS (all by default); the others still answer their keys and
+    are in settings(). show=("fps",) draws only the frame rate, for a program with a settings page of its own.
+    If it is never drawn, pass the screen to handle() each frame instead.
+
+    settings() gives the values as {name: value}, ready for JSON, and apply() takes them back (on another run,
+    say: keeping them in a file is the program's part).
     """
 
-    def __init__(self, fps_steps=FPS_STEPS, keyboard=False, renderer=None):
+    SETTINGS = ("glyphs", "color", "fps", "shadows", "reflections")
+
+    def __init__(self, fps_steps=FPS_STEPS, keyboard=False, renderer=None, show=None):
         self.screen = None
         self.renderer = renderer
+        self._pending = {}  # values given to apply() before the screen was known
         steps = tuple(fps_steps)
         fps_width = len(f"999/{max(steps)}fps")
 
@@ -448,7 +458,51 @@ class DisplayControls(Panel):
                                       show=lambda v: "reflections" if v else "no reflections",
                                       get=lambda: self.renderer.reflections, set=self._set_reflections)
             widgets += [self.shadows, self.reflections]
-        super().__init__(widgets, keyboard=keyboard)
+        self._named = {name: getattr(self, name) for name in self.SETTINGS if hasattr(self, name)}
+        unknown = set(show or ()) - set(self.SETTINGS)
+        if unknown:
+            raise ValueError(f"no such display setting: {', '.join(sorted(unknown))} (they are {self.SETTINGS})")
+        shown = [w for w in widgets if show is None or any(self._named.get(n) is w for n in show)]
+        self._hidden = [w for w in widgets if w not in shown]
+        super().__init__(shown, keyboard=keyboard)
+
+    def settings(self):
+        """{name: value} of each setting (glyphs, color, fps, and with a renderer shadows and reflections), as
+        strings, numbers and booleans."""
+        values = {name: w.value for name, w in self._named.items()}
+        values.update({k: v for k, v in self._pending.items() if k in values})
+        return values
+
+    def apply(self, values):
+        """Put settings from settings() into effect, skipping names it doesn't know and values this screen can't
+        take (sextant glyphs on a terminal without Unicode, say). Before the screen is known (the first draw()
+        or handle()), they wait for it."""
+        for name, value in dict(values).items():
+            w = self._named.get(name)
+            options = GLYPH_MODES if name == "glyphs" and self.screen is None else w.options if w else ()
+            if not any(value == o and type(value) is type(o) for o in options):
+                continue
+            if self.screen is None and name in ("glyphs", "color", "fps"):  # (they are the screen's)
+                self._pending[name] = value
+                continue
+            try:
+                w.value = value
+            except ValueError:
+                pass
+
+    def _take(self, ev):
+        if isinstance(ev, int) and not isinstance(ev, bool):
+            for w in self._hidden:
+                if w.shortcut(ev):
+                    return True
+        return super()._take(ev)
+
+    def _found_screen(self, screen):
+        self.screen = screen
+        self.glyphs.options = tuple(screen.glyph_modes)  # ascii only, without Unicode
+        if self._pending:
+            pending, self._pending = self._pending, {}
+            self.apply(pending)
 
     def _set_shadows(self, v):
         self.renderer.shadows = v
@@ -465,13 +519,10 @@ class DisplayControls(Panel):
             self.screen.fps = v
 
     def handle(self, events, screen=None):
-        if screen is not None:
-            self.screen = screen
-        if self.screen is not None:
-            self.glyphs.options = tuple(self.screen.glyph_modes)  # ascii only, without Unicode
+        if screen is not None or self.screen is not None:
+            self._found_screen(screen if screen is not None else self.screen)
         return super().handle(events)
 
     def draw(self, screen, y, x):
-        self.screen = screen
-        self.glyphs.options = tuple(screen.glyph_modes)
+        self._found_screen(screen)
         super().draw(screen, y, x)

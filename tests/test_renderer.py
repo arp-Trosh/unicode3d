@@ -13,7 +13,7 @@ import unittest.mock
 import numba
 import numpy as np
 
-from unicode3d import pictures, terminal
+from unicode3d import fonts, pictures, terminal
 from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
@@ -26,7 +26,7 @@ from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
 from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Model, Node, Object3D, PointLight, Renderer, union_bounds
-from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_mesh
+from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_bitmap, text_mesh
 from unicode3d.kernel_signatures import KERNELS
 from unicode3d.precompile import missing_kernels, share_out
 from unicode3d.terminal import SETTLE_FRAMES, Screen, compile_kernels
@@ -119,6 +119,34 @@ class ShapeTests(unittest.TestCase):
         self.assertAlmostEqual(volume(mesh), 22.0)  # "I" has 11 pixels
         self.assertEqual(width, 7)
 
+    def test_the_pixel_font_has_every_printable_character(self):
+        printable = [chr(c) for c in range(32, 127)]
+        self.assertEqual(sorted(fonts.PIXEL), sorted(printable))
+        for ch, rows in fonts.PIXEL.items():
+            self.assertEqual(len(rows), 9, ch)
+            self.assertEqual(len({len(r) for r in rows}), 1, ch)
+            self.assertTrue(ch == " " or any("#" in r for r in rows), ch)
+        mesh, width = text_mesh("Fox, jumps!")  # the built-in font by default
+        cells = text_bitmap("Fox, jumps!")
+        self.assertEqual(width, cells.shape[1])
+        self.assertAlmostEqual(volume(mesh), cells.sum() * 1.6)
+        with self.assertRaises(KeyError):
+            text_bitmap("\u00e9")
+        with self.assertRaises(ValueError):
+            fonts.font(3, {"x": "##/#"})
+
+    def test_block_text_has_a_box_per_pixel(self):
+        cells = text_bitmap("Hi")
+        mesh, width = text_mesh("Hi", depth=1.0, blocks=True, gap=0.2)
+        self.assertEqual(len(mesh.faces), 12 * cells.sum())
+        self.assertAlmostEqual(volume(mesh), cells.sum() * 0.8 * 0.8)
+        h, w = cells.shape
+        rows, cols = np.nonzero(cells)
+        for k in (0, len(rows) // 2, len(rows) - 1):  # faces 12k..12k+11 are the k-th pixel's, in reading order
+            v = mesh.vertices[mesh.faces[12 * k:12 * k + 12]].reshape(-1, 3)
+            centre = (v.min(axis=0) + v.max(axis=0)) / 2
+            np.testing.assert_allclose(centre, (cols[k] + 0.5 - w / 2, h / 2 - rows[k] - 0.5, 0.0), atol=1e-12)
+
     def test_merged_meshes_keep_their_volume(self):
         mesh = merge_meshes([block_mesh((0.0, 0.0, 0.0), (1.0, 2.0, 3.0)), block_mesh((5.0, 0.0, 0.0), (1.0, 1.0, 1.0))])
         self.assertAlmostEqual(volume(mesh), 7.0)
@@ -148,6 +176,30 @@ class RenderTests(unittest.TestCase):
     def render(self, objects, w=80, h=30, camera=None, **kwargs):
         camera = camera or Camera(position=np.array([0.0, 0.0, 5.0]))
         return Renderer(w, h, **kwargs).render(objects, camera, Light())
+
+    def test_objects_parented_to_the_camera_stay_in_front_of_it(self):
+        for camera in (Camera(position=np.array([3.0, 2.0, 5.0]), target=np.array([0.0, 0.5, 0.0])),
+                       Camera(position=np.array([-4.0, 1.0, -2.0]), target=np.array([1.0, 0.0, 1.0]), fov=70),
+                       Camera(position=np.array([0.0, 9.0, 0.0])),  # looking straight down
+                       Camera(position=np.array([2.0, 6.0, 2.0]), projection="ortho", size=4.0)):
+            right, up, forward = camera.basis()
+            np.testing.assert_allclose([right @ up, up @ forward, forward @ right], 0.0, atol=1e-12)
+            np.testing.assert_allclose(quat_to_matrix(camera.rotation), np.column_stack([right, up, -forward]),
+                                       atol=1e-12)
+            box = Object3D(make_box(0.5), position=np.array([0.0, 0.0, -3.0]), parent=camera)
+            linear, position, visible = box.world_matrix()
+            np.testing.assert_allclose(position, camera.position + 3.0 * forward, atol=1e-12)
+            fb = Renderer(40, 20).render([box], camera, Light())
+            rows, cols = np.nonzero(fb.alpha > 0.5)
+            self.assertAlmostEqual(rows.mean(), 19.5, delta=1.0)
+            self.assertAlmostEqual(cols.mean(), 19.5, delta=1.0)
+            tall = camera.height_at(3.0)  # the box is 0.5 of that, in 40 pixel rows
+            self.assertAlmostEqual(np.ptp(rows) + 1, 40 * 0.5 / tall, delta=40 * 0.08 / tall + 1)
+        self.assertEqual(Camera(projection="ortho", size=7.0).height_at(100.0), 7.0)
+        self.assertAlmostEqual(Camera(fov=90.0).height_at(2.0), 4.0)
+        stuck = Camera(position=np.zeros(3), target=np.zeros(3))  # at its target: drawn as nothing, no exception
+        Renderer(20, 10).render([Object3D(make_box(), position=np.array([0.0, 0.0, -3.0]), parent=stuck)], stuck,
+                                Light())
 
     def test_die_is_drawn_centred(self):
         fb = self.render([Object3D(make_die())])
@@ -1595,6 +1647,36 @@ class WidgetTests(unittest.TestCase):
         self.assertIn("F6 no reflections", "".join(self.screen.chars[3]))
 
 
+    def test_display_controls_show_some_and_keep_their_settings(self):
+        renderer = Renderer(10, 5)
+        controls = DisplayControls(renderer=renderer, show=("fps",))
+        self.assertEqual(controls.width, len("F4 999/144fps"))
+        controls.draw(self.screen, 3, 0)
+        self.assertEqual("".join(self.screen.chars[3]).strip(), "F4 --/30fps")
+        controls.handle([Key.F2, Key.F5])  # the hidden ones still answer their keys
+        self.assertEqual((self.screen.mode, renderer.shadows), ("sextant", False))
+        self.assertEqual(controls.settings(), {"glyphs": "sextant", "color": "truecolor", "fps": 30,
+                                               "shadows": False, "reflections": True})
+        # Settings handed back, as from a file: before the screen is known they wait for it; names and values it
+        # doesn't know are skipped.
+        later = DisplayControls(renderer=Renderer(10, 5))
+        later.apply({"glyphs": "half", "fps": 60, "shadows": False, "color": "rainbow", "volume": 11,
+                     "reflections": 1})
+        self.assertEqual(later.settings(), {"glyphs": "half", "color": "truecolor", "fps": 60, "shadows": False,
+                                            "reflections": True})
+        screen = Screen(glyphs="quad", color="256", size=(4, 80))
+        later.handle([], screen)
+        self.assertEqual((screen.mode, screen.color_mode, screen.fps), ("half", "256", 60))
+        plain = Screen(glyphs="ascii", color="16", size=(4, 80))
+        plain.unicode = False  # (as on a terminal without it)
+        again = DisplayControls()
+        again.apply({"glyphs": "sextant", "color": "truecolor"})
+        again.handle([], plain)
+        self.assertEqual((plain.mode, plain.color_mode), ("ascii", "truecolor"))
+        with self.assertRaises(ValueError):
+            DisplayControls(show=("frame rate",))
+
+
 class DemoTests(unittest.TestCase):
     """Each example program draws frames off-screen, takes its keys and clicks, and quits."""
 
@@ -1890,6 +1972,29 @@ class ScreenTests(unittest.TestCase):
             self.assertGreater((reverse[:, 1] > 100).sum(), len(reverse) / 2)
             dim = pic[24:36, :6].reshape(-1, 3).max(axis=0)
             self.assertLess(int(dim.max()), int(pictures.unpack_colors(screen.fg[2, 0], (0, 0, 0)).max()))
+
+    def test_picture_draws_box_drawing_and_block_characters(self):
+        screen = Screen(None, glyphs="sextant", color="truecolor", size=(3, 6))
+        for row, text in enumerate(("┌─┐▀▁", "│█│░▚", "╚═╝╋┄")):
+            screen.text(row, 0, text, Color.WHITE)
+        pic = screen.picture(bg=(0, 0, 0)).max(axis=2) > 0
+        cell = lambda r, c: pic[r * 16:(r + 1) * 16, c * 8:(c + 1) * 8]
+        self.assertTrue(cell(0, 1)[7:9].any(axis=0).all() and not cell(0, 1)[:6].any())  # ─ across the middle
+        self.assertTrue(cell(1, 0)[:, 3:5].any(axis=1).all() and not cell(1, 0)[:, :3].any())  # │ down it
+        corner = cell(0, 0)  # ┌: right and down from the middle, nothing up or left
+        self.assertTrue(corner[8, 7] and corner[15, 4] and not corner[:6].any() and not corner[:, :3].any())
+        self.assertTrue(cell(1, 1).all())  # █
+        self.assertTrue(cell(0, 3)[:8].all() and not cell(0, 3)[8:].any())  # ▀
+        self.assertTrue(cell(0, 4)[14:].all() and not cell(0, 4)[:14].any())  # ▁, an eighth
+        self.assertAlmostEqual(cell(1, 3).mean(), 0.25)  # ░
+        self.assertEqual(cell(2, 1)[:, 2].sum(), 2)  # ═: two lines
+        self.assertEqual(np.count_nonzero(np.diff(np.r_[0, cell(2, 4)[8].astype(int)]) == 1), 3)  # ┄: three dashes
+        masks = {}
+        for code in range(0x2500, 0x25A0):  # each draws something, and (bar a few that only look alike) its own
+            mask = pictures._text_mask(chr(code), (8, 16))
+            self.assertTrue(mask.any(), hex(code))
+            masks.setdefault(mask.tobytes(), []).append(chr(code))
+        self.assertGreater(len(masks), 130)
 
     def test_detection(self):
         self.assertEqual(detect_color_mode({"WT_SESSION": "x", "TERM": "xterm-256color"}, windows=False), "truecolor")

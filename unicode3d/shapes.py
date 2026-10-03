@@ -3,6 +3,7 @@
 """Mesh builders: extruded bitmaps and text, ellipsoids, boxes, puffed-up 2D shapes."""
 import numpy as np
 
+from .fonts import PIXEL
 from .mesh import Mesh, _srgb01, make_box
 
 
@@ -141,13 +142,24 @@ def pillow_mesh(shape, res=48, span=1.1, thickness=0.22, rim=4):
     return mesh
 
 
-def bitmap_mesh(cells, depth=1.0):
+def bitmap_mesh(cells, depth=1.0, blocks=False, gap=0.15):
     """A 2D boolean grid (row 0 at the top) extruded along Z, one unit per cell, centred on the origin.
 
-    Faces are merged into runs to keep the triangle count (and render time) down.
+    Faces are merged into runs to keep the triangle count (and render time) down. With blocks=True, each cell is
+    a box of its own instead, `gap` units narrower than the cell (so neighbours stand apart, as stones or bricks
+    do): 12 triangles a box, the boxes in reading order of their cells (row by row, left to right), so faces
+    12 * k to 12 * k + 11 are the k-th cell's, for a colour of its own in face_colors.
     """
     cells = np.asarray(cells, bool)
     h, w = cells.shape
+    if blocks:
+        rows, cols = np.nonzero(cells)
+        box = make_box(1.0)
+        size = np.array([1.0 - gap, 1.0 - gap, depth])
+        centres = np.stack([cols + 0.5 - w / 2, h / 2 - rows - 0.5, np.zeros(len(rows))], axis=1)
+        verts = (box.vertices * size)[None] + centres[:, None]
+        faces = box.faces[None] + (np.arange(len(rows)) * len(box.vertices))[:, None, None]
+        return Mesh(verts.reshape(-1, 3), faces.reshape(-1, 3))
     padded = np.pad(cells, 1)
     verts, faces = [], []
     zf, zb = depth / 2, -depth / 2
@@ -184,10 +196,11 @@ def bitmap_mesh(cells, depth=1.0):
     return Mesh(verts, np.array(faces, dtype=int))
 
 
-def text_bitmap(text, font, spacing=1):
-    """Boolean grid of `text` in a bitmap font: {character: rows of "#" (ink) and "." (blank)}.
+def text_bitmap(text, font=PIXEL, spacing=1):
+    """Boolean grid of `text` in a bitmap font: {character: rows of "#" (ink) and "." (blank)} (see fonts).
 
-    Every glyph must have the same number of rows; `spacing` blank columns go between letters.
+    Every glyph must have the same number of rows; `spacing` blank columns go between letters. A character the
+    font lacks is a KeyError.
     """
     height = len(next(iter(font.values())))
     rows = ["" for _ in range(height)]
@@ -198,7 +211,8 @@ def text_bitmap(text, font, spacing=1):
     return np.array([[c == "#" for c in row] for row in rows])
 
 
-def text_mesh(text, font, depth=1.6, spacing=1):
-    """Extruded voxel text, one unit per font pixel, centred on the origin: (mesh, width in units)."""
+def text_mesh(text, font=PIXEL, depth=1.6, spacing=1, blocks=False, gap=0.15):
+    """Extruded voxel text, one unit per font pixel, centred on the origin: (mesh, width in units). font defaults
+    to fonts.PIXEL (every printable ASCII character, 9 rows); blocks and gap as bitmap_mesh's (a box per pixel)."""
     cells = text_bitmap(text, font, spacing)
-    return bitmap_mesh(cells, depth), cells.shape[1]
+    return bitmap_mesh(cells, depth, blocks, gap), cells.shape[1]

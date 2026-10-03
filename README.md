@@ -270,7 +270,11 @@ run(frame, fps=30)
 off, in a view `size` units of the world tall, as in isometric and top-down games, board games and
 technical drawings (the tactics demo shows why; it and the viewer switch with `o`). Fog, outlines,
 `pick()` and `ray()` then measure from the camera's plane, and `ray()` gives parallel rays starting
-there.
+there. `camera.basis()` gives the unit vectors towards the right and top of the picture and straight
+ahead, and `camera.height_at(distance)` how tall the view is that far ahead. A camera can also be an
+object's `parent`, to keep the object in front of it wherever it goes (3D lettering over the scene, a
+held lantern): in the camera's space x is to the right, y up and -z ahead, so
+`Object3D(mesh, position=(0, 0, -5), parent=camera)` stays in the middle of the view, 5 units off.
 Objects take a `Mesh` (build one from `vertices` and `faces`, or use `make_box` or the
 [shapes](#shapes); `load_model` loads a whole [model](#models) with its materials), and a pose:
 `position`, `rotation` (a quaternion, w first; `transforms.quat_axis_angle(axis, angle)` makes one)
@@ -525,9 +529,12 @@ by size).
 
 `unicode3d.shapes` builds meshes to use with `Object3D`:
 
-- `text_mesh(text, font)` extrudes text in a bitmap font you supply (`{char: ["#..#", ...]}`, every
-  glyph the same height) and returns `(mesh, width)`; `bitmap_mesh(cells)` does the same for any
-  boolean grid.
+- `text_mesh(text, font=fonts.PIXEL)` extrudes text in a bitmap font and returns `(mesh, width)`.
+  `fonts.PIXEL` has every printable ASCII character (capitals 7 rows tall, lower case with
+  descenders, 9 rows in all); a font of your own is `{char: ["#..#", ...]}`, every glyph the same
+  height (`fonts.font()` builds one from compact rows). `blocks=True` makes each pixel a box of its
+  own, `gap` apart, for stone or brick lettering (12 triangles a box, in reading order, so each can
+  take its own colour in `face_colors`). `bitmap_mesh(cells)` does the same for any boolean grid.
 - `blob_mesh(radii, center)` is an ellipsoid, with an optional bump function.
 - `block_mesh(center, size, rotation)` is a box.
 - `pillow_mesh(shape)` puffs a 2D inside/outside function into a cushion, with texture coordinates
@@ -962,8 +969,9 @@ would, unless the program handles that signal itself). `frame_fn(screen, dt, key
   `render_updates()` returns the escape sequences a refresh would send.
 - `screen.picture(cell=(8, 16), fg=(204, 204, 204), bg=(12, 12, 16))` is a screenshot: the cells
   as they are now, as a terminal would show them, an `(rows * 16, cols * 8, 3)` uint8 sRGB image
-  with block glyphs drawn as their shapes and text in a small font (`fg` and `bg` stand for the
-  terminal's own colours). `PIL.Image.fromarray(screen.picture()).save("shot.png")` saves it, for
+  with block glyphs, box-drawing lines and block elements drawn as their shapes and text in a small
+  font (symbols it lacks, such as arrows, come from DejaVu Sans or Noto Sans Symbols where installed;
+  `fg` and `bg` stand for the terminal's own colours). `PIL.Image.fromarray(screen.picture()).save("shot.png")` saves it, for
   previews, docs and tests; it works on a screen with a console as well as an off-screen one.
 
 `run()` notes each run, with the terminal's size and settings, in a crash log
@@ -1021,7 +1029,11 @@ the user changes it, or you can read `widget.value` every frame.
 `DisplayControls()` is the display settings panel from Zombie Dice: glyphs on F2, colours on F3 and
 the frame rate (achieved/target) on F4, each also clickable; `DisplayControls(renderer=renderer)`
 adds shadows on F5 and reflections on F6. Draw it every frame; its `width` stays fixed as the values
-change.
+change. `DisplayControls(show=("fps",))` draws only the frame rate, while all the keys still work (for
+a program with a settings page of its own, built from `controls.glyphs`, `controls.fps` and the
+others). `controls.settings()` gives the values as a dict ready for JSON, and `controls.apply(values)`
+puts them back on the next run, skipping any this terminal can't take; where to keep them is up to the
+program.
 
 ```python
 from unicode3d.ui import Button, DisplayControls, Panel, Slider, Toggle
@@ -1170,7 +1182,9 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `transforms.py` | projection and view matrices, quaternions, `quat_slerp` |
 | `background.py` | what is drawn behind the scene: `Gradient`, `Sky`, `SkyBox`; and `Fog` |
 | `animation.py`  | easing curves, keyframe `Track`s, `RotationTrack`s and `SplineTrack`s, `Animation`, which moves an object along them, and `Clip`, which plays several together |
-| `shapes.py`     | mesh builders: `text_mesh` (extruded text in any bitmap font), `bitmap_mesh`, `blob_mesh` (ellipsoid), `block_mesh`, `pillow_mesh` (a 2D shape puffed into a cushion), `merge_meshes` |
+| `shapes.py`     | mesh builders: `text_mesh` (extruded text in a bitmap font, `fonts.PIXEL` by default), `bitmap_mesh`, `blob_mesh` (ellipsoid), `block_mesh`, `pillow_mesh` (a 2D shape puffed into a cushion), `merge_meshes` |
+| `fonts.py`      | bitmap fonts for `text_mesh`: `PIXEL` (printable ASCII), and `font()` to build one |
+| `pictures.py`   | `cells_picture`, behind `Screen.picture()`: cells drawn as an image, for screenshots and tests |
 | `color.py`      | sRGB/linear conversion, named `Color`s, OKLab palette matching, dithering, SGR colour codes |
 | `glyphs.py`     | glyph sets (half, quad, sextant, ascii) and matching pixels to cells |
 | `terminal.py`   | `Screen` (cell grid, text, labels, meters, frames, diffed output, held keys), `run`, `compile_kernels`, command-line display flags |
