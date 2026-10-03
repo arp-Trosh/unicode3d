@@ -410,6 +410,60 @@ class RenderTests(unittest.TestCase):
         np.testing.assert_allclose(merged.vertex_colors[4:], 1.0)
         merged = merge_meshes([make_box(), make_box()], colors=[(255, 0, 0), (0.0, 1.0, 0.0)])
         np.testing.assert_allclose(merged.face_colors[[0, -1]], [[1, 0, 0], [0, 1, 0]])
+        # Textures, normals and opacity are kept: untextured faces get a white texture, a part without normals
+        # gets those it would have had, colours without opacity are solid.
+        checks = (np.indices((4, 4)).sum(axis=0) % 2).astype(float)
+        textured = make_box(textures=[checks] * 6)
+        smooth = blob_mesh((1.0, 1.0, 1.0))
+        smooth.normals = smooth.vertex_normals() * 3.0
+        glassy = make_box()
+        glassy.face_colors = np.full((12, 4), 0.5)
+        merged = merge_meshes([textured, smooth, glassy])
+        merged.check()
+        self.assertEqual(len(merged.textures), 2)  # the one checkerboard (shared by six faces), and white
+        np.testing.assert_array_equal(merged.materials[:12], 0)
+        np.testing.assert_array_equal(merged.materials[12:], 1)
+        np.testing.assert_allclose(merged.textures[1], 1.0)
+        np.testing.assert_allclose(merged.uvs[:12], textured.uvs)
+        np.testing.assert_allclose(merged.vertex_normals()[:len(textured.vertices)], textured.vertex_normals())
+        n = len(textured.vertices) + len(smooth.vertices)
+        np.testing.assert_allclose(merged.vertex_normals()[len(textured.vertices):n], smooth.vertex_normals())
+        self.assertEqual(merged.face_colors.shape, (len(merged.faces), 4))
+        np.testing.assert_allclose(merged.face_colors[:12], 1.0)
+        np.testing.assert_allclose(merged.face_colors[-12:], 0.5)
+
+    def test_bake_draws_a_model_in_few_parts(self):
+        # Parts through turned, stretched and mirrored parents, textured, coloured and plain, merge into one mesh;
+        # a see-through part keeps a mesh of its own, and a hidden one is left out. It draws as the model did.
+        checks = (np.indices((8, 8)).sum(axis=0) % 2 * 0.6 + 0.4)[..., None] * np.array([1.0, 0.8, 0.5])
+        table = Node()
+        root = Node(np.array([0.2, -0.3, 0.0]), quat_axis_angle((0, 1, 0), 0.5), (1.0, 1.2, 0.9), parent=table)
+        arm = Node(np.array([0.6, 0.0, 0.0]), quat_axis_angle((0, 0, 1), 0.4), scale=(1.0, -1.0, 1.0), parent=root)
+        tinted = make_box()
+        tinted.vertex_colors = np.random.default_rng(2).uniform(0.3, 1.0, (len(tinted.vertices), 3))
+        parts = [Object3D(make_box(textures=[checks] * 6), np.array([-0.7, 0.0, 0.0]), scale=0.8, color=(255, 120, 90),
+                          parent=root),
+                 Object3D(tinted, np.array([0.0, 0.6, 0.0]), scale=(0.5, 0.3, 0.5), color=(0.4, 0.9, 1.0), parent=arm),
+                 Object3D(blob_mesh((0.4, 0.4, 0.4)), np.array([0.5, 0.0, 0.3]), color=Color.YELLOW, parent=arm),
+                 Object3D(make_box(0.4), np.array([0.0, -0.8, 0.5]), opacity=0.5, color=Color.CYAN, parent=root),
+                 Object3D(make_box(), np.array([0.0, 3.0, 0.0]), visible=False, parent=root)]
+        model = Model(root, parts)
+        baked = model.bake()
+        self.assertEqual(len(baked), 2)
+        self.assertIs(baked.root.parent, table)
+        self.assertTrue(all(o.parent is baked.root for o in baked))
+        self.assertEqual(sorted(o.opacity for o in baked), [0.5, 1.0])
+        self.assertEqual((baked.nodes, baked.animations), ({}, {}))
+        camera = Camera(position=np.array([1.0, 1.5, 4.0]))
+        lights = [Light(shadows=True), PointLight(np.array([1.0, 2.0, 2.0]))]
+        a = Renderer(80, 40, fog=0).render([*model], camera, lights).copy()
+        b = Renderer(80, 40, fog=0).render([*baked], camera, lights)
+        self.assertGreater(a.drawn.sum(), 600)
+        diff = np.abs(a.colour() - b.colour()).max(axis=2)
+        self.assertLess((diff > 0.02).sum(), 20)  # (a sample or two at the parts' edges)
+        np.testing.assert_allclose(np.median(diff[a.drawn]), 0.0, atol=1e-3)
+        np.testing.assert_allclose(union_bounds(parts[:4]), baked.world_bounds(), atol=1e-9)  # (the hidden one left out)
+        self.assertIs(parts[0].parent, root)  # (the model is left as it was)
 
     def test_objects_out_of_view_are_skipped_whole(self):
         camera = Camera(position=np.array([0.0, 0.0, 5.0]))

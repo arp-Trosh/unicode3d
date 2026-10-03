@@ -149,15 +149,16 @@ def scale3(scale):
     return s
 
 
-def scene_poses(nodes):
+def scene_poses(nodes, top=None):
     """The poses in the world of nodes (Nodes and Object3Ds) and all their parents, worked out in one pass:
     (rows, linear (N, 3, 3), position (N, 3), visible (N,) bool), where rows maps id(node) to its row. A point p
     in a node's own space is at linear @ p + position (see Node.world_matrix); a node is visible only if it and
-    all its parents are. Each parent is worked out once however many children it has."""
+    all its parents are. Each parent is worked out once however many children it has. With top (a node above
+    them), poses are in top's own space instead, and top and what is above it are left out."""
     rows, order = {}, []
     for node in nodes:
         chain = []
-        while node is not None and id(node) not in rows:
+        while node is not None and node is not top and id(node) not in rows:
             chain.append(node)
             node = node.parent
             if len(chain) > 1000:
@@ -166,7 +167,8 @@ def scene_poses(nodes):
             rows[id(node)] = len(order)
             order.append(node)
     n = len(order)
-    parent = np.array([-1 if node.parent is None else rows[id(node.parent)] for node in order], np.int64)
+    parent = np.array([-1 if node.parent is None or node.parent is top else rows[id(node.parent)] for node in order],
+                      np.int64)
     position = np.array([node.position for node in order], np.float64).reshape(n, 3)
     rotation = np.array([node.rotation for node in order], np.float64).reshape(n, 4)
     scales = [(s, s, s) if isinstance(s, (int, float, np.number)) else s for s in (node.scale for node in order)]

@@ -7,39 +7,71 @@ from .mesh import Mesh, _srgb01, make_box
 
 
 def merge_meshes(meshes, colors=None):
-    """One mesh holding all the given meshes' triangles (untextured).
+    """One mesh holding all the given meshes' triangles, with their textures (texture coordinates, materials, and
+    each texture once; faces of untextured meshes get a plain white one) and their normals (if any has normals of
+    its own: the others' are worked out as they would be, vertex_normals).
 
     colors: one colour for each mesh, given to all its faces (0..1 sRGB floats or
     0..255 ints). Without it, the meshes' own colours are kept, per vertex if any
     of them has vertex colours, otherwise per face; parts with no colours of their
-    own are white.
+    own are white. Opacity in colours (a fourth column) is kept, as solid where a mesh has none.
     """
     meshes = list(meshes)
     verts, faces, base = [], [], 0
     for m in meshes:
-        verts.append(m.vertices)
-        faces.append(m.faces + base)
+        verts.append(np.asarray(m.vertices, dtype=float).reshape(-1, 3))
+        faces.append(np.asarray(m.faces, dtype=np.int64).reshape(-1, 3) + base)
         base += len(m.vertices)
     mesh = Mesh(np.concatenate(verts), np.concatenate(faces))
-    white = lambda n: np.ones((n, 3))
+    if any(m.normals is not None for m in meshes):
+        mesh.normals = np.concatenate([m.vertex_normals() for m in meshes])
+    if any(m.materials is not None and m.textures for m in meshes):
+        textures, index, uvs, materials, white = [], {}, [], [], None
+        for m in meshes:
+            n = len(m.faces)
+            if m.materials is not None and m.textures:
+                table = []
+                for texture in m.textures:
+                    if id(texture) not in index:
+                        index[id(texture)] = len(textures)
+                        textures.append(texture)
+                    table.append(index[id(texture)])
+                materials.append(np.array(table, np.int64)[np.asarray(m.materials, np.int64)])
+                uvs.append(np.asarray(m.uvs, dtype=float).reshape(n, 3, 2))
+            else:
+                if white is None:
+                    white = len(textures)
+                    textures.append(np.ones((1, 1)))
+                materials.append(np.full(n, white, np.int64))
+                uvs.append(np.zeros((n, 3, 2)))
+        mesh.uvs, mesh.materials, mesh.textures = np.concatenate(uvs), np.concatenate(materials), textures
     if colors is not None:
         mesh.face_colors = np.concatenate([np.broadcast_to(_srgb01(c), (len(m.faces), 3)) for m, c in zip(meshes, colors)])
-    elif any(m.vertex_colors is not None for m in meshes):
+        return mesh
+    own = [c for m in meshes for c in (m.vertex_colors, m.face_colors) if c is not None]
+    width = 4 if any(np.shape(c)[-1] == 4 for c in own) else 3
+    white = lambda n: np.ones((n, width))
+
+    def widened(c):  # (0..1, with a column of opacity 1 added where it has none and others have one)
+        c = _srgb01(c)
+        return np.concatenate([c, np.ones((len(c), 1))], axis=1) if c.shape[1] < width else c
+
+    if any(m.vertex_colors is not None for m in meshes):
         parts = []
         for m in meshes:
             if m.vertex_colors is not None:
-                parts.append(_srgb01(m.vertex_colors))
+                parts.append(widened(m.vertex_colors))
             elif m.face_colors is not None:  # vertices shared by faces of different colours take the average
-                c, count = np.zeros((len(m.vertices), 3)), np.zeros(len(m.vertices))
+                c, count = np.zeros((len(m.vertices), width)), np.zeros(len(m.vertices))
                 for k in range(3):
-                    np.add.at(c, m.faces[:, k], _srgb01(m.face_colors))
+                    np.add.at(c, m.faces[:, k], widened(m.face_colors))
                     np.add.at(count, m.faces[:, k], 1)
                 parts.append(c / np.maximum(count, 1)[:, None] + (count == 0)[:, None])
             else:
                 parts.append(white(len(m.vertices)))
         mesh.vertex_colors = np.concatenate(parts)
     elif any(m.face_colors is not None for m in meshes):
-        mesh.face_colors = np.concatenate([_srgb01(m.face_colors) if m.face_colors is not None else white(len(m.faces))
+        mesh.face_colors = np.concatenate([widened(m.face_colors) if m.face_colors is not None else white(len(m.faces))
                                            for m in meshes])
     return mesh
 

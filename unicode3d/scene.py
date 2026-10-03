@@ -11,7 +11,10 @@ import numpy as np
 
 from .animation import Animation, Clip
 from .lights import Light, PointLight, _vec3
-from .mesh import Mesh
+from .color import linear_to_srgb, srgb_to_linear, to_linear_rgb
+from .mesh import Mesh, _srgb01
+from .shapes import merge_meshes
+from .texture import alpha_kind
 from .renderer import Anchor, Pick, Renderer
 from .transforms import look_at, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
@@ -154,6 +157,37 @@ class Object3D(_Placed):
         return union_bounds([self])
 
 
+def _placed_mesh(part, linear, position):
+    """A copy of the part's mesh moved by linear and position (p -> linear @ p + position), its normals turned to
+    match and its faces wound the other way where linear mirrors (as the renderer draws such a part), with the
+    part's colour multiplied into the mesh's colours (in linear light, as drawing does)."""
+    mesh = part.mesh
+    faces = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
+    c0, c1, c2 = linear[:, 0], linear[:, 1], linear[:, 2]
+    cofactor = np.stack([np.cross(c1, c2), np.cross(c2, c0), np.cross(c0, c1)], axis=1)  # det * inverse transpose
+    flip = float(np.linalg.det(linear)) < 0.0
+    placed = Mesh(np.asarray(mesh.vertices, dtype=float).reshape(-1, 3) @ linear.T + position,
+                  faces[:, [0, 2, 1]] if flip else faces, textures=list(mesh.textures),
+                  normals=mesh.vertex_normals() @ cofactor.T * (-1.0 if flip else 1.0))
+    if mesh.materials is not None and mesh.textures:
+        uvs = np.asarray(mesh.uvs, dtype=float).reshape(-1, 3, 2)
+        placed.uvs, placed.materials = (uvs[:, [0, 2, 1]] if flip else uvs), mesh.materials
+    tint = to_linear_rgb(part.color)
+
+    def tinted(colors):  # sRGB 0..1, opacity kept
+        c = _srgb01(colors).reshape(len(colors), -1).copy()
+        c[:, :3] = linear_to_srgb(np.clip(srgb_to_linear(np.clip(c[:, :3], 0.0, 1.0)) * tint, 0.0, 1.0))
+        return c
+
+    if mesh.vertex_colors is not None:
+        placed.vertex_colors = tinted(mesh.vertex_colors)
+    elif mesh.face_colors is not None:
+        placed.face_colors = tinted(mesh.face_colors)
+    else:
+        placed.face_colors = np.broadcast_to(linear_to_srgb(np.clip(tint, 0.0, 1.0)), (len(faces), 3)).copy()
+    return placed
+
+
 def _finite_vertices(mesh):
     """The mesh's vertices that are finite, as floats (V, 3), cached like Mesh.bounds() (until vertices is
     replaced)."""
@@ -235,6 +269,44 @@ class Model:
         return Model(clone(self.root), [clone(o) for o in self.objects],
                      {name: [clone(o) for o in parts] for name, parts in self.names.items()}, dict(self.materials),
                      list(self.warnings), {name: clone(n) for name, n in self.nodes.items()}, animations)
+
+    def bake(self):
+        """The model as it stands now, in as few parts as draw it the same: for things that stand still (scenery, a
+        building, a tree), which draw quicker as a few big meshes than as dozens of small ones. Returns a new Model
+        whose root is posed, parented and shown as this one's is, with its parts in root's space: those that look
+        alike (the same specular, shininess, emissive, double_sided and cast_shadows) merged into one mesh
+        (merge_meshes: textures and normals kept, each part's colour multiplied into its mesh's colours), and
+        those that can't merge (see-through, with holes in their textures, or reflective) each moved into a mesh
+        of its own. Hidden parts are left out; it has no nodes or animations (its parts no longer move apart).
+        This model is left as it is; copy() the result for more of it."""
+        parts = [o for o in self.objects if o.mesh is not None and len(o.mesh.faces)]
+        rows, linear, position, visible = scene_poses(parts, top=self.root)
+        groups = {}  # look: (part, linear, position)
+        for part in parts:
+            r = rows[id(part)]
+            if not (visible[r] and np.isfinite(linear[r]).all() and np.isfinite(position[r]).all()):
+                continue
+            mesh = part.mesh
+            corner = mesh.corner_colors()
+            alone = (not part.opacity >= 1.0 or part.reflectivity != 0.0
+                     or (corner is not None and bool((corner[:, :, 3] < 1.0).any()))
+                     or (mesh.materials is not None and any(alpha_kind(mesh.mipmaps(m))
+                                                            for m in range(len(mesh.textures)))))
+            look = ((id(part),) if alone else ()) + (
+                float(part.specular), part.shininess, float(part.emissive), bool(part.double_sided),
+                bool(part.cast_shadows))
+            groups.setdefault(look, []).append((part, linear[r], position[r]))
+        root = Node(np.array(self.root.position, dtype=float), np.array(self.root.rotation, dtype=float),
+                    _copy.copy(self.root.scale), self.root.visible, self.root.parent)
+        objects = []
+        for placed in groups.values():
+            first = placed[0][0]
+            objects.append(Object3D(merge_meshes([_placed_mesh(*p) for p in placed]), color=(1.0, 1.0, 1.0),
+                                    double_sided=first.double_sided, parent=root, emissive=first.emissive,
+                                    cast_shadows=first.cast_shadows, opacity=first.opacity,
+                                    reflectivity=first.reflectivity, specular=first.specular,
+                                    shininess=first.shininess))
+        return Model(root, objects, materials=dict(self.materials), warnings=list(self.warnings))
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the model's parts as they stand in the world (see

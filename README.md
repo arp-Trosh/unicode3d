@@ -510,7 +510,9 @@ Draw as many objects as you like in one render list: objects that share a `Mesh`
 copy, all objects are projected in one parallel kernel call, and those wholly outside the view are
 skipped. 400 small balls (140,800 triangles) take about 14 ms at 180x50 cells (see
 [Performance](#performance) for the machine). For thousands of static pieces, merging them into one
-mesh with `merge_meshes` (keeping each part's colour) is cheaper still. For objects that are small
+mesh with `merge_meshes` (keeping each part's colour) is cheaper still, and a loaded model that
+stands still (scenery, a building, a tree) draws quicker as `model.bake()` (see [Models](#models)).
+For objects that are small
 on screen, a mesh with fewer triangles looks the same and costs less (the balls demo switches meshes
 by size).
 
@@ -528,8 +530,9 @@ by size).
 - `block_mesh(center, size, rotation)` is a box.
 - `pillow_mesh(shape)` puffs a 2D inside/outside function into a cushion, with texture coordinates
   that line up with the shape.
-- `merge_meshes(meshes, colors=None)` joins meshes into one, keeping their colours or giving each
-  part the colour listed for it.
+- `merge_meshes(meshes, colors=None)` joins meshes into one, keeping their colours (opacity
+  included) or giving each part the colour listed for it, and their textures and normals (faces
+  of untextured meshes get a plain white texture).
 
 `unicode3d.mesh` has `Mesh` and `make_box(size, textures=None)`.
 
@@ -557,6 +560,15 @@ For several of one model, load it once and copy it: `model.copy()` gives another
 and animations of its own (posed as the original is now, its clips with their own clocks), sharing
 the meshes, textures, materials and keyframes, so a copy costs a fraction of a millisecond and
 little memory. Its root hangs from the same parent as the original's.
+
+For a model that stands still, `model.bake()` gives the same picture from a few big meshes instead
+of dozens of small parts, which draws quicker: a new `Model` whose root is posed and parented as the
+original's, with the parts that look alike (the same `specular`, `shininess`, `emissive`,
+`double_sided`, `cast_shadows`) merged into one mesh in root's space, each part's colour multiplied
+into its mesh's colours. See-through and reflective parts, and those with holes in their textures,
+keep a mesh each; hidden parts are left out. A baked model has no nodes or animations, so bake a
+pose (a tower, a fallen tree), and `copy()` the result for more of it. Castle Panic's 64-part tower
+bakes into 6 parts that draw the same, to within a sample at the parts' edges.
 
 ```python
 goblin = load_model("goblin.glb").fit(1.0)
