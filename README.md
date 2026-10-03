@@ -910,9 +910,13 @@ would, unless the program handles that signal itself). `frame_fn(screen, dt, key
 `False` to stop. `keys` holds ints (a character's code, or a `Key` such as `Key.UP`, `Key.ENTER`,
 `Key.ESC`), `MouseEvent`s and, with `key_release=True`, `KeyRelease`s (see [Input](#input)).
 
-- `screen.text(y, x, s, color, bold=False, reverse=False, dim=False)` draws in the terminal's own
-  ANSI colours, so text follows the user's theme. Characters that aren't exactly one cell wide are
-  shown as `?`.
+- `screen.text(y, x, s, color, bold=False, reverse=False, dim=False, bg=None)` writes text. A named
+  `Color` is one of the terminal's own ANSI colours, so text follows the user's theme; `(r, g, b)`
+  (0..255 ints or 0..1 floats) is that colour, exactly in truecolor and as the nearest palette
+  entry in 256 or 16 colours. `bg` sets the cells' background the same way (a card's face, a
+  highlighted row); `None` leaves the screen's. In mono, text keeps the terminal's colours, and
+  `reverse` sets it apart. Characters that aren't exactly one cell wide are shown as `?`.
+  `screen.label()` takes `color` and `bg` the same way.
 - `screen.bar(y, x, width, fraction, color=Color.GREEN, empty=Color.DEFAULT)` draws a meter: a bar
   `width` cells long filled `fraction` (0..1) of the way, to an eighth of a cell (`#` and `-`
   without Unicode), for progress and levels of any kind (loading, memory or disk in use, a volume,

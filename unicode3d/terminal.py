@@ -258,6 +258,7 @@ class Screen:
         if color not in COLOR_MODES:
             raise ValueError(f"color must be one of {COLOR_MODES}, not {color!r}")
         self.color_mode = color
+        self._text_colors = {}  # (dtype kind, r, g, b): packed colour in this mode, for text()
         self._bg_cell = DEFAULT if self.background is None else int(quantize(self.background, color))
         self._shown = None  # resend everything, in the new colours
 
@@ -336,8 +337,11 @@ class Screen:
         self.bg.fill(self._bg_cell)
         self.attrs.fill(0)
 
-    def text(self, y, x, s, color=Color.DEFAULT, bold=False, reverse=False, dim=False):
-        """Write a string at row y, column x in a named colour (the terminal's ANSI palette), clipped to the screen."""
+    def text(self, y, x, s, color=Color.DEFAULT, bold=False, reverse=False, dim=False, bg=None):
+        """Write a string at row y, column x, clipped to the screen. color: a named Color, from the terminal's ANSI
+        palette (so it follows the user's theme), or (r, g, b), 0..255 ints or 0..1 floats, as near as the colour
+        mode goes (exact in truecolor; the nearest palette entry otherwise). bg likewise, behind the text, or None
+        for the screen's background. In mono, text keeps the terminal's colours: use reverse to set it apart."""
         y, x = _cell(y), _cell(x)
         if y is None or x is None or not 0 <= y < self._rows or x >= self._cols:
             return
@@ -348,15 +352,32 @@ class Screen:
             return
         n = len(s)
         self.chars[y, x:x + n] = [_printable(c) for c in s]
-        self.fg[y, x:x + n] = DEFAULT if self.color_mode == "mono" else ansi_color(color)
-        self.bg[y, x:x + n] = self._bg_cell
+        self.fg[y, x:x + n] = self._text_color(color, DEFAULT)
+        self.bg[y, x:x + n] = self._text_color(bg, self._bg_cell)
         self.attrs[y, x:x + n] = BOLD * bold | DIM * dim | REVERSE * reverse
 
+    def _text_color(self, color, default):
+        """The packed cell colour of a text colour (see text()): default for None, and in mono."""
+        if color is None or self.color_mode == "mono":
+            return default
+        if isinstance(color, (int, np.integer)):
+            return ansi_color(color)
+        values = np.asarray(color)
+        key = (values.dtype.kind, *values.reshape(-1).tolist())  # ((1, 0, 0) and (1.0, 0.0, 0.0) differ)
+        packed = self._text_colors.get(key)
+        if packed is None:
+            if len(self._text_colors) > 4096:
+                self._text_colors.clear()
+            with np.errstate(all="ignore"):
+                linear = np.clip(np.nan_to_num(to_linear_rgb(color)), 0.0, 1.0)  # (NaN as 0)
+            packed = self._text_colors[key] = int(quantize(linear, self.color_mode, dither=False))
+        return packed
+
     def label(self, renderer, point, text, color=Color.WHITE, top=0, left=0, owner=None, clamp=False, hide=True,
-              dy=0, bold=False, reverse=False, dim=False):
+              dy=0, bold=False, reverse=False, dim=False, bg=None):
         """Write text at a point in the world, as the renderer's last frame (drawn at top, left) shows it: centred on
         the cell the point lands on, dy rows lower (negative: higher). A name over a character, a number where a
-        hit landed, a marker on a goal.
+        hit landed, a marker on a goal. color and bg as for text().
 
         Nothing is written for a point behind the camera or outside the frame, unless clamp is set, which puts
         the text at the frame's edge in the direction the point lies, kept whole inside the frame; nor, with hide,
@@ -370,7 +391,7 @@ class Screen:
         if clamp:  # whole, inside the frame
             x = max(min(x, left + renderer.width - len(text)), left)
             y = max(min(y, top + renderer.height - 1), top)
-        self.text(y, x, text, color, bold=bold, reverse=reverse, dim=dim)
+        self.text(y, x, text, color, bold=bold, reverse=reverse, dim=dim, bg=bg)
         return anchor
 
     def bar(self, y, x, width, fraction, color=Color.GREEN, empty=Color.DEFAULT):

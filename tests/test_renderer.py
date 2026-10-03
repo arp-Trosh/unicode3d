@@ -1762,6 +1762,28 @@ class Terminal:
 
 
 class ScreenTests(unittest.TestCase):
+    def test_text_in_any_colour_on_any_background(self):
+        screen = Screen(None, color="truecolor", size=(4, 20))
+        screen.text(0, 0, "card", (200, 30, 30), bg=(250, 240, 200))
+        screen.text(1, 0, "ansi", Color.YELLOW, bg=Color.BLUE)
+        screen.text(2, 0, "dark", (1, 0, 0), bg=(1.0, 0.0, 0.0))  # ints 0..255, floats 0..1: not the same red
+        screen.text(3, 0, "odd", (np.nan, np.inf, -1.0), bg=Color.DEFAULT)  # (no crash)
+        out = screen.render_updates()
+        self.assertIn("\x1b[0;38;2;200;30;30;48;2;250;240;200mcard", out)
+        self.assertIn("\x1b[33;44mansi", out)
+        self.assertIn("38;2;1;0;0;48;2;255;0;0mdark", out)
+        self.assertEqual(screen.bg[3, 0], -1)
+        np.testing.assert_array_equal(pictures.unpack_colors(screen.bg[0, :4], (0, 0, 0)), [[250, 240, 200]] * 4)
+        for mode, fg, bg in (("256", "38;5;160", "48;5;230"), ("16", "31", "107")):
+            screen.set_color(mode)
+            screen.text(0, 0, "card", (200, 30, 30), bg=(250, 240, 200))
+            self.assertIn(f"\x1b[0;{fg};{bg}mcard", screen.render_updates())
+        with self.assertRaises(ValueError):
+            screen.text(0, 0, "x", (1, 2))
+        screen.set_color("mono")
+        screen.text(0, 0, "card", (200, 30, 30), bg=(250, 240, 200))
+        self.assertEqual((screen.fg[0, 0], screen.bg[0, 0]), (-1, -1))
+
     def test_picture_shows_the_cells(self):
         self.assertEqual((pictures.BOLD, pictures.DIM, pictures.REVERSE), (terminal.BOLD, terminal.DIM, terminal.REVERSE))
         for glyphs in ("sextant", "quad", "half", "ascii"):
