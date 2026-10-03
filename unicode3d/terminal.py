@@ -38,7 +38,7 @@ from .background import Sky
 from .mesh import Mesh, make_box
 from .pictures import cells_picture
 from .queries import Colliders
-from .scene import Camera, Light, Object3D, PointLight, Renderer
+from .scene import Camera, Light, Object3D, PointLight, Renderer, union_bounds
 
 __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
            "frame_to_text", "crash_log_path"]
@@ -500,6 +500,7 @@ def compile_kernels():
     solid.raycast_many(np.zeros((4, 3)), np.eye(4, 3) - 0.5)
     solid.push_out((0.0, 0.0, 0.0), 0.5, end=(0.0, 1.0, 0.0))
     solid.overlap_box((0.0, 0.0, 0.0), 1.0)
+    union_bounds(objects)  # (where labels go)
 
 
 def _compile_with_notice(console):

@@ -213,6 +213,29 @@ def compose_poses(parent, position, rotation, scale, visible, linear, place):
                 linear[i, r, c] = linear[p, r, 0] * m[0, c] + linear[p, r, 1] * m[1, c] + linear[p, r, 2] * m[2, c]
 
 
+@njit(cache=True, error_model="numpy")
+def place_boxes(vertices, first, count, row, linear, place, lo, hi):
+    """The box (lo, hi: (K, 3)) around each of K runs of vertices (count[k] of them from first[k] in vertices
+    (V, 3)) placed by pose row[k] of linear (N, 3, 3) and place (N, 3): p -> linear @ p + place. A coordinate
+    that comes out NaN counts as infinite, so that the box isn't finite either."""
+    for k in range(len(first)):
+        r = row[k]
+        for a in range(3):
+            lo[k, a] = np.inf
+            hi[k, a] = -np.inf
+        for i in range(first[k], first[k] + count[k]):
+            for a in range(3):
+                x = (linear[r, a, 0] * vertices[i, 0] + linear[r, a, 1] * vertices[i, 1]
+                     + linear[r, a, 2] * vertices[i, 2]) + place[r, a]
+                if x != x:
+                    lo[k, a] = -np.inf
+                    hi[k, a] = np.inf
+                if x < lo[k, a]:
+                    lo[k, a] = x
+                if x > hi[k, a]:
+                    hi[k, a] = x
+
+
 def world_matrix(node):
     """(linear (3, 3), position (3,), visible) of a node in the world, through all its parents (see
     Node.world_matrix). For many nodes at once, scene_poses() works out each shared parent once."""

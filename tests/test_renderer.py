@@ -330,6 +330,11 @@ class RenderTests(unittest.TestCase):
         holed.vertices[0] = np.nan  # left out
         np.testing.assert_allclose(Object3D(holed).world_bounds()[1], 0.5)
         self.assertIsNone(Object3D(make_box(), np.array([np.nan, 0.0, 0.0])).world_bounds())
+        lost = Object3D(make_box(), np.array([0.0, 0.0, 0.0]), scale=np.inf)  # left out of a union
+        np.testing.assert_allclose(union_bounds([lost, ball])[0], [4.0, -1.0, -1.0], atol=1e-12)
+        flat = make_box()
+        flat.vertices = flat.vertices * [1e300, 1.0, 1.0]
+        self.assertIsNone(Object3D(flat, scale=1e10).world_bounds())  # (overflows to infinity)
         self.assertIsNone(Object3D(Mesh(np.zeros((0, 3)), np.zeros((0, 3), int))).world_bounds())
         self.assertIsNone(union_bounds([]))
 

@@ -13,7 +13,7 @@ from .animation import Animation, Clip
 from .lights import Light, PointLight, _vec3
 from .mesh import Mesh
 from .renderer import Anchor, Pick, Renderer
-from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3, scene_poses, world_matrix
+from .transforms import look_at, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
 __all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer", "union_bounds"]
 
@@ -151,23 +151,7 @@ class Object3D(_Placed):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
         its parents: to put a label just above it, or frame a camera on it. None if there is nothing to box (no
         vertices, or a pose that isn't finite). Vertices at NaN or infinity are left out."""
-        if not len(_finite_vertices(self.mesh)):
-            return None
-        return _box(self.mesh, *self.world_matrix()[:2])
-
-
-def _box(mesh, linear, position):
-    """The corners of the box around the mesh's finite vertices placed by linear and position (see
-    Object3D.world_bounds), or None."""
-    v = _finite_vertices(mesh)
-    if not len(v):
-        return None
-    with np.errstate(all="ignore"):  # (a pose that isn't finite gives None, not a warning over the picture)
-        v = v @ linear.T + position
-        lo, hi = v.min(axis=0), v.max(axis=0)
-    if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
-        return None
-    return lo, hi
+        return union_bounds([self])
 
 
 def _finite_vertices(mesh):
@@ -299,9 +283,22 @@ def union_bounds(objects):
     the world; None if there is nothing to box."""
     parts = [part for obj in objects for part in ([obj] if hasattr(obj, "mesh") else obj)]
     parts = [part for part in parts if len(_finite_vertices(part.mesh))]
-    rows, linear, position, _ = scene_poses(parts)  # (each shared parent once)
-    boxes = [box for part in parts for box in [_box(part.mesh, linear[rows[id(part)]], position[rows[id(part)]])]
-             if box is not None]
-    if not boxes:
+    if not parts:
         return None
-    return np.min([lo for lo, _ in boxes], axis=0), np.max([hi for _, hi in boxes], axis=0)
+    rows, linear, position, _ = scene_poses(parts)  # (each shared parent once)
+    runs, meshes = {}, []  # id(mesh): (first vertex, count), in vertices packed end to end
+    first = 0
+    for part in parts:
+        if id(part.mesh) not in runs:
+            v = _finite_vertices(part.mesh)
+            runs[id(part.mesh)] = (first, len(v))
+            meshes.append(v)
+            first += len(v)
+    run = np.array([runs[id(part.mesh)] for part in parts], np.int64).reshape(-1, 2)
+    lo, hi = np.empty((len(parts), 3)), np.empty((len(parts), 3))
+    place_boxes(np.ascontiguousarray(np.concatenate(meshes), np.float64), run[:, 0].copy(), run[:, 1].copy(),
+                np.array([rows[id(part)] for part in parts], np.int64), linear, position, lo, hi)
+    boxed = np.isfinite(lo).all(axis=1) & np.isfinite(hi).all(axis=1)  # (a pose that isn't finite: left out)
+    if not boxed.any():
+        return None
+    return lo[boxed].min(axis=0), hi[boxed].max(axis=0)
