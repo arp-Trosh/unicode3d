@@ -12,8 +12,9 @@ import sys
 
 import numpy as np
 
-from benchmarks.gallery import CELL, SCENES, cells_picture, checks, pixels_picture, render, write_png
+from benchmarks.gallery import SCENES, cells_picture, checks, pixels_picture, render, write_png
 from unicode3d.mesh import Mesh
+from unicode3d.pictures import CELL
 from unicode3d.scene import Object3D
 from unicode3d.terminal import Screen
 
