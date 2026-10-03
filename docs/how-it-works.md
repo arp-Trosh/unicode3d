@@ -283,7 +283,8 @@ direction, which keeps the night's colour and loses the stars, as haze does.
 *Fog fading pillars into the sky, 4 to 40 units from the eye.*
 
 Objects can be scaled differently along each axis. Internally each object is placed by a 3x3 matrix
-(its rotation and scale, and its parents' too), and normals are transformed by that matrix's inverse
+(its rotation and scale, and its parents' too: worked out for the whole scene graph in one pass, parents
+first, by a kernel, so a model's root is worked out once for all its parts), and normals are transformed by that matrix's inverse
 transpose, so lighting follows the stretched surface. A negative scale mirrors a shape; the renderer
 notices the flipped handedness and flips which side of each face counts as the front.
 

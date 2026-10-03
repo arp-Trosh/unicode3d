@@ -34,7 +34,7 @@ from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
 from unicode3d.animation import (EASINGS, Animation, RotationTrack, Track, ease_in, ease_out,
                                  ease_out_back)
-from unicode3d.transforms import quat_axis_angle, quat_between, quat_identity, quat_slerp, quat_to_matrix
+from unicode3d.transforms import quat_axis_angle, quat_between, quat_identity, quat_slerp, quat_to_matrix, scene_poses
 
 
 class TransformTests(unittest.TestCase):
@@ -46,6 +46,40 @@ class TransformTests(unittest.TestCase):
             u, v = np.asarray(u, float), np.asarray(v, float)
             got = quat_to_matrix(quat_between(u, v)) @ (u / np.linalg.norm(u))
             np.testing.assert_allclose(got, v / np.linalg.norm(v), atol=1e-9)
+
+    def test_scene_poses_compose_every_parent_once(self):
+        # A random tree (shared parents, numbers and triples as scales, a hidden branch): every node's pose is its
+        # parent's composed with its own, and world_matrix() gives the same to the bit.
+        rng = np.random.default_rng(3)
+        nodes = []
+        for i in range(60):
+            parent = nodes[rng.integers(len(nodes))] if nodes and i % 7 else None
+            scale = float(rng.uniform(0.5, 2.0)) if i % 2 else rng.uniform(0.5, 2.0, 3)
+            node = (Node if i % 3 else Object3D)(*([make_box()] if i % 3 == 0 else []), position=rng.normal(size=3),
+                                                 rotation=rng.normal(size=4), scale=scale, parent=parent)
+            nodes.append(node)
+        nodes[8].visible = False
+        rows, linear, position, visible = scene_poses(nodes[::-1])
+        self.assertEqual(len(rows), len(nodes))
+        for node in nodes:
+            r = rows[id(node)]
+            own = quat_to_matrix(node.rotation) * np.broadcast_to(node.scale, 3)
+            up_lin, up_pos, up_vis = (np.eye(3), np.zeros(3), True) if node.parent is None else (
+                linear[rows[id(node.parent)]], position[rows[id(node.parent)]], visible[rows[id(node.parent)]])
+            np.testing.assert_allclose(linear[r], up_lin @ own, atol=1e-12)
+            np.testing.assert_allclose(position[r], up_pos + up_lin @ node.position, atol=1e-12)
+            self.assertEqual(visible[r], up_vis and node.visible)
+            lin, pos, vis = node.world_matrix()
+            np.testing.assert_array_equal(lin, linear[r])
+            np.testing.assert_array_equal(pos, position[r])
+            self.assertEqual(vis, visible[r])
+        self.assertFalse(visible.all())
+        loop = Node()
+        loop.parent = Node(parent=loop)
+        with self.assertRaises(ValueError):
+            scene_poses([loop])
+        with self.assertRaises(ValueError):
+            scene_poses([Node(scale=(1.0, 2.0))])
 
 
 class DiceTests(unittest.TestCase):

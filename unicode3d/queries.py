@@ -27,9 +27,8 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit, prange
 
-from .renderer import _rotations
 from .threads import kernel_lock
-from .transforms import quat_to_matrix, scale3, world_matrix
+from .transforms import quat_to_matrix, scene_poses
 
 LEAF_SIZE = 4     # triangles in a leaf of a tree, at most (unless they can't be split)
 BINS = 16         # candidate split planes a node tries along its longest axis
@@ -809,8 +808,7 @@ class Colliders:
     def update(self):
         """Read where the objects are now (and pick up objects added to or taken out of `objects`)."""
         self.objects = list(_parts(self.objects))
-        objects, trees, tree_of, inst_tree, where, turn, scale, placed_by = [], [], {}, [], [], [], [], []
-        parents = {}  # id(node): its pose in the world (world_matrix), worked out once for all its children
+        objects, trees, tree_of, inst_tree = [], [], {}, []
         for obj in self.objects:
             mesh = getattr(obj, "mesh", None)
             if mesh is None:
@@ -818,12 +816,6 @@ class Colliders:
             tree = mesh_tree(mesh)
             if not len(tree.tri):
                 continue
-            if obj.parent is not None:
-                placed_by.append((len(where), world_matrix(obj.parent, parents)[:2]))
-            where.append(obj.position)
-            turn.append(obj.rotation)
-            sc = obj.scale
-            scale.append((sc, sc, sc) if isinstance(sc, (int, float, np.number)) else scale3(sc))
             m = tree_of.get(id(tree))
             if m is None:
                 m = tree_of[id(tree)] = len(trees)
@@ -832,12 +824,9 @@ class Colliders:
             inst_tree.append(m)
         self._instances = objects
         n = len(objects)
-        pos = np.array(where, np.float64).reshape(n, 3)
-        quat = np.array(turn, np.float64).reshape(n, 4)
-        quat = quat / np.maximum(np.linalg.norm(quat, axis=1, keepdims=True), 1e-300)
-        lin = _rotations(quat) * np.array(scale, np.float64).reshape(n, 1, 3)
-        for row, (parent_lin, parent_pos) in placed_by:  # (as Object3D.world_matrix places them)
-            lin[row], pos[row] = parent_lin @ lin[row], parent_pos + parent_lin @ pos[row]
+        rows, lin, pos, _ = scene_poses(objects)  # (as Object3D.world_matrix places them; hidden ones still collide)
+        at = np.array([rows[id(obj)] for obj in objects], np.int64)
+        lin, pos = lin[at].reshape(n, 3, 3), pos[at].reshape(n, 3)
         # The inverse from the adjugate: no exception for a singular matrix, which is skipped instead.
         c0, c1, c2 = lin[:, :, 0], lin[:, :, 1], lin[:, :, 2]
         rows = np.stack([np.cross(c1, c2), np.cross(c2, c0), np.cross(c0, c1)], axis=1)

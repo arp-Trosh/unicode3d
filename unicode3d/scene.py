@@ -11,7 +11,7 @@ import numpy as np
 from .lights import Light, PointLight, _vec3
 from .mesh import Mesh
 from .renderer import Anchor, Pick, Renderer
-from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3, world_matrix
+from .transforms import look_at, quat_identity, quat_mul, quat_to_matrix, scale3, scene_poses, world_matrix
 
 __all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer", "union_bounds"]
 
@@ -149,16 +149,23 @@ class Object3D(_Placed):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
         its parents: to put a label just above it, or frame a camera on it. None if there is nothing to box (no
         vertices, or a pose that isn't finite). Vertices at NaN or infinity are left out."""
-        v = _finite_vertices(self.mesh)
-        if not len(v):
+        if not len(_finite_vertices(self.mesh)):
             return None
-        with np.errstate(all="ignore"):  # (a pose that isn't finite gives None, not a warning over the picture)
-            linear, position, _ = self.world_matrix()
-            v = v @ linear.T + position
-            lo, hi = v.min(axis=0), v.max(axis=0)
-        if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
-            return None
-        return lo, hi
+        return _box(self.mesh, *self.world_matrix()[:2])
+
+
+def _box(mesh, linear, position):
+    """The corners of the box around the mesh's finite vertices placed by linear and position (see
+    Object3D.world_bounds), or None."""
+    v = _finite_vertices(mesh)
+    if not len(v):
+        return None
+    with np.errstate(all="ignore"):  # (a pose that isn't finite gives None, not a warning over the picture)
+        v = v @ linear.T + position
+        lo, hi = v.min(axis=0), v.max(axis=0)
+    if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
+        return None
+    return lo, hi
 
 
 def _finite_vertices(mesh):
@@ -248,8 +255,11 @@ class Model:
 def union_bounds(objects):
     """The corners (low (3,), high (3,)) of the box around several objects (Object3Ds or Models) as they stand in
     the world; None if there is nothing to box."""
-    boxes = [box for obj in objects for box in ([obj.world_bounds()] if hasattr(obj, "mesh") else
-                                                    [part.world_bounds() for part in obj]) if box is not None]
+    parts = [part for obj in objects for part in ([obj] if hasattr(obj, "mesh") else obj)]
+    parts = [part for part in parts if len(_finite_vertices(part.mesh))]
+    rows, linear, position, _ = scene_poses(parts)  # (each shared parent once)
+    boxes = [box for part in parts for box in [_box(part.mesh, linear[rows[id(part)]], position[rows[id(part)]])]
+             if box is not None]
     if not boxes:
         return None
     return np.min([lo for lo, _ in boxes], axis=0), np.max([hi for _, hi in boxes], axis=0)

@@ -30,8 +30,8 @@ import numpy as np
 
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
-from unicode3d.scene import Camera, Light, Object3D, PointLight, Renderer
-from unicode3d.mesh import Mesh
+from unicode3d.scene import Camera, Light, Node, Object3D, PointLight, Renderer
+from unicode3d.mesh import Mesh, make_box
 from unicode3d.shapes import blob_mesh
 from unicode3d import __version__
 from unicode3d.terminal import Screen, compile_kernels
@@ -77,6 +77,22 @@ def balls_scene(count):
     return objects, Camera(position=np.array([0.0, 2.0, 12.0]), fov=45.0), Light()
 
 
+def crowd_scene(count, parts=60, chain=6):
+    """count jointed figures of `parts` small boxes each, in chains of `chain` hanging from each figure's root Node
+    (as a glTF character's limbs do), every joint turning each frame: the cost of a deep scene graph."""
+    mesh = make_box(0.25)
+    objects = []
+    for f in range(count):
+        root = Node(position=np.array([(f % 5) * 2.0 - 4.0, 0.0, (f // 5) * 2.0 - 3.0]))
+        for p in range(parts):
+            parent = root if p % chain == 0 else objects[-1]
+            objects.append(Object3D(mesh, np.array([0.0, 0.3, 0.0]) if p % chain else np.zeros(3),
+                                    quat_axis_angle([np.cos(p), 0.5, np.sin(p)], 0.4 + 0.1 * (p // chain)),
+                                    scale=0.95 if p % 2 else (1.0, 0.9, 1.0), color=(200, 120 + p, 60),
+                                    parent=parent))
+    return objects, Camera(position=np.array([0.0, 6.0, 10.0]), fov=50.0), Light()
+
+
 SCENES = {
     "dice": lambda: dice_scene(3),
     "dice-sun": lambda: dice_scene(3, shadows="sun"),
@@ -84,6 +100,7 @@ SCENES = {
     "dice-glass": lambda: dice_scene(3, shadows="sun", glass=True),
     "dice-mirror": lambda: dice_scene(3, shadows="sun", polished=True),
     "balls-400": lambda: balls_scene(400),
+    "crowd-20": lambda: crowd_scene(20),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
 }

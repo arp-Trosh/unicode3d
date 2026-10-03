@@ -6,7 +6,10 @@ Conventions: right-handed world, +Y is up, the camera looks down -Z in view
 space, and points are column vectors (p' = M @ p). Quaternions are numpy
 arrays ordered [w, x, y, z].
 """
+import math
+
 import numpy as np
+from numba import njit
 
 UP = np.array([0.0, 1.0, 0.0])
 
@@ -146,23 +149,73 @@ def scale3(scale):
     return s
 
 
-def world_matrix(node, known=None):
+def scene_poses(nodes):
+    """The poses in the world of nodes (Nodes and Object3Ds) and all their parents, worked out in one pass:
+    (rows, linear (N, 3, 3), position (N, 3), visible (N,) bool), where rows maps id(node) to its row. A point p
+    in a node's own space is at linear @ p + position (see Node.world_matrix); a node is visible only if it and
+    all its parents are. Each parent is worked out once however many children it has."""
+    rows, order = {}, []
+    for node in nodes:
+        chain = []
+        while node is not None and id(node) not in rows:
+            chain.append(node)
+            node = node.parent
+            if len(chain) > 1000:
+                raise ValueError("scene graph has a cycle: an object is its own ancestor")
+        for node in reversed(chain):
+            rows[id(node)] = len(order)
+            order.append(node)
+    n = len(order)
+    parent = np.array([-1 if node.parent is None else rows[id(node.parent)] for node in order], np.int64)
+    position = np.array([node.position for node in order], np.float64).reshape(n, 3)
+    rotation = np.array([node.rotation for node in order], np.float64).reshape(n, 4)
+    scales = [(s, s, s) if isinstance(s, (int, float, np.number)) else s for s in (node.scale for node in order)]
+    try:
+        scale = np.array(scales, np.float64)
+    except (TypeError, ValueError):
+        scale = None
+    if scale is None or scale.shape != (n, 3):  # (something that isn't one number or three: scale3 says what)
+        scale = np.array([scale3(node.scale) for node in order], np.float64).reshape(n, 3)
+    visible = np.array([bool(node.visible) for node in order], np.bool_)
+    linear, place = np.empty((n, 3, 3)), np.empty((n, 3))
+    compose_poses(parent, position, rotation, scale, visible, linear, place)
+    return rows, linear, place, visible
+
+
+@njit(cache=True, error_model="numpy")
+def compose_poses(parent, position, rotation, scale, visible, linear, place):
+    """World poses of nodes listed parents first (scene_poses): parent[i] is the row of node i's parent, or -1 for
+    none; position (N, 3), rotation (N, 4, quaternions, w first, normalized here), scale (N, 3) are each node's
+    own. Writes linear (N, 3, 3) and place (N, 3), and makes visible[i] false if a parent is hidden. Serial: each
+    row needs its parent's, written before it."""
+    m = np.empty((3, 3))
+    for i in range(len(parent)):
+        w, x, y, z = rotation[i, 0], rotation[i, 1], rotation[i, 2], rotation[i, 3]
+        n = math.sqrt(w * w + x * x + y * y + z * z)
+        if n > 1e-12:  # (as normalize())
+            w, x, y, z = w / n, x / n, y / n, z / n
+        sx, sy, sz = scale[i, 0], scale[i, 1], scale[i, 2]
+        m[0, 0], m[0, 1], m[0, 2] = (1 - 2 * (y * y + z * z)) * sx, 2 * (x * y - w * z) * sy, 2 * (x * z + w * y) * sz
+        m[1, 0], m[1, 1], m[1, 2] = 2 * (x * y + w * z) * sx, (1 - 2 * (x * x + z * z)) * sy, 2 * (y * z - w * x) * sz
+        m[2, 0], m[2, 1], m[2, 2] = 2 * (x * z - w * y) * sx, 2 * (y * z + w * x) * sy, (1 - 2 * (x * x + y * y)) * sz
+        p = parent[i]
+        if p < 0:
+            for r in range(3):
+                place[i, r] = position[i, r]
+                for c in range(3):
+                    linear[i, r, c] = m[r, c]
+            continue
+        visible[i] = visible[i] and visible[p]
+        for r in range(3):
+            place[i, r] = place[p, r] + (linear[p, r, 0] * position[i, 0] + linear[p, r, 1] * position[i, 1]
+                                         + linear[p, r, 2] * position[i, 2])
+            for c in range(3):
+                linear[i, r, c] = linear[p, r, 0] * m[0, c] + linear[p, r, 1] * m[1, c] + linear[p, r, 2] * m[2, c]
+
+
+def world_matrix(node):
     """(linear (3, 3), position (3,), visible) of a node in the world, through all its parents (see
-    Node.world_matrix). known, a dict, holds those already worked out, by id, and gets this node's and its
-    parents': passing one dict for many nodes works out each shared parent once."""
-    chain = []
-    while node is not None and (known is None or id(node) not in known):
-        chain.append(node)
-        node = node.parent
-        if len(chain) > 1000:
-            raise ValueError("scene graph has a cycle: an object is its own ancestor")
-    lin, pos, visible = known[id(node)] if node is not None else (np.eye(3), np.zeros(3), True)
-    for node in reversed(chain):
-        pos = pos + lin @ np.asarray(node.position, dtype=float)
-        scale = node.scale
-        turn = quat_to_matrix(node.rotation)
-        lin = lin @ (turn * float(scale) if isinstance(scale, (int, float)) else turn * scale3(scale))
-        visible = visible and bool(node.visible)
-        if known is not None:
-            known[id(node)] = (lin, pos, visible)
-    return lin, pos, visible
+    Node.world_matrix). For many nodes at once, scene_poses() works out each shared parent once."""
+    rows, linear, place, visible = scene_poses([node])
+    row = rows[id(node)]
+    return linear[row], place[row], bool(visible[row])

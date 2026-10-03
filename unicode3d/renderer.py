@@ -7,6 +7,7 @@ them (shading.py), blends see-through surfaces over the solid ones, and adds wha
 shadows (shadows.py), fog and outlines, and the background.
 """
 import math
+import operator
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,7 +22,7 @@ from .shading import blend, post_effects, resolve
 from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
-from .transforms import normalize, perspective, scale3, view_axes, world_matrix
+from .transforms import normalize, perspective, scene_poses, view_axes
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
@@ -58,6 +59,11 @@ def _objects_of(owner):
     if hasattr(owner, "mesh"):
         return {id(owner)}
     return {id(obj) for part in owner for obj in ([part] if hasattr(part, "mesh") else part)}
+
+
+def _same(a, b):
+    """Whether two lists hold the same objects (compared by identity), in the same order."""
+    return len(a) == len(b) and all(map(operator.is_, a, b))
 
 
 def _mesh_key(mesh):
@@ -146,17 +152,6 @@ def _chunks(counts, starts, size):
     first = starts[inst] + within * size
     end = np.minimum(first + size, starts[inst] + counts[inst])
     return inst.astype(np.int64), first.astype(np.int64), end.astype(np.int64)
-
-
-_NO_TURN = np.array([1.0, 0.0, 0.0, 0.0])
-
-
-def _rotations(quat):
-    """Rotation matrices (N, 3, 3) of unit quaternions (N, 4), w first."""
-    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    return np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
-                     2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
-                     2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], axis=1).reshape(-1, 3, 3)
 
 
 class _Buffers:
@@ -420,68 +415,42 @@ class Renderer(ShadowMaps, Mirrors):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and
         position), colours, materials, flags and ids (render-list index + 1). Packs the meshes afresh if the set
         of meshes has changed."""
-        meshes, mesh_of, keys, known = [], {}, [], {}  # known: world poses worked out, by node id
-        mesh_idx, pos, quat, scale, placed_by, rgb, double, ident, emissive, cast, alpha, shine, spec, shiny = (
-            [], [], [], [], [], [], [], [], [], [], [], [], [], [])
-        for i, obj in enumerate(objects):
+        # (Wholly clear objects, or with a NaN opacity, have nothing to draw, nor any shadow.)
+        candidates = [(i, obj) for i, obj in enumerate(objects)
+                      if obj.mesh is not None and len(obj.mesh.faces) and obj.opacity > 0.0]
+        if not candidates:
+            return None
+        rows, linear, where, visible = scene_poses([obj for _, obj in candidates])
+        at = np.array([rows[id(obj)] for _, obj in candidates], np.int64)
+        # Hidden (or under a hidden parent), or NaN or infinite in a pose (a physics blow-up, say): not drawn.
+        drawn = visible[at] & np.isfinite(where[at]).all(axis=1) & np.isfinite(linear[at]).all(axis=(1, 2))
+        keep = np.flatnonzero(drawn)
+        if not len(keep):
+            return None
+        at = at[keep]
+        linear, where = linear[at], where[at]
+        objs = [candidates[k][1] for k in keep]
+        ident = [candidates[k][0] + 1 for k in keep]
+        meshes, mesh_of, keys, mesh_idx = [], {}, [], []
+        for obj in objs:
             mesh = obj.mesh
-            if mesh is None or not len(mesh.faces):
-                continue
-            if not obj.opacity > 0.0:
-                continue  # wholly clear (or NaN): nothing to draw, nor any shadow
-            if obj.parent is None:
-                if not obj.visible:
-                    continue
-                p, q, sc = obj.position, obj.rotation, obj.scale
-                sc = (sc, sc, sc) if isinstance(sc, (int, float, np.number)) else tuple(scale3(sc))
-            else:
-                linear, p, visible = world_matrix(obj, known)  # (each shared parent once)
-                if not visible:
-                    continue
-                q, sc = _NO_TURN, (1.0, 1.0, 1.0)
-                placed_by.append((len(pos), linear))
             m = mesh_of.get(id(mesh))
             if m is None:
                 m = mesh_of[id(mesh)] = len(meshes)
                 meshes.append(mesh)
                 keys.append(_mesh_key(mesh))
             mesh_idx.append(m)
-            pos.append(p)
-            quat.append(q)
-            scale.append(sc)
-            rgb.append(cached_linear_rgb(obj.color))
-            double.append(obj.double_sided)
-            ident.append(i + 1)
-            emissive.append(obj.emissive)
-            cast.append(obj.cast_shadows)
-            alpha.append(obj.opacity)
-            shine.append(obj.reflectivity)
-            spec.append(obj.specular)
-            shiny.append(0.0 if obj.shininess is None else obj.shininess)
-        if not meshes:
-            return None
-        where = np.array(pos, np.float64).reshape(-1, 3)
-        turn = np.array(quat, dtype=np.float64).reshape(-1, 4)
-        turn = turn / np.maximum(np.linalg.norm(turn, axis=1, keepdims=True), 1e-300)
-        linear = _rotations(turn) * np.array(scale, np.float64).reshape(-1, 1, 3)
-        for row, lin in placed_by:  # through parents: worked out whole by world_matrix()
-            linear[row] = lin
-        placed = np.isfinite(where).all(axis=1) & np.isfinite(linear).all(axis=(1, 2))
-        if not placed.all():  # NaN or infinite in a pose (a physics blow-up, say): nowhere to draw it
-            keep = np.flatnonzero(placed)
-            if not len(keep):
-                return None
-            mesh_idx, rgb, double, ident, emissive, cast, alpha, shine, spec, shiny = (
-                [values[i] for i in keep]
-                for values in (mesh_idx, rgb, double, ident, emissive, cast, alpha, shine, spec, shiny))
-            where, linear = where[keep], linear[keep]
-            used = sorted(set(mesh_idx))
-            renumber = {m: j for j, m in enumerate(used)}
-            meshes, keys = [meshes[m] for m in used], [keys[m] for m in used]
-            mesh_idx = [renumber[m] for m in mesh_idx]
+        rgb = [cached_linear_rgb(obj.color) for obj in objs]
+        double = [obj.double_sided for obj in objs]
+        emissive = [obj.emissive for obj in objs]
+        cast = [obj.cast_shadows for obj in objs]
+        alpha = [obj.opacity for obj in objs]
+        shine = [obj.reflectivity for obj in objs]
+        spec = [obj.specular for obj in objs]
+        shiny = [0.0 if obj.shininess is None else obj.shininess for obj in objs]
+        keys = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
         packed = self._pack
-        if packed is None or len(packed[0]) != len(keys) or any(
-                len(a) != len(b) or any(x is not y for x, y in zip(a, b)) for a, b in zip(packed[0], keys)):
+        if packed is None or not _same(packed[0], keys):
             packed = self._pack = (keys, _pack_meshes(meshes))
         mesh_idx = np.array(mesh_idx, np.int64)
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
@@ -521,7 +490,7 @@ class Renderer(ShadowMaps, Mirrors):
         values += [inst[k].tobytes()
                    for k in ("mesh", "pos", "lin", "rgb", "double", "ident", "emissive", "cast", "alpha",
                              "shine", "specular", "shininess")]
-        return values, [x for key in inst["keys"] for x in (*key, None)]
+        return values, inst["keys"]
 
     def render(self, objects, camera, lights):
         """Draw the objects; returns the framebuffer (reused by the next render: copy it to keep it).
@@ -548,8 +517,7 @@ class Renderer(ShadowMaps, Mirrors):
         state = self._scene_state(inst, camera)
         state = (state[0] + list(bg_state[0]), state[1] + list(bg_state[1]))
         last = self._last
-        if (last is not None and last[0] == state[0] and len(last[1]) == len(state[1])
-                and all(a is b for a, b in zip(last[1], state[1]))):
+        if last is not None and last[0] == state[0] and _same(last[1], state[1]):
             return self.framebuffer
         self._last = None
         fb = self._draw(inst, camera, lights, bg_args)
