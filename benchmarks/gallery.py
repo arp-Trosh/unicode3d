@@ -40,8 +40,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from unicode3d.background import Gradient, Sky
-from unicode3d.color import Color, linear_to_srgb, xterm_rgb
-from unicode3d.glyphs import GLYPH_SETS
+from unicode3d import pictures
+from unicode3d.color import Color, linear_to_srgb
+from unicode3d.pictures import TERMINAL_BG, TERMINAL_FG, unpack_colors
 from unicode3d.mesh import Mesh, make_box
 from unicode3d.scene import Camera, Light, Object3D, PointLight, Renderer
 from unicode3d.shapes import blob_mesh, block_mesh
@@ -49,9 +50,7 @@ from unicode3d.terminal import Screen
 from unicode3d.transforms import quat_axis_angle, quat_mul
 
 SIZE = (100, 36)  # cells, columns x rows
-CELL = (8, 16)    # pixels of a cell in the pictures, wide x high
 UP = (0.0, 1.0, 0.0)
-TERMINAL_FG, TERMINAL_BG = (204, 204, 204), (12, 12, 16)  # the terminal's own colours, in the pictures
 
 
 @dataclass
@@ -518,67 +517,10 @@ def render(shot):
             "glyphs": np.array(shot.glyphs), "color": np.array(shot.color)}
 
 
-def unpack_colors(packed, default):
-    """sRGB 0..255 (..., 3) of packed cell colours (see color.quantize): truecolor, palette or the default."""
-    out = np.empty(packed.shape + (3,), np.uint8)
-    out[...] = default
-    rgb = packed >= 0
-    truecolor = rgb & (packed & (1 << 25) != 0)
-    for k, shift in enumerate((16, 8, 0)):
-        out[..., k] = np.where(truecolor, (packed >> shift) & 255, out[..., k])
-    indexed = rgb & ~truecolor
-    out[indexed] = xterm_rgb()[packed[indexed] & 255].astype(np.uint8)
-    return out
-
-
-# A 5x7 bitmap of each character of the ASCII ramp, drawn in the middle of the cell.
-ASCII_BITMAPS = {
-    ".": ["", "", "", "", "", "..#..", "..#.."],
-    ":": ["", "..#..", "..#..", "", "..#..", "..#..", ""],
-    "-": ["", "", "", "#####", "", "", ""],
-    "=": ["", "", "#####", "", "#####", "", ""],
-    "+": ["", "..#..", "..#..", "#####", "..#..", "..#..", ""],
-    "*": ["", "#.#.#", ".###.", "#####", ".###.", "#.#.#", ""],
-    "#": [".#.#.", "#####", ".#.#.", ".#.#.", "#####", ".#.#.", ""],
-    "%": ["##..#", "##.#.", "..#..", ".#...", "#..##", "...##", ""],
-    "@": [".###.", "#...#", "#.###", "#.#.#", "#.###", "#....", ".###."],
-}
-
-
-def _cell_masks(glyphs):
-    """{character: (CELL[1], CELL[0]) bool, True where it shows the foreground}."""
-    w, h = CELL
-    if glyphs == "ascii":
-        masks = {" ": np.zeros((h, w), bool)}
-        for c, rows in ASCII_BITMAPS.items():
-            mask = np.zeros((h, w), bool)
-            for y, row in enumerate(rows):
-                for x, bit in enumerate(row):
-                    mask[2 * y + 1:2 * y + 3, x + 1] = bit == "#"
-            masks[c] = mask
-        return masks
-    glyph_set = GLYPH_SETS[glyphs]
-    pw, ph = glyph_set.cell_pixels
-    xs, ys = np.arange(w) * pw // w, np.arange(h) * ph // h
-    sub = ys[:, None] * pw + xs[None, :]  # which of the cell's pixels each picture pixel is in
-    return {c: (bits >> sub & 1).astype(bool) for bits, c in enumerate(glyph_set.chars)}
-
-
 def cells_picture(frame):
-    """What a terminal shows for the saved cells, as (rows * CELL[1], cols * CELL[0], 3) uint8: block glyphs as
-    their shapes, ASCII as small bitmaps."""
-    chars = frame["chars"].view("<U1") if frame["chars"].dtype == np.uint32 else frame["chars"]
-    fg, bg = unpack_colors(frame["fg"], TERMINAL_FG), unpack_colors(frame["bg"], TERMINAL_BG)
-    masks = _cell_masks(str(frame["glyphs"]))
-    rows, cols = chars.shape
-    w, h = CELL
-    out = np.empty((rows * h, cols * w, 3), np.uint8)
-    blank = np.zeros((h, w), bool)
-    for y in range(rows):
-        for x in range(cols):
-            mask = masks.get(chars[y, x], blank)
-            out[y * h:(y + 1) * h, x * w:(x + 1) * w] = np.where(mask[..., None], fg[y, x], bg[y, x])
-    return out
+    """What a terminal shows for the saved cells, as (rows * 16, cols * 8, 3) uint8 (see
+    unicode3d.pictures)."""
+    return pictures.cells_picture(frame["chars"], frame["fg"], frame["bg"], frame.get("attrs"), str(frame["glyphs"]))
 
 
 def pixels_picture(frame):

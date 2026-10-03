@@ -13,7 +13,7 @@ import unittest.mock
 import numba
 import numpy as np
 
-from unicode3d import terminal
+from unicode3d import pictures, terminal
 from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
@@ -1122,6 +1122,26 @@ class RenderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Renderer(10, 5).render([Object3D(make_box(), scale=(1.0, 2.0))], camera, light)
 
+    def test_texture_v_runs_up_the_image(self):
+        # As the README says: v = 1 shows the image's row 0 (its top), v = 0 its last row; u runs left to right.
+        quad = Mesh(np.array([(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)], float), np.array([(0, 1, 2), (0, 2, 3)]))
+        quad.uvs = np.array([(0, 0), (1, 0), (1, 1), (0, 1)], float)[quad.faces]
+        quad.materials = np.zeros(2, int)
+        image = np.zeros((8, 8, 3))
+        image[:4, :, 0] = 1.0  # top half red
+        image[:, 4:, 2] = 1.0  # right half blue
+        quad.textures = [image]
+        fb = Renderer(40, 20, fog=0, outline=0).render([Object3D(quad, color=(255, 255, 255))],
+                                                       Camera(position=np.array([0.0, 0.0, 3.0])),
+                                                       Light(ambient=1.0, diffuse=0.0, specular=0.0))
+        rows, cols = np.nonzero(fb.alpha == 1)
+        top, bottom, left, right = rows.min() + 2, rows.max() - 2, cols.min() + 2, cols.max() - 2
+        c = fb.colour()
+        np.testing.assert_allclose(c[top, left], [1, 0, 0], atol=0.02)
+        np.testing.assert_allclose(c[top, right], [1, 0, 1], atol=0.02)
+        np.testing.assert_allclose(c[bottom, left], [0, 0, 0], atol=0.02)
+        np.testing.assert_allclose(c[bottom, right], [0, 0, 1], atol=0.02)
+
     def test_textures_are_mipmapped(self):
         # A fine checkerboard seen small averages to grey instead of aliasing into random black and white.
         checks = (np.indices((64, 64)).sum(axis=0) % 2).astype(float)
@@ -1737,6 +1757,30 @@ class Terminal:
 
 
 class ScreenTests(unittest.TestCase):
+    def test_picture_shows_the_cells(self):
+        self.assertEqual((pictures.BOLD, pictures.DIM, pictures.REVERSE), (terminal.BOLD, terminal.DIM, terminal.REVERSE))
+        for glyphs in ("sextant", "quad", "half", "ascii"):
+            screen = Screen(None, glyphs=glyphs, color="truecolor", size=(10, 30))
+            fb = Renderer(30, 10, screen.cell_pixels).render([Object3D(make_box(), color=(255, 0, 0))], Camera(),
+                                                             Light(ambient=1.0, diffuse=0.0, specular=0.0))
+            screen.draw_frame(fb)
+            screen.text(0, 0, "Hi", Color.YELLOW)
+            screen.text(1, 0, "W", Color.GREEN, reverse=True)
+            screen.text(2, 0, "W", Color.WHITE, dim=True)
+            pic = screen.picture(cell=(6, 12), bg=(0, 0, 0))
+            self.assertEqual(pic.shape, (120, 180, 3))
+            self.assertEqual(pic.dtype, np.uint8)
+            middle = pic[60 - 6:60 + 6, 90 - 3:90 + 3].reshape(-1, 3)  # the box, red
+            self.assertTrue((middle[:, 0] > 150).any() and (middle[:, 1:] < 60).all(), glyphs)
+            letters = pic[:12, :12].reshape(-1, 3)  # some pixels in the text's colour, the rest the background
+            yellow = tuple(int(v) for v in pictures.unpack_colors(screen.fg[0, 0], (0, 0, 0)))
+            self.assertTrue(10 < (letters == yellow).all(axis=1).sum() < len(letters) / 2)
+            self.assertTrue((letters == 0).all(axis=1).sum() > len(letters) / 2)
+            reverse = pic[12:24, :6].reshape(-1, 3)  # mostly green behind a dark letter
+            self.assertGreater((reverse[:, 1] > 100).sum(), len(reverse) / 2)
+            dim = pic[24:36, :6].reshape(-1, 3).max(axis=0)
+            self.assertLess(int(dim.max()), int(pictures.unpack_colors(screen.fg[2, 0], (0, 0, 0)).max()))
+
     def test_detection(self):
         self.assertEqual(detect_color_mode({"WT_SESSION": "x", "TERM": "xterm-256color"}, windows=False), "truecolor")
         self.assertEqual(detect_color_mode({}, windows=True), "truecolor")

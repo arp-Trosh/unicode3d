@@ -36,6 +36,7 @@ from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from .background import Sky
 from .mesh import Mesh, make_box
+from .pictures import cells_picture
 from .queries import Colliders
 from .scene import Camera, Light, Object3D, PointLight, Renderer
 
@@ -273,6 +274,13 @@ class Screen:
     def size(self):
         """(rows, cols) of the terminal, as of the start of this frame."""
         return self._rows, self._cols
+
+    def picture(self, cell=(8, 16), fg=(204, 204, 204), bg=(12, 12, 16)):
+        """What the terminal shows of the screen's cells as they are now (after draw_frame() and text()), as an
+        image: (rows * cell[1], cols * cell[0], 3) uint8 sRGB, each cell cell[0] pixels wide and cell[1] high, its
+        block glyphs drawn as their shapes and text in a small font (see pictures.cells_picture). fg and bg stand
+        for the terminal's own colours. For previews, screenshots and tests: PIL.Image.fromarray(it).save(path)."""
+        return cells_picture(self.chars, self.fg, self.bg, self.attrs, self.glyphs.name, cell, fg, bg)
 
     def _resize(self, rows, cols):
         self._rows, self._cols = rows, cols

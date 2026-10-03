@@ -23,7 +23,9 @@ class Mesh:
     opacity (alpha, 0..1 or 0..255: 0 is clear, full is solid), which multiplies the object's."""
     vertices: np.ndarray                 # (V, 3) float
     faces: np.ndarray                    # (F, 3) int, counter-clockwise when seen from outside
-    uvs: np.ndarray | None = None        # (F, 3, 2) per-corner texture coordinates
+    uvs: np.ndarray | None = None        # (F, 3, 2) per-corner texture coordinates (u, v): u runs left to right
+                                         # across the image, v up it (v = 0 is its last row, v = 1 its row 0),
+                                         # as in OBJ files (load_gltf flips glTF's, which run down)
     materials: np.ndarray | None = None  # (F,) index into `textures`
     textures: list = field(default_factory=list)  # (H, W) brightness multipliers, (H, W, 3) colours, 0..1 sRGB,
                                                   # or (H, W, 4) with alpha: holes (cut-outs) or see-through parts

@@ -280,6 +280,9 @@ Textures (for `make_box`, or any mesh with `uvs` and `materials`) are 2D arrays 
 multipliers or `(H, W, 3)` colour arrays, both 0..1 in sRGB, where 1.0 leaves the object's colour
 unchanged and 0.0 is black; `(H, W, 4)` adds opacity (see [Transparency](#transparency)).
 `load_image(path)` reads a PNG, JPEG or any other image Pillow knows as one. Texture coordinates
+(`mesh.uvs`, `(u, v)` for each corner of each face) run as in OBJ files and OpenGL: u from the
+image's left edge (0) to its right (1), v from its bottom (0, the array's last row) to its top (1,
+row 0, the first row of the image file); `load_gltf` flips glTF's v, which runs down. Coordinates
 beyond 0..1 repeat the texture: 0 to 10 across a floor tiles it ten times.
 
 The [Engine reference](#engine-reference) below covers each part in detail, and the programs in
@@ -934,6 +937,11 @@ would, unless the program handles that signal itself). `frame_fn(screen, dt, key
   (kitty, and most where a frame fits in the system's buffer) gain little.
 - `Screen(size=(rows, cols))` with no console gives an off-screen grid, for tests;
   `render_updates()` returns the escape sequences a refresh would send.
+- `screen.picture(cell=(8, 16), fg=(204, 204, 204), bg=(12, 12, 16))` is a screenshot: the cells
+  as they are now, as a terminal would show them, an `(rows * 16, cols * 8, 3)` uint8 sRGB image
+  with block glyphs drawn as their shapes and text in a small font (`fg` and `bg` stand for the
+  terminal's own colours). `PIL.Image.fromarray(screen.picture()).save("shot.png")` saves it, for
+  previews, docs and tests; it works on a screen with a console as well as an off-screen one.
 
 `run()` notes each run, with the terminal's size and settings, in a crash log
 (`crash_log_path()`: `~/.cache/unicode3d/crash.log`, or `%LOCALAPPDATA%\unicode3d\crash.log` on
