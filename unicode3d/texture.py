@@ -94,16 +94,17 @@ _shared = {}  # id(texture array) -> (weak reference to it, its mipmap chain): s
 
 
 def mipmaps(texture):
-    """build_mipmaps(texture), built once for each texture array however many meshes show it (copies of a model,
-    or meshes made from its parts), and kept while the array lives; None for a texture that is not an array
-    (a nested list), which can't be told apart from its copies. An array edited in place keeps its chain."""
+    """build_mipmaps(texture) in float32 (as pack() keeps texels), built once for each texture array however many
+    meshes show it (copies of a model, or meshes made from its parts), and kept while the array lives; None for a
+    texture that is not an array (a nested list), which can't be told apart from its copies. An array edited in
+    place keeps its chain."""
     key = id(texture)
     entry = _shared.get(key)
     if entry is not None and entry[0]() is texture:
         return entry[1]
     if not isinstance(texture, np.ndarray):
         return None
-    levels = build_mipmaps(texture)
+    levels = [level.astype(np.float32) for level in build_mipmaps(texture)]
     # (The array's id is free for another only once it is gone, and by then its entry is too.)
     _shared[key] = (weakref.ref(texture, lambda _, key=key: _shared.pop(key, None)), levels)
     return levels
@@ -112,12 +113,13 @@ def mipmaps(texture):
 def pack(chains, out=None, offset=0):
     """Mipmap chains (as build_mipmaps gives them) in flat arrays, for sample().
 
-    Returns texels (N, 4): every level's texels, row by row, as colours premultiplied by alpha and
-    alpha (brightness textures repeat their one channel; textures without alpha have alpha 1);
+    Returns texels (N, 4) float32: every level's texels, row by row, as colours premultiplied by alpha and
+    alpha (brightness textures repeat their one channel; textures without alpha have alpha 1): float32 halves
+    the memory and copying of textures, which run to hundreds of megabytes, and is finer than any terminal shows;
     levels (L, 3): each level's [first texel, height, width]; first (K + 1,): chain k's levels are
     levels[first[k]:first[k + 1]].
 
-    out: an (M, 4) array to write the texels into from row `offset` on (rows before it are left as they are, and
+    out: an (M, 4) float32 array to write the texels into from row `offset` on (rows before it are left as they are, and
     levels count from it), so that textures can be added to a pack without copying it; texels is then out[:N].
     """
     levels, first = [], [0]
@@ -127,7 +129,7 @@ def pack(chains, out=None, offset=0):
             offset += level.shape[0] * level.shape[1]
         first.append(len(levels))
     if out is None:
-        out = np.empty((offset, 4))
+        out = np.empty((offset, 4), np.float32)
     texels = out[:offset]
     at = iter(levels)  # (filled in place: a block of its own per level and a copy of them all was twice the
     for chain in chains:  # memory traffic, and textures run to hundreds of megabytes)

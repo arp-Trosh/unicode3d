@@ -217,7 +217,7 @@ class _Packer:
                 self._textures = (chains, index, kinds, (added, np.concatenate([levels, more_levels]),
                                                          np.concatenate([first, more_first[1:] + len(levels)])), room)
                 return chains, index, kinds
-        room = np.empty((size + size // 4 + 4096, 4))  # (room for more textures later)
+        room = np.empty((size + size // 4 + 4096, 4), np.float32)  # (room for more textures later)
         kinds = np.array([alpha_kind(chain) for chain in wanted], np.int8)
         self._textures = (wanted, {id(chain): k for k, chain in enumerate(wanted)}, kinds,
                           pack_textures(wanted, room), room)
