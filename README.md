@@ -897,6 +897,11 @@ colour fades surfaces into it.
   to the end of the longest, and does the looping for them all (`"once"`, `"loop"`, `"pingpong"`):
   a loaded glTF model's animations are clips, and they group your own as well. It has `update(dt)`,
   `apply(t)`, `done()`, `duration` and `targets`.
+- `clip.start(fade=0)` plays a clip from the beginning; with `fade` (seconds), it eases from the
+  pose its targets have now into its own over that long (positions and scales blended, rotations
+  slerped, along `ease_in_out`), so switching from one clip to another doesn't jump:
+  `model.animations["Attack"].start(fade=0.2)`, then `update(dt)` it as usual (`clip.fading` says
+  whether it still is). The fade runs on `update()`'s `dt`, whatever the clip's `speed`.
 
 ```python
 from unicode3d.animation import Animation, RotationTrack, Track

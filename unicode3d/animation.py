@@ -15,6 +15,8 @@ along tangents given with each (cubic Hermite splines, as glTF models' animation
 A Clip plays several Animations on one clock: what models.load_model() gives for each animation in a
 glTF file (Model.animations), and a way to group your own.
 """
+import math
+
 import numpy as np
 
 from .transforms import normalize, quat_slerp
@@ -241,6 +243,7 @@ class Clip:
         self.loop = _check_loop(loop)
         self.speed = speed
         self.time = 0.0
+        self._fade = None  # [(target, attribute, value at the start), ...], seconds faded so far, seconds to fade
 
     @property
     def duration(self):
@@ -255,14 +258,50 @@ class Clip:
     def done(self):
         return self.loop == "once" and self.time >= self.duration
 
+    def start(self, fade=0.0):
+        """Play from the beginning (time 0). With fade, in seconds, ease from the pose its targets have now (left by
+        another clip, or by code) into the clip's over that long, rather than jumping: a crossfade from Walk into
+        Attack. The fade runs on update()'s dt (not scaled by speed); starting again, or another clip moving the
+        same targets, takes over from wherever they are."""
+        self.time = 0.0
+        self._fade = None
+        fade = float(fade)
+        if fade > 0.0 and math.isfinite(fade):
+            pose = [(a.target, name, np.array(getattr(a.target, name), dtype=float))
+                    for a in self.animations for name in a.tracks]
+            self._fade = [pose, 0.0, fade]
+        self.apply(0.0)
+
+    @property
+    def fading(self):
+        """Whether it is still easing in from where start(fade) found its targets."""
+        return self._fade is not None
+
     def apply(self, t):
-        """Put every target where the clip has it at time t (looped, if it loops)."""
+        """Put every target where the clip has it at time t (looped, if it loops), blended with where it started
+        from while it fades in (see start)."""
         self.time = float(t)
         local = _wrap(self.time, 0.0, self.duration, _check_loop(self.loop))
         for animation in self.animations:
             animation.apply(local)
+        if self._fade is not None:
+            pose, faded, fade = self._fade
+            w = ease_in_out(max(faded, 0.0) / fade) if faded < fade else 1.0  # (a NaN dt ends it)
+            if w >= 1.0:
+                self._fade = None
+                return
+            for target, name, start in pose:
+                now = getattr(target, name)
+                if name == "rotation":
+                    value = quat_slerp(start, now, w)
+                else:
+                    value = start + (np.asarray(now, dtype=float) - start) * w
+                    value = float(value) if np.ndim(now) == 0 and value.shape == () else value
+                setattr(target, name, value)
 
     def update(self, dt):
         """Move on by dt seconds (times speed) and apply; returns whether it is still playing."""
+        if self._fade is not None:
+            self._fade[1] += dt
         self.apply(self.time + dt * self.speed)
         return not self.done()

@@ -16,7 +16,7 @@ from PIL import Image
 
 from unicode3d import (Animation, Camera, Clip, Light, Node, Object3D, Renderer, SplineTrack, Track, load_gltf,
                        load_model)
-from unicode3d.animation import step
+from unicode3d.animation import RotationTrack, step
 from unicode3d.color import linear_to_srgb
 from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.transforms import quat_axis_angle, quat_to_matrix
@@ -523,6 +523,36 @@ class AnimationPieceTests(unittest.TestCase):
             Clip([], loop="sometimes")
         self.assertEqual(Clip([]).duration, 0.0)
         self.assertTrue(Clip([]).done())
+
+    def test_clips_crossfade(self):
+        # Walk leaves the arm turned and raised; Wave, started with a fade, eases from there into its own pose.
+        arm = Node()
+        up = quat_axis_angle((0, 0, 1), 1.2)
+        walk = Clip([Animation(arm, position=Track([(0, (0, 1, 0)), (1, (0, 1, 0))]),
+                               rotation=RotationTrack([(0, up), (1, up)]), scale=Track([(0, 2.0), (1, 2.0)]))])
+        wave = Clip([Animation(arm, position=Track([(0, (1, 0, 0)), (2, (1, 0, 0))]),
+                               rotation=RotationTrack([(0, (1, 0, 0, 0)), (2, (1, 0, 0, 0))]),
+                               scale=Track([(0, 1.0), (2, 1.0)]))])
+        walk.update(0.5)
+        wave.start(fade=0.4)
+        self.assertTrue(wave.fading)
+        np.testing.assert_allclose(arm.position, (0, 1, 0))  # where Walk left it
+        np.testing.assert_allclose(np.abs(arm.rotation), np.abs(up))
+        wave.update(0.2)  # half way through the fade (ease_in_out(0.5) is 0.5)
+        np.testing.assert_allclose(arm.position, (0.5, 0.5, 0))
+        np.testing.assert_allclose(np.abs(arm.rotation), np.abs(quat_axis_angle((0, 0, 1), 0.6)), atol=1e-12)
+        self.assertAlmostEqual(arm.scale, 1.5)
+        self.assertIsInstance(arm.scale, float)
+        wave.update(0.2)
+        self.assertFalse(wave.fading)
+        np.testing.assert_allclose(arm.position, (1, 0, 0))
+        self.assertEqual(arm.scale, 1.0)
+        self.assertAlmostEqual(wave.time, 0.4)
+        wave.start()  # no fade: straight to its pose
+        self.assertFalse(wave.fading)
+        walk.start(fade=0.4)
+        walk.update(float("nan"))  # (a bad dt ends the fade, rather than leaving it NaN for good)
+        self.assertFalse(walk.fading)
 
 
 if __name__ == "__main__":
