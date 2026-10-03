@@ -93,6 +93,25 @@ def crowd_scene(count, parts=60, chain=6):
     return objects, Camera(position=np.array([0.0, 6.0, 10.0]), fov=50.0), Light()
 
 
+def spawn_scene(count=60, textures=6):
+    """count boxes showing a few 256x256 textures between them (as copies of a loaded model do), and a puff of dust
+    (a new mesh each time) there one frame and gone the next: the cost of a render list that gains and loses
+    objects, which repacks the meshes every frame."""
+    rng = np.random.default_rng(2)
+    images = [rng.uniform(0.0, 1.0, (256, 256, 3)) for _ in range(textures)]
+    objects = [Object3D(make_box(0.8, [images[(b + k) % textures] for k in range(6)]),
+                        np.array([(b % 10) * 1.2 - 5.4, 0.0, (b // 10) * 1.2 - 3.0]), color=(255, 255, 255))
+               for b in range(count)]
+
+    def churn(frame):  # (the objects to draw this frame)
+        if frame % 2:
+            return objects
+        puff = Object3D(blob_mesh((0.3, 0.3, 0.3), rings=6, segments=8), np.array([0.0, 1.0, 0.0]),
+                        color=(200, 200, 200))
+        return objects + [puff]
+    return objects, Camera(position=np.array([0.0, 7.0, 9.0]), fov=50.0), Light(), [], churn
+
+
 SCENES = {
     "dice": lambda: dice_scene(3),
     "dice-sun": lambda: dice_scene(3, shadows="sun"),
@@ -101,6 +120,7 @@ SCENES = {
     "dice-mirror": lambda: dice_scene(3, shadows="sun", polished=True),
     "balls-400": lambda: balls_scene(400),
     "crowd-20": lambda: crowd_scene(20),
+    "spawn-60": lambda: spawn_scene(60),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
 }
@@ -143,8 +163,11 @@ class Frames:
     """A scene, a renderer and an off-screen screen; step() spins the objects and draws one frame."""
 
     def __init__(self, scene, cols, rows, glyphs, color):
-        self.objects, self.camera, self.light, *still = SCENES[scene]()
-        self.moving = [obj for obj in self.objects if not any(obj is s for s in (still or [[]])[0])]
+        self.objects, self.camera, self.light, *rest = SCENES[scene]()
+        still = rest[0] if rest else []
+        self.churn = rest[1] if len(rest) > 1 else None  # (frame number: the objects to draw then)
+        self.frame = 0
+        self.moving = [obj for obj in self.objects if not any(obj is s for s in still)]
         self.screen = Screen(None, glyphs=glyphs, color=color, size=(rows, cols))
         self.renderer = Renderer(cols, rows, self.screen.cell_pixels)
         self.triangles = sum(len(obj.mesh.faces) for obj in self.objects)
@@ -152,8 +175,10 @@ class Frames:
     def step(self):
         for obj in self.moving:
             obj.rotation = quat_mul(SPIN, obj.rotation)
+        self.frame += 1
+        objects = self.churn(self.frame) if self.churn else self.objects
         t0 = time.perf_counter()
-        fb = self.renderer.render(self.objects, self.camera, self.light)
+        fb = self.renderer.render(objects, self.camera, self.light)
         t1 = time.perf_counter()
         self.screen.draw_frame(fb)
         t2 = time.perf_counter()

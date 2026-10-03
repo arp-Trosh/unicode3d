@@ -508,7 +508,9 @@ renderer.render([body, *wheels, trailer], camera, light)
 
 Draw as many objects as you like in one render list: objects that share a `Mesh` share its packed
 copy, all objects are projected in one parallel kernel call, and those wholly outside the view are
-skipped. 400 small balls (140,800 triangles) take about 14 ms at 180x50 cells (see
+skipped. Objects may come and go from one frame to the next (an arrow fired, a puff of dust): each mesh
+keeps its packed copy, and meshes showing the same texture array share one copy of its mipmaps, so a
+render list that changes costs milliseconds, not a pause. 400 small balls (140,800 triangles) take about 14 ms at 180x50 cells (see
 [Performance](#performance) for the machine). For thousands of static pieces, merging them into one
 mesh with `merge_meshes` (keeping each part's colour) is cheaper still, and a loaded model that
 stands still (scenery, a building, a tree) draws quicker as `model.bake()` (see [Models](#models)).

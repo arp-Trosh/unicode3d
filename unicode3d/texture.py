@@ -12,6 +12,7 @@ by it, so that shrinking them averages the colour of what is there, not of the
 clear parts: a leaf's edge stays green rather than fading to black.
 """
 import io
+import weakref
 
 import numpy as np
 from numba import njit
@@ -89,28 +90,54 @@ def alpha_kind(chain):
     return BLEND if ((alpha > 0.1) & (alpha < 0.9)).mean() > 0.1 else CUTOUT
 
 
-def pack(chains):
+_shared = {}  # id(texture array) -> (weak reference to it, its mipmap chain): see mipmaps()
+
+
+def mipmaps(texture):
+    """build_mipmaps(texture), built once for each texture array however many meshes show it (copies of a model,
+    or meshes made from its parts), and kept while the array lives; None for a texture that is not an array
+    (a nested list), which can't be told apart from its copies. An array edited in place keeps its chain."""
+    key = id(texture)
+    entry = _shared.get(key)
+    if entry is not None and entry[0]() is texture:
+        return entry[1]
+    if not isinstance(texture, np.ndarray):
+        return None
+    levels = build_mipmaps(texture)
+    # (The array's id is free for another only once it is gone, and by then its entry is too.)
+    _shared[key] = (weakref.ref(texture, lambda _, key=key: _shared.pop(key, None)), levels)
+    return levels
+
+
+def pack(chains, out=None, offset=0):
     """Mipmap chains (as build_mipmaps gives them) in flat arrays, for sample().
 
     Returns texels (N, 4): every level's texels, row by row, as colours premultiplied by alpha and
     alpha (brightness textures repeat their one channel; textures without alpha have alpha 1);
     levels (L, 3): each level's [first texel, height, width]; first (K + 1,): chain k's levels are
     levels[first[k]:first[k + 1]].
+
+    out: an (M, 4) array to write the texels into from row `offset` on (rows before it are left as they are, and
+    levels count from it), so that textures can be added to a pack without copying it; texels is then out[:N].
     """
-    texels, levels, first, offset = [np.zeros((0, 4))], [], [0], 0
+    levels, first = [], [0]
     for chain in chains:
         for level in chain:
-            h, w, c = level.shape
-            rgba = np.ones((h, w, 4))
-            rgba[..., :3] = level[..., :3] if c >= 3 else level[..., :1]
-            if c == 4:
-                rgba[..., 3] = level[..., 3]
-            texels.append(rgba.reshape(-1, 4))
-            levels.append((offset, h, w))
-            offset += h * w
+            levels.append((offset, level.shape[0], level.shape[1]))
+            offset += level.shape[0] * level.shape[1]
         first.append(len(levels))
-    return (np.ascontiguousarray(np.concatenate(texels)), np.array(levels, dtype=np.int64).reshape(-1, 3),
-            np.array(first, dtype=np.int64))
+    if out is None:
+        out = np.empty((offset, 4))
+    texels = out[:offset]
+    at = iter(levels)  # (filled in place: a block of its own per level and a copy of them all was twice the
+    for chain in chains:  # memory traffic, and textures run to hundreds of megabytes)
+        for level in chain:
+            start, h, w = next(at)
+            c = level.shape[2]
+            block = texels[start:start + h * w].reshape(h, w, 4)
+            block[..., :3] = level[..., :3] if c >= 3 else level[..., :1]
+            block[..., 3] = level[..., 3] if c == 4 else 1.0
+    return texels, np.array(levels, dtype=np.int64).reshape(-1, 3), np.array(first, dtype=np.int64)
 
 
 @njit(cache=True, error_model="numpy")

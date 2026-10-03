@@ -89,58 +89,139 @@ def _flat_plane(vertices, faces, radius):
     return (*normal, -float(normal @ centre))
 
 
-def _pack_meshes(meshes):
-    """The meshes' arrays packed together for raster.project, and their textures for sampling."""
-    chains, chain_of, kinds = [], {}, []
-    verts, normals, faces, uvs, colors, face_chain, face_texels, face_kind = [], [], [], [], [], [], [], []
-    mesh_vertex, mesh_face, spheres, clear, tints, planes = [0], [0], [], [], [], []
-    for mesh in meshes:
-        mesh.check()  # (the kernels index these arrays by each other's sizes without checking)
-        n_faces = len(mesh.faces)
-        verts.append(np.asarray(mesh.vertices, dtype=float))
-        normals.append(mesh.vertex_normals())
-        faces.append(np.asarray(mesh.faces, dtype=np.int64) + mesh_vertex[-1])
-        if mesh.materials is not None and mesh.textures:
-            table = np.empty(len(mesh.textures), np.int64)
-            for m in range(len(mesh.textures)):
-                levels = mesh.mipmaps(m)
-                if id(levels) not in chain_of:
-                    chain_of[id(levels)] = len(chains)
-                    chains.append(levels)
-                    kinds.append(alpha_kind(levels))
-                table[m] = chain_of[id(levels)]
-            materials = np.asarray(mesh.materials)
-            face_chain.append(table[materials])
-            face_kind.append(np.array(kinds, np.int8)[table[materials]])
-            sizes = np.array([np.shape(t)[0] * np.shape(t)[1] for t in mesh.textures], dtype=float)
-            face_texels.append(sizes[materials])
-            uvs.append(np.asarray(mesh.uvs, dtype=float))
-        else:
-            face_chain.append(np.full(n_faces, -1, np.int64))
-            face_kind.append(np.zeros(n_faces, np.int8))
-            face_texels.append(np.zeros(n_faces))
-            uvs.append(np.zeros((n_faces, 3, 2)))
-        corner = mesh.corner_colors()
-        colors.append(np.ones((n_faces, 3, 4)) if corner is None else corner)
+@dataclass
+class _Piece:
+    """One mesh's share of a pack (see _Packer): its arrays copied (so edits made in place, unchecked, can't reach
+    the kernels) and checked, with what is worked out from them."""
+    vertices: np.ndarray  # (V, 3) float64
+    normals: np.ndarray   # (V, 3) unit normals
+    faces: np.ndarray     # (F, 3) int64, indexing this mesh's vertices
+    uvs: np.ndarray       # (F, 3, 2)
+    colors: np.ndarray    # (F, 3, 4) linear rgb and alpha at each corner
+    materials: np.ndarray  # (F,) int64 into chains (zeros if untextured)
+    chains: list          # each material's mipmap chain (Mesh.mipmaps), or [None] if untextured
+    texels: np.ndarray    # (materials,) each texture's texels (height x width)
+    used: np.ndarray      # the materials its faces use
+    tinted: bool          # whether any of its corner colours is see-through
+    sphere: tuple         # (centre x, y, z, radius)
+    plane: tuple          # (normal x, y, z, d), NaN if not flat (see _flat_plane)
+
+
+_edits = 0  # how many times Renderer.invalidate() was called: pieces made before the last call are made afresh
+
+
+def _mesh_piece(mesh, key):
+    """mesh's _Piece (key: its _mesh_key), kept on the mesh while its arrays are the same ones (as Mesh keeps its
+    normals), so that a mesh drawn again after a while, or by another Renderer, isn't worked out afresh."""
+    cached = mesh.__dict__.get("_piece")
+    if cached is None or cached[0] != _edits or not _same(cached[1], key[1:]):
+        cached = mesh._piece = (_edits, key[1:], _piece(mesh))  # (not the mesh itself: no reference cycle)
+    return cached[2]
+
+
+def _piece(mesh):
+    """A mesh's _Piece. Raises ValueError if its arrays don't fit together (Mesh.check)."""
+    mesh.check()  # (the kernels index these arrays by each other's sizes without checking)
+    vertices = np.array(mesh.vertices, dtype=np.float64)
+    faces = np.array(mesh.faces, dtype=np.int64).reshape(-1, 3)
+    n_faces = len(faces)
+    if mesh.materials is not None and mesh.textures:
+        materials = np.array(mesh.materials, dtype=np.int64)
+        chains = [mesh.mipmaps(m) for m in range(len(mesh.textures))]
+        texels = np.array([np.shape(t)[0] * np.shape(t)[1] for t in mesh.textures], dtype=float)
+        uvs = np.array(mesh.uvs, dtype=np.float64)
+    else:
+        materials, chains, texels = np.zeros(n_faces, np.int64), [None], np.zeros(1)
+        uvs = np.zeros((n_faces, 3, 2))
+    corner = mesh.corner_colors()
+    centre, radius = mesh.bounds()
+    return _Piece(vertices, mesh.vertex_normals(), faces, uvs,
+                  np.ones((n_faces, 3, 4)) if corner is None else corner, materials, chains, texels,
+                  np.unique(materials), corner is not None and bool((corner[:, :, 3] < 1.0).any()),
+                  (*centre, radius), _flat_plane(vertices, faces, radius))
+
+
+class _Packer:
+    """Packs meshes' arrays together for the kernels (see pack()), from each mesh's _Piece (kept on the mesh) and
+    textures kept from one pack to the next while they hold every chain the meshes show. So a render list that gains
+    or loses an object (an arrow, a puff of dust) costs a concatenation, not a hitch: in Castle Panic, working out
+    every piece and packing every texture again took half a second."""
+
+    def __init__(self):
+        self._textures = None  # (chains, {id(chain): index}, alpha kinds (K,), pack() of them, the array its
+                               # texels are the start of) as last packed
+
+    def pack(self, meshes, keys):
+        """The meshes' arrays packed together for raster.project, and their textures for sampling. keys: each mesh's
+        _mesh_key."""
+        pieces = [_mesh_piece(mesh, key) for mesh, key in zip(meshes, keys)]
+        chains, index, kinds = self._pack_textures(pieces)
+        n_vertices = np.array([len(p.vertices) for p in pieces], np.int64)
+        n_faces = np.array([len(p.faces) for p in pieces], np.int64)
+        mesh_vertex = np.concatenate([[0], np.cumsum(n_vertices)])
+        mesh_face = np.concatenate([[0], np.cumsum(n_faces)])
+        # Every mesh's materials in one table: the chain each shows (-1: none) and its texture's size.
+        table = np.array([-1 if c is None else index[id(c)] for p in pieces for c in p.chains], np.int64)
+        first = np.concatenate([[0], np.cumsum([len(p.chains) for p in pieces])])
+        face_chain = table[np.concatenate([p.materials for p in pieces]) + np.repeat(first[:-1], n_faces)]
+        face_texels = np.concatenate([p.texels for p in pieces])[
+            np.concatenate([p.materials for p in pieces]) + np.repeat(first[:-1], n_faces)]
+        kind_of = np.append(kinds, np.int8(0))  # (chain -1: none)
+        face_kind = kind_of[face_chain]
         # Whether light goes through any of it (see-through colours or textures), and whether its far side
         # shows through anything (those, or holes in its textures).
-        tints.append((corner is not None and bool((corner[:, :, 3] < 1.0).any())) or bool((face_kind[-1] == 2).any()))
-        clear.append(tints[-1] or bool(face_kind[-1].any()))
-        centre, radius = mesh.bounds()
-        spheres.append((*centre, radius))
-        planes.append(_flat_plane(verts[-1], np.asarray(mesh.faces), radius))
-        mesh_vertex.append(mesh_vertex[-1] + len(mesh.vertices))
-        mesh_face.append(mesh_face[-1] + n_faces)
-    c = np.ascontiguousarray
-    return {"vertices": c(np.concatenate(verts), np.float64), "normals": c(np.concatenate(normals), np.float64),
-            "faces": c(np.concatenate(faces), np.int64), "uvs": c(np.concatenate(uvs), np.float64),
-            "colors": c(np.concatenate(colors), np.float64), "face_chain": c(np.concatenate(face_chain), np.int64),
-            "face_kind": c(np.concatenate(face_kind), np.int8),
-            "face_texels": c(np.concatenate(face_texels), np.float64),
-            "mesh_vertex": np.array(mesh_vertex, np.int64), "mesh_face": np.array(mesh_face, np.int64),
-            "spheres": np.array(spheres, np.float64).reshape(-1, 4), "clear": np.array(clear, np.bool_),
-            "tints": np.array(tints, np.bool_), "planes": np.array(planes, np.float64).reshape(-1, 4),
-            "textures": pack_textures(chains)}
+        tints, clear = [], []
+        for p, at in zip(pieces, first):
+            used = kind_of[table[at + p.used]]
+            tints.append(p.tinted or bool((used == 2).any()))
+            clear.append(tints[-1] or bool(used.any()))
+        faces = np.concatenate([p.faces for p in pieces]) + np.repeat(mesh_vertex[:-1], n_faces)[:, None]
+        c = np.ascontiguousarray
+        return {"vertices": c(np.concatenate([p.vertices for p in pieces]), np.float64),
+                "normals": c(np.concatenate([p.normals for p in pieces]), np.float64),
+                "faces": c(faces, np.int64), "uvs": c(np.concatenate([p.uvs for p in pieces]), np.float64),
+                "colors": c(np.concatenate([p.colors for p in pieces]), np.float64),
+                "face_chain": c(face_chain, np.int64), "face_kind": c(face_kind, np.int8),
+                "face_texels": c(face_texels, np.float64),
+                "mesh_vertex": mesh_vertex.astype(np.int64), "mesh_face": mesh_face.astype(np.int64),
+                "spheres": np.array([p.sphere for p in pieces], np.float64).reshape(-1, 4),
+                "clear": np.array(clear, np.bool_), "tints": np.array(tints, np.bool_),
+                "planes": np.array([p.plane for p in pieces], np.float64).reshape(-1, 4),
+                "textures": self._textures[3]}
+
+    def _pack_textures(self, pieces):
+        """The texture pack's (chains, {id(chain): index}, alpha kinds) for the pieces. Chains it lacks are added in
+        the room left at the end of its texels (earlier packs, which may still be in use, keep theirs); it is packed
+        afresh with just the pieces' chains when that room runs out, or when it is more than twice the size of what
+        the pieces show (after many textures are let go)."""
+        wanted, seen = [], set()
+        for p in pieces:
+            for chain in p.chains:
+                if chain is not None and id(chain) not in seen:
+                    seen.add(id(chain))
+                    wanted.append(chain)
+        def texels(chains):
+            return sum(level.shape[0] * level.shape[1] for chain in chains for level in chain)
+        size, packed = texels(wanted), self._textures
+        if packed is not None:
+            chains, index, kinds, (done, levels, first), room = packed
+            new = [chain for chain in wanted if id(chain) not in index]
+            end = len(done) + texels(new)
+            if not new and end <= 2 * size + 4096:
+                return chains, index, kinds
+            if new and end <= len(room) and end <= 2 * size + 4096:
+                added, more_levels, more_first = pack_textures(new, room, len(done))
+                chains = chains + new
+                index = {**index, **{id(chain): len(index) + k for k, chain in enumerate(new)}}
+                kinds = np.concatenate([kinds, np.array([alpha_kind(chain) for chain in new], np.int8)])
+                self._textures = (chains, index, kinds, (added, np.concatenate([levels, more_levels]),
+                                                         np.concatenate([first, more_first[1:] + len(levels)])), room)
+                return chains, index, kinds
+        room = np.empty((size + size // 4 + 4096, 4))  # (room for more textures later)
+        kinds = np.array([alpha_kind(chain) for chain in wanted], np.int8)
+        self._textures = (wanted, {id(chain): k for k, chain in enumerate(wanted)}, kinds,
+                          pack_textures(wanted, room), room)
+        return self._textures[0], self._textures[1], self._textures[2]
 
 
 def _chunks(counts, starts, size):
@@ -250,7 +331,8 @@ class Renderer(ShadowMaps, Mirrors):
         self.view_proj = None
         self.draws = 0     # renders that rasterized the scene, rather than reusing an unchanged frame
         self._last = None  # what the framebuffer shows, as _scene_state() gives it
-        self._pack = None  # (mesh keys, _pack_meshes() of those meshes) as last drawn
+        self._pack = None  # (mesh keys, the pack of those meshes) as last drawn
+        self._packer = _Packer()
         self._objects = []  # the render list as last drawn, for pick()
         self._eye = self._axes = None  # the camera's position and its pixels' directions (view_axes) then
         self._ortho = 0.0  # for an orthographic camera, how far behind it the eye it is drawn from is (Camera.drawn_as)
@@ -407,8 +489,11 @@ class Renderer(ShadowMaps, Mirrors):
 
     def invalidate(self):
         """Make the next render draw afresh, e.g. after editing a mesh's arrays in place."""
+        global _edits
+        _edits += 1  # (every mesh's _Piece: which meshes were edited isn't known)
         self._last = None
         self._pack = None
+        self._packer = _Packer()
         self._shadows = None
 
     def _instances(self, objects):
@@ -448,10 +533,11 @@ class Renderer(ShadowMaps, Mirrors):
         shine = [obj.reflectivity for obj in objs]
         spec = [obj.specular for obj in objs]
         shiny = [0.0 if obj.shininess is None else obj.shininess for obj in objs]
-        keys = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
+        flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
         packed = self._pack
-        if packed is None or not _same(packed[0], keys):
-            packed = self._pack = (keys, _pack_meshes(meshes))
+        if packed is None or not _same(packed[0], flat):
+            packed = self._pack = (flat, self._packer.pack(meshes, keys))
+        keys = flat
         mesh_idx = np.array(mesh_idx, np.int64)
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.

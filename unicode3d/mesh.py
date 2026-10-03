@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .color import srgb_to_linear
-from .texture import build_mipmaps
+from .texture import build_mipmaps, mipmaps as shared_mipmaps
 
 
 def _srgb01(colors):
@@ -142,9 +142,13 @@ class Mesh:
                 raise ValueError(f"Mesh.uvs must be ({n_faces}, 3, 2) for a textured mesh, not {np.shape(self.uvs)}")
 
     def mipmaps(self, material):
-        """Mipmap chain of textures[material], built on first use and rebuilt if the texture is replaced."""
-        cache = self.__dict__.setdefault("_mipmaps", {})
+        """Mipmap chain of textures[material], built on first use and rebuilt if the texture is replaced. Meshes
+        showing the same texture array share its chain (texture.mipmaps), and so a place in the Renderer's pack."""
         tex = self.textures[material]
+        levels = shared_mipmaps(tex)
+        if levels is not None:
+            return levels
+        cache = self.__dict__.setdefault("_mipmaps", {})
         cached = cache.get(material)
         if cached is None or cached[0] is not tex:
             cached = cache[material] = (tex, build_mipmaps(tex))

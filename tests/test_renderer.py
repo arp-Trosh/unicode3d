@@ -223,6 +223,35 @@ class RenderTests(unittest.TestCase):
         self.assertGreater(np.median(red[:, 0]), 2 * np.median(red[:, 1]))
         self.assertLess(lum(mixed)[mixed.ids == 2].min(), 0.05)  # the die's pips
 
+    def test_render_lists_that_change_render_as_afresh(self):
+        # A renderer keeps the meshes and textures it has packed: whatever it drew before, gaining and losing
+        # objects and textures (added to its pack, or packed afresh), each frame is what a new renderer draws.
+        rng = np.random.default_rng(5)
+        checks = np.kron(np.indices((8, 8)).sum(axis=0) % 2, np.ones((8, 8)))  # (64, 64)
+        noise = rng.uniform(0.0, 1.0, (128, 128, 3))
+        holes = np.ones((32, 32, 4))
+        holes[8:24, 8:24, 3] = 0.0
+        small = rng.uniform(0.0, 1.0, (16, 16, 3))
+        a, a2 = Object3D(make_box(1.0, [checks] * 6)), Object3D(make_box(0.8, [checks] * 6))
+        self.assertIs(a.mesh.mipmaps(0), a2.mesh.mipmaps(0))  # (one chain for every mesh showing the texture)
+        b, c = Object3D(make_box(1.0, [noise] * 6)), Object3D(make_box(1.0, [holes] * 6))
+        d, plain = Object3D(make_box(0.7, [small] * 6)), Object3D(blob_mesh((0.5, 0.5, 0.5)), color=Color.RED)
+        for k, obj in enumerate((a, a2, b, c, d, plain)):
+            obj.position = np.array([k * 1.3 - 3.2, 0.0, 0.0])
+            obj.rotation = quat_axis_angle([1.0, 1.0, 0.3], 0.5 + k)
+        renderer, camera, light = Renderer(60, 20), Camera(position=np.array([0.0, 1.0, 6.0]), fov=60.0), Light()
+        for objects in ([a, plain], [a, plain, a2], [a, plain, a2, b], [c], [c, d], [a, b, c, d, plain], [a],
+                        "edit", [plain, a2, c]):
+            if objects == "edit":
+                a.mesh.vertices *= 1.2  # (edited in place: seen after invalidate())
+                renderer.invalidate()
+                objects = [a, plain, d]
+            got = renderer.render(objects, camera, light)
+            want = Renderer(60, 20).render(objects, camera, light)
+            np.testing.assert_array_equal(got.rgb, want.rgb)
+            np.testing.assert_array_equal(got.ids, want.ids)
+            np.testing.assert_array_equal(got.depth, want.depth)
+
     def test_same_frame_on_any_number_of_threads(self):
         # Kernels run on several threads, each writing only its own pixels (the one-writer rule in
         # CLAUDE.md). A kernel that breaks it gives frames that change with the thread count, or
