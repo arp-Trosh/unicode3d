@@ -567,6 +567,29 @@ class ThreadTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertEqual(result.stdout.strip(), "workqueue")
 
+    def test_workers_sleep_between_kernels(self):
+        # Spinning workers keep every core busy through a frame's Python (threads.prefer_sleeping_workers): importing
+        # unicode3d asks OpenMP to wait passively and prefers it to TBB, unless the user chose otherwise.
+        import subprocess
+        program = ("import os, unicode3d, numba\n"
+                   "unicode3d.compile_kernels()\n"
+                   "print(numba.threading_layer(), os.environ['OMP_WAIT_POLICY'])\n")
+        ours = ("OMP_WAIT_POLICY", "KMP_BLOCKTIME", "NUMBA_THREADING_LAYER", "NUMBA_THREADING_LAYER_PRIORITY")
+        clean = {k: v for k, v in os.environ.items() if k not in ours}
+
+        def run(**env):
+            result = subprocess.run([sys.executable, "-c", program], cwd=ROOT, capture_output=True, text=True,
+                                    timeout=600, env=dict(clean, **env))
+            self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+            return result.stdout.split()
+
+        layer, policy = run()
+        self.assertEqual(policy, "PASSIVE")
+        if sys.platform.startswith("linux"):  # libgomp comes with Numba's Linux wheels
+            self.assertEqual(layer, "omp")
+        self.assertEqual(run(NUMBA_THREADING_LAYER="workqueue", OMP_WAIT_POLICY="ACTIVE"), ["workqueue", "ACTIVE"])
+        self.assertEqual(run(NUMBA_THREADING_LAYER_PRIORITY="workqueue omp tbb")[0], "workqueue")
+
 
 class FrameRateTests(unittest.TestCase):
     def test_any_frame_rate_setting(self):

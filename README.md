@@ -1142,6 +1142,14 @@ Numba runs on its fallback threading layer, `workqueue` (no TBB or OpenMP instal
 macOS), which would abort the program if two threads started parallel work at once, the threads
 take turns instead; `pip install tbb` lets them run side by side.
 
+Between parallel kernels a frame runs Python, and Numba's workers would spin through it, keeping every
+core busy (on a laptop, holding the chip at its power limit and taking CPU from the terminal). So
+importing unicode3d sets `OMP_WAIT_POLICY=PASSIVE` (and `KMP_BLOCKTIME=0`) and prefers the OpenMP
+threading layer to TBB, whose workers can't be told to sleep: frames came out 6% faster on 4 cores
+and 9-29% faster on 12, with half the CPU kept busy. Whatever you set yourself (those variables,
+`NUMBA_THREADING_LAYER` or `NUMBA_THREADING_LAYER_PRIORITY`) is left alone; on Windows the layer is
+left to Numba.
+
 </details>
 
 <details>
@@ -1191,7 +1199,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
 | `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections on F2-F6) |
-| `threads.py`    | `kernel_lock()`, which keeps threads from launching parallel kernels at once where Numba's threading layer can't take it |
+| `threads.py`    | `kernel_lock()`, which keeps threads from launching parallel kernels at once where Numba's threading layer can't take it; `prefer_sleeping_workers()` |
 | `precompile.py` | compiling the kernels on several cores at once on the first run (their argument types are in `kernel_signatures.py`) |
 | `kernel_cache.py` | dropping cached kernels compiled with helpers (in other modules) that have since changed |
 | `examples/dice.py`   | pip-textured die, `orientation_showing`, `top_face`, `RollAnimation` (result chosen first, then animated to land on it); Zombie Dice builds its dice on it |

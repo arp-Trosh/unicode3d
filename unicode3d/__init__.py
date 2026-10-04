@@ -8,6 +8,11 @@ terminals alike. Ported in spirit from https://github.com/ShakedAp/ASCII-rendere
 """
 __version__ = "0.11.0"
 
+from .threads import prefer_sleeping_workers as _prefer_sleeping_workers
+
+_prefer_sleeping_workers()  # before any kernel runs (see threads.py)
+del _prefer_sleeping_workers
+
 from .animation import Animation, Clip, RotationTrack, SplineTrack, Track
 from .background import Fog, Gradient, Sky, SkyBox
 from .color import Color

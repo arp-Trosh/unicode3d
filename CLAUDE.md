@@ -93,7 +93,8 @@ the `Renderer`, which inherits its shadow-map methods from `shadows.ShadowMaps` 
 lights; `models.py` and `gltf.py` loading models (OBJ and glTF; no kernels); `kernel_cache.py` keeps Numba's
 cache in step with helpers in other modules; `queries.py` the ray and overlap queries (`Colliders`, with a bounding volume hierarchy per mesh built in a kernel and
 shared through `mesh_tree`); `threads.py` has the lock that keeps threads from launching
-parallel kernels at once where Numba can't take that. Instances reach the kernels as `inst` dicts of arrays
+parallel kernels at once where Numba can't take that, and `prefer_sleeping_workers()` (run on import: OpenMP
+preferred, its workers sleeping between kernels; compare threading layers with `NUMBA_THREADING_LAYER=tbb`). Instances reach the kernels as `inst` dicts of arrays
 (`Renderer._instances`): each has a `lin` (3, 3) matrix (rotation and per-axis scale, parents included) and `pos`,
 and `flip` where the matrix mirrors.
 
