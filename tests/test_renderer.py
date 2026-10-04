@@ -32,9 +32,9 @@ from unicode3d.precompile import missing_kernels, share_out
 from unicode3d.terminal import SETTLE_FRAMES, Screen, compile_kernels
 from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
-from unicode3d.animation import (EASINGS, Animation, RotationTrack, Track, ease_in, ease_out,
+from unicode3d.animation import (EASINGS, LOOPS, Animation, RotationTrack, SplineTrack, Track, ease_in, ease_out,
                                  ease_out_back)
-from unicode3d.transforms import quat_axis_angle, quat_between, quat_identity, quat_slerp, quat_to_matrix, scene_poses
+from unicode3d.transforms import normalize, quat_axis_angle, quat_between, quat_identity, quat_slerp, quat_to_matrix, scene_poses
 
 
 class TransformTests(unittest.TestCase):
@@ -1355,6 +1355,128 @@ class AnimationTests(unittest.TestCase):
         fb = Renderer(40, 20).render([box], Camera(position=np.array([2.0, 0.0, 8.0]), target=np.array([2.0, 0, 0])),
                                      Light())
         self.assertTrue(fb.drawn.any())  # a scale from a track (an array) renders
+
+    @staticmethod
+    def _twin_clips(specs, starts, loop="once", kernel=True):
+        """Two clips playing the same tracks (specs: one {attribute: track} per animation) on targets posed alike
+        (starts: (position, rotation, scale) each), the second through Track.at (no kernel)."""
+        class Target:
+            pass
+        clips, targets = [], []
+        for use_kernel in (kernel, False):
+            ts = []
+            for position, rotation, scale in starts:
+                t = Target()
+                t.position, t.rotation = np.array(position, float), np.array(rotation, float)
+                t.scale = scale.copy() if isinstance(scale, np.ndarray) else scale
+                ts.append(t)
+            clip = Clip([Animation(t, **tracks) for t, tracks in zip(ts, specs)], loop=loop, speed=1.3)
+            clip._kernel = use_kernel
+            clips.append(clip)
+            targets.append(ts)
+        return clips, targets
+
+    def assertSamePoses(self, a, b):
+        for x, y in zip(a, b):
+            for name in ("position", "rotation", "scale"):
+                u, v = getattr(x, name), getattr(y, name)
+                self.assertEqual(np.shape(u), np.shape(v), name)
+                self.assertEqual(isinstance(u, np.ndarray), isinstance(v, np.ndarray), name)
+                np.testing.assert_array_equal(u, v, name)
+
+    def test_clips_sample_their_tracks_in_a_kernel_exactly_as_tracks_do(self):
+        # animation._sample against Track.at, value for value: every kind of track, loop and easing, repeated key
+        # times, a single key, fades; the same arithmetic in the same order, so the same numbers.
+        rng = np.random.default_rng(7)
+        names = list(EASINGS)
+
+        def track(kind):
+            times = np.sort(rng.uniform(-1, 3, int(rng.integers(1, 6))))
+            if len(times) > 2:
+                times[1] = times[0]
+            loop = LOOPS[rng.integers(3)]
+            if kind == 0:
+                return "scale", Track([(t, float(rng.normal()), rng.choice(names)) for t in times], loop=loop)
+            if kind == 1:
+                return "position", Track([(t, rng.normal(size=3), rng.choice(names)) for t in times], loop=loop,
+                                         easing=rng.choice(names))
+            if kind == 2:
+                return "rotation", RotationTrack([(t, rng.normal(size=4), rng.choice(names)) for t in times], loop=loop)
+            if kind == 3:
+                return "position", SplineTrack([(t, *rng.normal(size=(3, 3))) for t in times], loop=loop)
+            if kind == 4:
+                return "scale", SplineTrack([(t, *rng.normal(size=3).tolist()) for t in times], loop=loop)
+            return "rotation", SplineTrack([(t, normalize(rng.normal(size=4)), *rng.normal(size=(2, 4))) for t in times],
+                                           loop=loop, rotation=True)
+
+        for trial in range(60):
+            specs = [dict(track(k) for k in rng.choice(6, size=int(rng.integers(1, 4)), replace=False))
+                     for _ in range(int(rng.integers(1, 5)))]
+            starts = [(rng.normal(size=3), normalize(rng.normal(size=4)), 1.5) for _ in specs]
+            clips, targets = self._twin_clips(specs, starts, loop=LOOPS[trial % 3])
+            for clip in clips:
+                clip.start(fade=0.4 if trial % 2 else 0.0)
+            self.assertTrue(clips[0]._packed.ok)
+            for _ in range(25):
+                dt = float(rng.uniform(0, 0.2))
+                self.assertEqual(clips[0].update(dt), clips[1].update(dt))
+                self.assertSamePoses(*targets)
+                self.assertEqual([a.time for a in clips[0].animations], [a.time for a in clips[1].animations])
+
+    def test_clips_the_kernel_cant_play_play_as_before(self):
+        # Easings and Track subclasses of a program's own, values of more than one shape, two tracks moving one
+        # attribute: Track.at plays the clip. A fade from a pose of another shape (a scale of three numbers into a
+        # track of one) blends in Python too.
+        class Doubled(Track):
+            def blend(self, a, b, t):
+                return 2.0 * super().blend(a, b, t)
+
+        pose = [((0.0, 0.0, 0.0), quat_identity(), np.array([1.0, 2.0, 3.0]))]
+        cases = [{"scale": Track([(0.0, 1.0), (1.0, 2.0, lambda t: t * t)])},
+                 {"position": Doubled([(0.0, (0.0, 0.0, 0.0)), (1.0, (1.0, 2.0, 3.0))])},
+                 {"scale": Track([(0.0, 1.0), (2.0, (1.0, 3.0, 1.0))])}]
+        for specs in [[c] for c in cases]:
+            clips, targets = self._twin_clips(specs, pose * len(specs))
+            for _ in range(5):
+                [clip.update(0.3) for clip in clips]
+                self.assertSamePoses(*targets)
+            self.assertFalse(clips[0]._packed.ok)
+        box = Object3D(make_box())
+        twice = Clip([Animation(box, scale=Track([(0.0, 1.0), (1.0, 2.0)])),
+                      Animation(box, scale=Track([(0.0, 5.0), (1.0, 7.0)]))])
+        twice.apply(0.5)
+        self.assertEqual(box.scale, 6.0)  # the last one, as before
+        self.assertFalse(twice._packed.ok)
+        clips, targets = self._twin_clips([{"scale": Track([(0.0, 1.0), (1.0, 2.0)])}], pose)
+        [clip.start(fade=0.5) for clip in clips]
+        for _ in range(4):
+            [clip.update(0.2) for clip in clips]
+            self.assertSamePoses(*targets)
+        self.assertTrue(clips[0]._packed.ok)
+
+    def test_a_clip_follows_changes_to_its_animations(self):
+        box, ball = Object3D(make_box()), Object3D(make_box())
+        clip = Clip([Animation(box, position=Track([(0.0, (0.0, 0.0, 0.0)), (1.0, (2.0, 0.0, 0.0))]))])
+        clip.apply(0.5)
+        np.testing.assert_allclose(box.position, (1, 0, 0))
+        clip.animations[0].tracks["position"] = Track([(0.0, (0.0, 0.0, 0.0)), (1.0, (0.0, 4.0, 0.0))])
+        clip.apply(0.5)
+        np.testing.assert_allclose(box.position, (0, 2, 0))  # a track replaced
+        clip.animations[0].target = ball
+        clip.apply(0.25)
+        np.testing.assert_allclose(ball.position, (0, 1, 0))  # another target
+        clip.animations.append(Animation(box, scale=Track([(0.0, 1.0), (2.0, 3.0)])))
+        self.assertEqual(clip.duration, 2.0)  # an animation added
+        clip.apply(1.0)
+        self.assertEqual(box.scale, 2.0)
+        self.assertIsInstance(box.scale, float)
+        before, kept = ball.position, ball.position.copy()
+        two = Clip([Animation(box, position=Track([(0.0, (0.0, 0.0, 0.0)), (1.0, (1.0, 1.0, 1.0))])),
+                    Animation(ball, position=Track([(0.0, (0.0, 0.0, 0.0)), (1.0, (1.0, 1.0, 1.0))]))])
+        two.apply(0.5)
+        box.position[0] = 9.0  # each target its own array, not one shared or reused
+        np.testing.assert_allclose(ball.position, (0.5, 0.5, 0.5))
+        np.testing.assert_array_equal(before, kept)  # last frame's array left as it was
 
 
 class KernelCacheTests(unittest.TestCase):

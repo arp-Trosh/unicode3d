@@ -34,6 +34,7 @@ from .color import _RGB, COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_s
 from .console import detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
+from .animation import Animation, Clip, RotationTrack, Track
 from .background import Sky
 from .mesh import Mesh, make_box
 from .pictures import cells_picture
@@ -535,6 +536,12 @@ def compile_kernels():
     solid.push_out((0.0, 0.0, 0.0), 0.5, end=(0.0, 1.0, 0.0))
     solid.overlap_box((0.0, 0.0, 0.0), 1.0)
     union_bounds(objects)  # (where labels go)
+    # Clips (their tracks sampled in one kernel), fading in from where their targets are.
+    clip = Clip([Animation(objects[1], position=Track([(0.0, (1.0, 0.0, 0.0)), (1.0, (1.0, 1.0, 0.0))]),
+                           rotation=RotationTrack([(0.0, (1.0, 0.0, 0.0, 0.0)), (1.0, (0.0, 1.0, 0.0, 0.0))]),
+                           scale=Track([(0.0, 1.0), (1.0, 2.0)]))])
+    clip.start(fade=0.5)
+    clip.update(0.1)
 
 
 def _compile_with_notice(console):

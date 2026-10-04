@@ -905,7 +905,11 @@ colour fades surfaces into it.
 - `Clip(animations, name="", loop="once", speed=1)` plays several `Animation`s on one clock, from 0
   to the end of the longest, and does the looping for them all (`"once"`, `"loop"`, `"pingpong"`):
   a loaded glTF model's animations are clips, and they group your own as well. It has `update(dt)`,
-  `apply(t)`, `done()`, `duration` and `targets`.
+  `apply(t)`, `done()`, `duration` and `targets`. A clip samples all its tracks in one compiled
+  kernel (a 55-part character in about 35 µs a frame, not 0.5 ms), with the same numbers as
+  `track.at(t)`; so it reads a track's keyframes once: to change them, give the animation a new
+  `Track` rather than editing one in place. Tracks with an easing function or a `Track` subclass of
+  your own are played as before, through `at()`.
 - `clip.start(fade=0)` plays a clip from the beginning; with `fade` (seconds), it eases from the
   pose its targets have now into its own over that long (positions and scales blended, rotations
   slerped, along `ease_in_out`), so switching from one clip to another doesn't jump:
