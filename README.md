@@ -738,7 +738,9 @@ Each shadowed light draws the scene once more, as seen from the light, into a sh
 slower; spread over a big scene, texels get coarser). A `PointLight`'s is a cube of six
 `point_shadow_size` x `point_shadow_size` faces looking every way from it, holding whatever is in
 its range. A map is only redrawn when an object or its light moves, so walking the camera around
-a still scene costs little. At 180x50 cells, a shadowed sun over a few dice adds about 1.2 ms to a
+a still scene costs little; and while some things move, the rest (solid things that haven't moved
+for 30 frames) are kept in a map of their own, which each frame starts from, so only what moves is
+drawn again (in Castle Panic, the board and its towers: shadows 6.0 to 2.7 ms a frame). At 180x50 cells, a shadowed sun over a few dice adds about 1.2 ms to a
 frame when something moves, and about 0.5 ms when nothing but the camera does. `shadow_softness`
 blurs edges further; they are always smoothed over at least a pixel on screen.
 `renderer.shadows = False` switches all shadows off, as F5 does in the demos

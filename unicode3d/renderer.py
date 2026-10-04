@@ -340,6 +340,9 @@ class Renderer(ShadowMaps, Mirrors):
         self._ortho = 0.0  # for an orthographic camera, how far behind it the eye it is drawn from is (Camera.drawn_as)
         self._buffers = _Buffers()
         self._shadows = None  # (what the shadow maps depend on, the maps as _shadow_maps() returns them)
+        self._settled = {}  # each shadowed light's map of its settled casters (shadows._Settled), by light
+        self._caster_ages = {}  # shadow draws each solid caster's row has been unchanged for
+        self._shadow_draws = 0
         self.resize(width, height)
 
     def resize(self, width, height, cell_pixels=None):
@@ -497,6 +500,8 @@ class Renderer(ShadowMaps, Mirrors):
         self._pack = None
         self._packer = _Packer()
         self._shadows = None
+        self._settled = {}
+        self._caster_ages = {}
 
     def _instances(self, objects):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and
@@ -539,7 +544,7 @@ class Renderer(ShadowMaps, Mirrors):
         packed = self._pack
         if packed is None or not _same(packed[0], flat):
             packed = self._pack = (flat, self._packer.pack(meshes, keys))
-        keys = flat
+        mesh_keys, keys = keys, flat
         mesh_idx = np.array(mesh_idx, np.int64)
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
@@ -557,7 +562,7 @@ class Renderer(ShadowMaps, Mirrors):
                 "shininess": np.maximum(numbers(shiny), 0.0),
                 "ident": np.array(ident, np.int32),
                 "emissive": numbers(emissive), "cast": np.array(cast, np.bool_), "pack": packed[1],
-                "keys": keys}
+                "keys": keys, "mesh_keys": mesh_keys}
 
     def _scene_state(self, inst, camera):
         """Everything a render depends on: (values compared by equality, objects compared by identity).

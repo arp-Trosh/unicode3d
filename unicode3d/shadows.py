@@ -6,6 +6,8 @@ A Light's shadow map is one orthographic view along the light of a box around ev
 PointLight's is a cube of six perspective views out from it. Each texel holds the depth of the nearest thing
 blocking the light there, and see-through things add what they let through (tinted shadows).
 """
+import operator
+
 import numpy as np
 from numba import njit
 
@@ -197,6 +199,32 @@ def _cube_views(position, reach, size):
 
 
 _EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform() that culls nothing (w = 1, no sides)
+_NO_BASE = np.zeros((0, 0), np.float32)  # rasterize_depth's base when there is none
+SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins the settled ones (see _shadow_maps)
+
+
+def _caster_rows(inst):
+    """Each instance's mesh (the Mesh itself, not its place in the pack, which moves as meshes come and go), pose,
+    colour and opacity as bytes: what its part of a shadow map is drawn from."""
+    mesh = np.array([id(key[0]) for key in inst["mesh_keys"]], np.int64)[inst["mesh"]]
+    rows = np.concatenate([mesh[:, None].view(np.float64), inst["pos"], inst["lin"].reshape(-1, 9), inst["rgb"],
+                           inst["alpha"][:, None]], axis=1)
+    return np.ascontiguousarray(rows).view(f"V{rows.shape[1] * 8}").ravel().tolist()
+
+
+class _Settled:
+    """A light's shadow map of its settled casters (base), the rows they were drawn from, what the map's view
+    was then (key), their meshes' keys then (renderer._mesh_key, by id of the Mesh: replacing a mesh's arrays
+    changes its key) and when it was made or last looked over for casters newly settled (a shadow draw's number)."""
+
+    def __init__(self, key, meshes, rows, base, made):
+        self.key, self.meshes, self.rows, self.base, self.made = key, meshes, rows, base, made
+
+    def current(self, key, meshes, rows):
+        """Whether it still holds: the same view, its meshes unchanged, and every one of its rows among `rows`."""
+        return (key == self.key and self.rows <= rows
+                and all(len(now := meshes.get(i, ())) == len(then) and all(map(operator.is_, now, then))
+                        for i, then in self.meshes.items()))
 
 
 class ShadowMaps:
@@ -210,7 +238,15 @@ class ShadowMaps:
         (only filled in for maps whose params say so); mats (N, 4, 4): world to each map's clip space;
         params (N, SHADOW_COLUMNS)). Solid things go into texels and see-through ones into trans.
 
-        The maps are kept while nothing they depend on changes, so moving only the camera costs nothing.
+        The maps are kept while nothing they depend on changes, so moving only the camera costs nothing. And as
+        something moves in most frames of a lively scene, each light also keeps a map of its settled casters: solid
+        ones whose mesh, pose, colour and opacity haven't changed for SETTLE_DRAWS draws (matched by those, not by
+        object, and their meshes as Mesh objects, so meshes coming and going elsewhere change nothing). Each draw
+        starts from that map and adds the rest: depth is a maximum, so the map comes out as if every caster were
+        drawn, to the bit. The settled map is drawn again when one of them moves or goes, when one of their meshes
+        has its arrays replaced, or when the light's view changes (a Light's box around everything grows or
+        shifts), and at most once every SETTLE_DRAWS draws to take in casters that have settled since. See-through casters never join (what
+        they let through is multiplied in their order, and drawn each time).
         """
         shadowed = [light for light in lights if light.shadows and self.shadows]
         if not shadowed:
@@ -229,17 +265,17 @@ class ShadowMaps:
         buf, pack = self._buffers, inst["pack"]
         centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
         cast = np.flatnonzero(inst["cast"])
-        # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters).
+        # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters, a cube's near plane).
         views = []
         for light in shadowed:
             if isinstance(light, PointLight):
                 position, reach = np.asarray(light.position, float), float(light.range)
                 near_enough = cast[np.linalg.norm(centres[cast] - position, axis=1) - radii[cast] < reach]
                 face_mats, texel, near = _cube_views(position, reach, cube_size)
-                views.append((face_mats, [(1, 0, cube_size, texel, 1.0, soft, *position, 0)] * 6, near_enough))
+                views.append((face_mats, [(1, 0, cube_size, texel, 1.0, soft, *position, 0)] * 6, near_enough, near))
             else:
                 mat, texel, depth_scale = _light_view(np.asarray(light.direction, float), centres, radii, size)
-                views.append((mat[None], [(0, 0, size, texel, depth_scale * texel, soft, 0, 0, 0, 0)], cast))
+                views.append((mat[None], [(0, 0, size, texel, depth_scale * texel, soft, 0, 0, 0, 0)], cast, 0.0))
         mats = np.concatenate([view[0] for view in views])
         params = np.array([row for view in views for row in view[1]], dtype=float)
         areas = params[:, 2].astype(np.int64) ** 2
@@ -247,53 +283,94 @@ class ShadowMaps:
         texels = buf.get("shadow_texels", (int(areas.sum()),), np.float32)
         clear = (inst["alpha"] < 1.0) | pack["tints"][inst["mesh"]]  # which objects light goes through
         trans = buf.get("shadow_trans", (4, int(areas.sum())), np.float32) if clear[cast].any() else _NO_SHADOWS[1]
+        # Which casters have settled (see above), by their rows.
+        rows, see_through = _caster_rows(inst), clear.tolist()
+        last_ages = self._caster_ages
+        self._caster_ages = ages = {row: last_ages.get(row, 0) + 1
+                                    for row in {rows[c] for c in cast.tolist() if not see_through[c]}}
+        self._shadow_draws += 1
+        settled = self._settled
+        meshes = {id(key[0]): key for key in inst["mesh_keys"]}
         m = 0
-        for view_mats, rows, casters in views:
-            offset, n, sides, first = int(params[m, 1]), int(params[m, 2]), len(rows), m
+        for nth, (view_mats, view_rows, casters, near) in enumerate(views):
+            offset, n, sides, first = int(params[m, 1]), int(params[m, 2]), len(view_rows), m
             depth = texels[offset:offset + sides * n * n].reshape(sides * n, n)  # a cube's faces one above another
             m += sides
             if not len(casters):
                 depth.fill(0.0)
                 continue
-            sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "flip", "pos", "rgb", "alpha")}
-            double = np.ones(len(casters), np.bool_)
-            if sides == 1:
-                k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = \
-                    self._transform(pack, sub_inst, double, view_mats[0], np.zeros(3), 0.5, "shadow_")
-                xs, ys, dep, surf, see, chain, lod = self._shadow_triangles(k)
-                project_depth(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
-                              pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
-                              sub_inst["alpha"], inst_vertex, world, n, n, 0.5, False, chunk_inst, chunk_first,
-                              chunk_end, whole, cut, off_whole, off_cut, xs, ys, dep, surf, see, chain, lod)
-                tri_side = buf.get("shadow_side", (k,), np.int64)
-                tri_side.fill(0)
-            else:
-                # The casters' vertices in the world, then their triangles in each cube face they reach.
-                _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._transform(
-                    pack, sub_inst, double, _EVERYWHERE, np.zeros(3), 0.5, "shadow_")
-                counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
-                count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
-                           chunk_inst, chunk_first, chunk_end, counts)
-                offsets = np.zeros(counts.shape, np.int64)
-                offsets.reshape(-1)[1:] = np.cumsum(counts)[:-1]
-                k = int(counts.sum())
-                xs, ys, dep, surf, see, chain, lod = self._shadow_triangles(k)
-                tri_side = buf.get("shadow_side", (k,), np.int64)
-                project_cube(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
-                             pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
-                             sub_inst["alpha"], inst_vertex, world, view_mats, near, n, chunk_inst, chunk_first,
-                             chunk_end, offsets, xs, ys, dep, surf, see, chain, lod, tri_side)
-            band_start, band_tris = self._bins(xs, ys, see, SOLID | CUT, sides * n, "shadow_")
-            rasterize_depth(depth, xs, ys, dep, tri_side, n, band_start, band_tris, see, surf, chain, lod,
-                            *pack["textures"])
-            if clear[casters].any():
-                band_start, band_tris = self._bins(xs, ys, see, CLEAR, sides * n, "shadow_")
-                rasterize_tint(trans, offset, n, sides * n, xs, ys, dep, tri_side, n, band_start, band_tris, surf,
-                               chain, lod, *pack["textures"])
+            view_key = (view_mats.tobytes(), n)
+            listed = casters.tolist()
+            here = {rows[c] for c in listed if not see_through[c]}
+            entry = settled.get(nth)
+            stale = entry is None or not entry.current(view_key, meshes, here)
+            if not stale and self._shadow_draws - entry.made >= SETTLE_DRAWS:  # any newly settled to take in?
+                stale = any(ages[row] >= SETTLE_DRAWS and row not in entry.rows for row in here)
+                entry.made = self._shadow_draws  # (if not, look again in as many draws)
+            if stale:
+                entry = None
+                ready = frozenset(row for row in here if ages[row] >= SETTLE_DRAWS)
+                if ready:  # draw the settled casters' map afresh
+                    still = np.array([c for c in listed if not see_through[c] and rows[c] in ready], np.int64)
+                    self._draw_casters(pack, inst, still, view_mats, near, n, sides, depth, _NO_BASE, None, offset)
+                    used = {id(inst["mesh_keys"][i][0]): inst["mesh_keys"][i] for i in np.unique(inst["mesh"][still])}
+                    entry = _Settled(view_key, used, ready, depth.copy(), self._shadow_draws)
+                settled[nth] = entry
+            if entry is not None:
+                casters = np.array([c for c in listed if see_through[c] or rows[c] not in entry.rows], np.int64)
+                if not len(casters):
+                    depth[:] = entry.base
+                    continue
+            if self._draw_casters(pack, inst, casters, view_mats, near, n, sides, depth,
+                                  _NO_BASE if entry is None else entry.base, trans if clear[casters].any() else None,
+                                  offset):
                 params[first:first + sides, 9] = 1
         shadows = (texels, trans, mats, params)
         self._shadows = (key, shadows)
         return shadows
+
+    def _draw_casters(self, pack, inst, casters, view_mats, near, n, sides, depth, base, trans, offset):
+        """Draw instances `casters` into one light's shadow map: depth (sides * n rows of n texels), over `base`
+        (see rasterize_depth), and, given trans, what the see-through ones let through into it from `offset`;
+        returns whether it did that."""
+        buf = self._buffers
+        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "flip", "pos", "rgb", "alpha")}
+        double = np.ones(len(casters), np.bool_)
+        if sides == 1:
+            k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = \
+                self._transform(pack, sub_inst, double, view_mats[0], np.zeros(3), 0.5, "shadow_")
+            xs, ys, dep, surf, see, chain, lod = self._shadow_triangles(k)
+            project_depth(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
+                          pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
+                          sub_inst["alpha"], inst_vertex, world, n, n, 0.5, False, chunk_inst, chunk_first,
+                          chunk_end, whole, cut, off_whole, off_cut, xs, ys, dep, surf, see, chain, lod)
+            tri_side = buf.get("shadow_side", (k,), np.int64)
+            tri_side.fill(0)
+        else:
+            # The casters' vertices in the world, then their triangles in each cube face they reach.
+            _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._transform(
+                pack, sub_inst, double, _EVERYWHERE, np.zeros(3), 0.5, "shadow_")
+            counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
+            count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
+                       chunk_inst, chunk_first, chunk_end, counts)
+            offsets = np.zeros(counts.shape, np.int64)
+            offsets.reshape(-1)[1:] = np.cumsum(counts)[:-1]
+            k = int(counts.sum())
+            xs, ys, dep, surf, see, chain, lod = self._shadow_triangles(k)
+            tri_side = buf.get("shadow_side", (k,), np.int64)
+            project_cube(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
+                         pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
+                         sub_inst["alpha"], inst_vertex, world, view_mats, near, n, chunk_inst, chunk_first,
+                         chunk_end, offsets, xs, ys, dep, surf, see, chain, lod, tri_side)
+        band_start, band_tris = self._bins(xs, ys, see, SOLID | CUT, sides * n, "shadow_")
+        rasterize_depth(depth, base, xs, ys, dep, tri_side, n, band_start, band_tris, see, surf, chain, lod,
+                        *pack["textures"])
+        if trans is None:
+            return False
+        band_start, band_tris = self._bins(xs, ys, see, CLEAR, sides * n, "shadow_")
+        rasterize_tint(trans, offset, n, sides * n, xs, ys, dep, tri_side, n, band_start, band_tris, surf,
+                       chain, lod, *pack["textures"])
+        return True
 
     def _shadow_triangles(self, k):
         """Buffers for k triangles of a shadow map: pixel coordinates (xs, ys), depth and surface (see

@@ -583,6 +583,60 @@ class RenderTests(unittest.TestCase):
         np.testing.assert_allclose(fb.colour()[y, fb.width // 2], to_linear_rgb((40, 200, 60)), atol=1e-9)
         self.assertFalse(renderer.render([Object3D(make_box())], camera, []).colour().any())  # no lights: black
 
+    def test_settled_casters_shadow_maps_come_out_as_drawn_whole(self):
+        # Each light keeps a map of its settled casters and draws the rest over it (shadows._Settled): every frame's
+        # maps must be those drawn from every caster, to the bit, while casters settle, start moving, come and go,
+        # and the light turns. See-through ones (multiplied in order) are never kept.
+        from unicode3d import shadows
+
+        box, other, stretched = make_box(), make_box(), make_box()  # (casters are told apart by mesh and pose)
+
+        def scene(f):
+            boxes = [Object3D(box, position=np.array([x, -1.0, z]), scale=0.4)
+                     for x in (-1.5, 0.0, 1.5) for z in (-1.0, 0.5)]
+            walker = Object3D(box, position=np.array([np.sin(f / 5), 0.0, 0.0]), scale=0.3)  # always moving
+            stops = Object3D(box, position=np.array([0.0, 0.5, min(f, 12) / 10]), scale=0.3)  # then still
+            starts = Object3D(box, position=np.array([max(f - 20, 0) / 10, 0.8, -0.5]), scale=0.3)
+            glass = Object3D(box, position=np.array([-0.8, 0.2, 0.3]), scale=0.4, opacity=0.5, color=(200, 60, 60))
+            floor = Object3D(other, position=np.array([0.0, -1.6, 0.0]), scale=(4.0, 0.1, 4.0))
+            if f == 36:
+                stretched.vertices = stretched.vertices * (1.0, 2.0, 1.0)  # a settled mesh's arrays replaced
+            things = boxes + [walker, stops, starts, glass, floor,
+                              Object3D(stretched, position=np.array([-1.2, -0.2, -1.2]), scale=0.3)]
+            if 15 <= f < 25:
+                things.remove(boxes[2])  # one goes, and comes back
+            if f % 4 == 0:  # meshes coming and going (the pack made again)
+                things.append(Object3D(make_box(), position=np.array([1.5, 1.0, 1.0]), scale=0.1))
+            if f >= 28:
+                things.append(Object3D(make_box(), position=np.array([1.0, 1.0, 1.0]), scale=0.2))
+            sun = Light(direction=np.array([-0.4, -1.0, -0.3 + (0.2 if f >= 32 else 0.0)]), shadows=True)
+            lamp = PointLight(np.array([0.3, 1.5, 0.8]), range=6.0, shadows=True)
+            return things, [sun, lamp]
+
+        camera = Camera(position=np.array([0.0, 2.0, 5.0]))
+        kept, whole = Renderer(48, 24), Renderer(48, 24)
+        settle = shadows.SETTLE_DRAWS
+        try:
+            for f in range(44):
+                things, lights = scene(f)
+                shadows.SETTLE_DRAWS = 3
+                kept.render(things, camera, lights)
+                a = [x.copy() for x in kept._shadows[1]]
+                shadows.SETTLE_DRAWS = 10 ** 9  # nothing settles: every caster drawn every time
+                whole.render(things, camera, lights)
+                b = whole._shadows[1]
+                for x, y in zip(a[:1] + a[2:], b[:1] + b[2:]):  # texels, mats, params
+                    np.testing.assert_array_equal(x, y, f"frame {f}")
+                tinted = a[1][0] > 0.0  # (trans holds tints only behind see-through things; the rest isn't cleared)
+                np.testing.assert_array_equal(a[1][0], b[1][0], f"frame {f}")
+                np.testing.assert_array_equal(a[1][1:, tinted], b[1][1:, tinted], f"frame {f}")
+                self.assertTrue(tinted.any())
+                np.testing.assert_array_equal(kept.framebuffer.rgb, whole.framebuffer.rgb, f"frame {f}")
+                if f in (10, 35, 43):  # kept, through repacks and the mesh changed
+                    self.assertTrue(all(entry is not None for entry in kept._settled.values()), f)
+        finally:
+            shadows.SETTLE_DRAWS = settle
+
     def test_shadows(self):
         # A box above a floor, seen from straight above, lit from up and to the left: its shadow falls a
         # unit to the right of it, where the floor gets only the light's ambient light.
