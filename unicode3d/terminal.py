@@ -63,6 +63,9 @@ def _cell(value):
     return math.floor(value) if math.isfinite(value) else None
 
 
+_ANSI_CELLS = {}  # named Color: ansi_color(), for text()
+
+
 def _printable(ch):
     """ch if it takes exactly one cell, otherwise '?' (the grid has no room for wide or zero-width characters)."""
     if ch.isprintable() and unicodedata.east_asian_width(ch) not in "WF" and not unicodedata.combining(ch):
@@ -235,6 +238,7 @@ class Screen:
         self.key_release = console is not None and console.key_release  # keys() returns KeyRelease events
         self.held = HeldKeys()      # which keys are down, updated by keys()
         self._decoder = InputDecoder()
+        self._text_codes = {}       # string: its code points as text() writes them (see _printable)
         self._rows = self._cols = 0
         self.set_glyphs(glyphs)
         self.set_color(color)
@@ -351,7 +355,13 @@ class Screen:
         if not s:
             return
         n = len(s)
-        self.chars[y, x:x + n] = [_printable(c) for c in s]
+        codes = self._text_codes.get(s)  # programs write the same strings frame after frame (panels, borders)
+        if codes is None:
+            if len(self._text_codes) > 4096:
+                self._text_codes.clear()
+            shown = s if s.isascii() and s.isprintable() else "".join(map(_printable, s))
+            codes = self._text_codes[s] = np.frombuffer(shown.encode("utf-32-le"), np.uint32)
+        self.chars.view(np.uint32)[y, x:x + n] = codes
         self.fg[y, x:x + n] = self._text_color(color, DEFAULT)
         self.bg[y, x:x + n] = self._text_color(bg, self._bg_cell)
         self.attrs[y, x:x + n] = BOLD * bold | DIM * dim | REVERSE * reverse
@@ -361,7 +371,10 @@ class Screen:
         if color is None or self.color_mode == "mono":
             return default
         if isinstance(color, (int, np.integer)):
-            return ansi_color(color)
+            packed = _ANSI_CELLS.get(color)
+            if packed is None:  # (ansi_color raises for anything but a Color, so this holds at most 17)
+                packed = _ANSI_CELLS[color] = ansi_color(color)
+            return packed
         values = np.asarray(color)
         key = (values.dtype.kind, *values.reshape(-1).tolist())  # ((1, 0, 0) and (1.0, 0.0, 0.0) differ)
         packed = self._text_colors.get(key)

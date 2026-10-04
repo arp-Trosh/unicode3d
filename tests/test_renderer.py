@@ -2015,6 +2015,19 @@ class ScreenTests(unittest.TestCase):
         self.assertEqual(detect_glyphs({"TERM": "xterm-kitty", "UNICODE3D_GLYPHS": "quad"}), "quad")
         self.assertEqual(detect_glyphs({"TERM": "xterm-kitty"}, unicode_ok=False), "ascii")
 
+    def test_text_takes_one_cell_per_character(self):
+        # Wide, zero-width and control characters become '?' (the grid has a cell per character), the first time a
+        # string is written and every time after (text() keeps what it made of each string), clipped or not.
+        screen = Screen(glyphs="quad", color="truecolor", size=(3, 12))
+        for _ in range(2):
+            screen.text(0, 0, "│♖ab漢é\t🙂")
+            screen.text(1, -2, "xy│end")
+            screen.text(2, 9, "tail")
+            self.assertEqual("".join(screen.chars[0]), "│♖ab?e??? " + "  ")
+            self.assertEqual("".join(screen.chars[1]), "│end" + " " * 8)
+            self.assertEqual("".join(screen.chars[2]), " " * 9 + "tai")
+            screen.erase()
+
     def test_refresh_sends_only_changes(self):
         screen = Screen(glyphs="quad", color="truecolor", size=(5, 20))
         screen.text(1, 2, "hello", Color.GREEN, bold=True)
