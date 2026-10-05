@@ -345,6 +345,7 @@ between frames:
 | `reflections` | `True` | `False` draws no reflections whatever the objects' reflectivity (see [Reflections](#reflections)) |
 | `mirror_bounces` | `1` | how deep mirrors show each other, at most 4 |
 | `max_pixels` | `1920 * 1080` | the most pixels drawn; a bigger view is drawn at a lower resolution and stretched to fit (see [Performance](#performance)); `None` for no limit |
+| `simplify` | `0` | how many pixels a simpler copy of a mesh (a level of detail) may differ by where it is drawn in the mesh's place, for objects small on screen (see [Performance](#performance)); 0 draws every mesh as it is |
 
 `render(objects, camera, lights)` takes one light or a list of them. It returns the renderer's own
 `FrameBuffer`, which the next render reuses; `copy()` it to keep a frame. `fb.ids` tells you which
@@ -1104,6 +1105,17 @@ maps), left out of the medians. The `-sun` and `-lamp` scenes have a shadowed li
 and their dice turn, so the shadow map is redrawn every frame. Run it with `--size`, `--glyphs`,
 `--color`, `--threads` or `--scene` to measure other cases; its first lines say what it ran on, so
 include them when quoting its numbers.
+
+**Many detailed models.** Models made for bigger screens often have far more triangles than a terminal
+can show: a 1,700-triangle character ten pixels tall costs as much to draw as a big one. With
+`Renderer.simplify` above 0 (about 1 is a good start), objects small on screen are drawn from simpler
+copies of their meshes, levels of detail made by `detail.detail_levels` (vertices merged on a grid,
+keeping creases, colours, textures and materials), the coarsest whose vertices move by at most that
+many pixels; shiny objects never take a level that would make them flat (a flat shiny mesh is a
+mirror). Levels are made for a mesh the first time it is small enough to use one, a few meshes a
+frame; call `detail_levels(mesh)` ahead of time (while loading, say) to have them ready. In Castle
+Panic at 1 pixel it draws half the triangles and its frames are about 15% faster, the picture
+changed by a shade here and there.
 
 **Huge terminals.** A full-screen terminal with a tiny font can have a million cells or more: kitty
 at font size 2 on a 1080p screen is about 960x215 cells, 1920x645 pixels in `sextant` mode. Frames

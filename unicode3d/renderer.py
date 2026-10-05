@@ -8,6 +8,7 @@ shadows (shadows.py), fog and outlines, and the background.
 """
 import math
 import operator
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -23,9 +24,11 @@ from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
 from .transforms import normalize, perspective, scene_poses, view_axes
+from .detail import FINEST, detail_levels, forget_levels, known_levels
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
+DETAIL_BUDGET = 0.003  # seconds a frame spent making levels of detail (see Renderer._detail)
 HAZE_TEXELS = 4       # how many texels across a sky box face fog fades into (see shading.post_effects)
 
 
@@ -170,51 +173,69 @@ def _piece(mesh):
 
 class _Packer:
     """Packs meshes' arrays together for the kernels (see pack()), from each mesh's _Piece (kept on the mesh) and
-    textures kept from one pack to the next while they hold every chain the meshes show. So a render list that gains
-    or loses an object (an arrow, a puff of dust) costs a concatenation, not a hitch: in Castle Panic, working out
-    every piece and packing every texture again took half a second."""
+    textures kept from one pack to the next while they hold every chain the meshes show. Meshes are added to the end
+    of the last pack and kept there after they go out of use, until it holds as many faces again as are in use: so a
+    render list that gains an object (an arrow, a puff of dust) costs the new mesh's share and one copy of the
+    arrays, not a hitch (in Castle Panic, working out every piece and packing every texture again took half a
+    second, and packing every mesh again 5 ms)."""
 
     def __init__(self):
         self._textures = None  # (chains, {id(chain): index}, alpha kinds (K,), pack() of them, the array its
                                # texels are the start of) as last packed
+        self._packed = None  # (meshes, their keys, {id(mesh): index}, pieces, pack, the room its textures are in)
+        self._room = {}  # {name: array} the pack's arrays are the start of, with room for more (see _joined)
 
     def pack(self, meshes, keys):
-        """The meshes' arrays packed together for raster.project, and their textures for sampling. keys: each mesh's
-        _mesh_key."""
-        pieces = [_mesh_piece(mesh, key) for mesh, key in zip(meshes, keys)]
-        chains, index, kinds = self._pack_textures(pieces)
-        n_vertices = np.array([len(p.vertices) for p in pieces], np.int64)
-        n_faces = np.array([len(p.faces) for p in pieces], np.int64)
-        mesh_vertex = np.concatenate([[0], np.cumsum(n_vertices)])
-        mesh_face = np.concatenate([[0], np.cumsum(n_faces)])
-        # Every mesh's materials in one table: the chain each shows (-1: none) and its texture's size.
-        table = np.array([-1 if c is None else index[id(c)] for p in pieces for c in p.chains], np.int64)
-        first = np.concatenate([[0], np.cumsum([len(p.chains) for p in pieces])])
-        face_chain = table[np.concatenate([p.materials for p in pieces]) + np.repeat(first[:-1], n_faces)]
-        face_texels = np.concatenate([p.texels for p in pieces])[
-            np.concatenate([p.materials for p in pieces]) + np.repeat(first[:-1], n_faces)]
-        kind_of = np.append(kinds, np.int8(0))  # (chain -1: none)
-        face_kind = kind_of[face_chain]
-        # Whether light goes through any of it (see-through colours or textures), and whether its far side
-        # shows through anything (those, or holes in its textures).
-        tints, clear = [], []
-        for p, at in zip(pieces, first):
-            used = kind_of[table[at + p.used]]
-            tints.append(p.tinted or bool((used == 2).any()))
-            clear.append(tints[-1] or bool(used.any()))
-        faces = np.concatenate([p.faces for p in pieces]) + np.repeat(mesh_vertex[:-1], n_faces)[:, None]
-        c = np.ascontiguousarray
-        return {"vertices": c(np.concatenate([p.vertices for p in pieces]), np.float64),
-                "normals": c(np.concatenate([p.normals for p in pieces]), np.float64),
-                "faces": c(faces, np.int64), "uvs": c(np.concatenate([p.uvs for p in pieces]), np.float64),
-                "colors": c(np.concatenate([p.colors for p in pieces]), np.float64),
-                "face_chain": c(face_chain, np.int64), "face_kind": c(face_kind, np.int8),
-                "face_texels": c(face_texels, np.float64),
-                "mesh_vertex": mesh_vertex.astype(np.int64), "mesh_face": mesh_face.astype(np.int64),
-                "spheres": np.array([p.sphere for p in pieces], np.float64).reshape(-1, 4),
-                "clear": np.array(clear, np.bool_), "tints": np.array(tints, np.bool_),
-                "planes": np.array([p.plane for p in pieces], np.float64).reshape(-1, 4),
-                "textures": self._textures[3]}
+        """(the pack: every mesh's arrays together for raster.project, and their textures for sampling; where each
+        of the meshes is in it (M,); the keys (_mesh_key) of the pack's meshes, in its order). keys: each mesh's
+        _mesh_key. The pack may hold other meshes too, drawn before."""
+        packed = self._packed
+        if packed is not None:
+            held, held_keys, index, pieces, arrays, room = packed
+            where, new, new_keys, ids = [], [], [], {}
+            for mesh, key in zip(meshes, keys):
+                i = index.get(id(mesh))
+                if i is None:
+                    i = ids.get(id(mesh))
+                    if i is None:
+                        i = ids[id(mesh)] = len(held) + len(new)
+                        new.append(mesh)
+                        new_keys.append(key)
+                elif not _same(held_keys[i][1:], key[1:]):  # (its arrays were replaced: all afresh)
+                    packed = None
+                    break
+                where.append(i)
+        if packed is not None and new:
+            more = [_mesh_piece(mesh, key) for mesh, key in zip(new, new_keys)]
+            in_use = sum(len(p.faces) for p in (pieces[i] if i < len(pieces) else more[i - len(pieces)]
+                                                for i in set(where)))
+            if sum(len(p.faces) for p in pieces) + sum(len(p.faces) for p in more) > 2 * in_use + 65536:
+                packed = None  # (mostly meshes out of use: only those in use, afresh)
+            else:
+                chains, index_of, kinds = self._pack_textures(pieces + more)
+                if self._textures[4] is not room:  # (the textures were packed afresh: their places moved)
+                    packed = None
+                else:
+                    added = _arrays(more, index_of, kinds, len(arrays["vertices"]), len(arrays["faces"]))
+                    arrays = _joined(arrays, added, self._textures[3], self._room)
+                    index = {**index, **{id(mesh): len(held) + k for k, mesh in enumerate(new)}}
+                    self._packed = (held + new, held_keys + new_keys, index, pieces + more, arrays, room)
+                    return arrays, np.array(where, np.int64), self._packed[1]
+        if packed is not None:
+            return arrays, np.array(where, np.int64), held_keys
+        # Afresh, with just these meshes.
+        unique, unique_keys, index = [], [], {}
+        for mesh, key in zip(meshes, keys):
+            if id(mesh) not in index:
+                index[id(mesh)] = len(unique)
+                unique.append(mesh)
+                unique_keys.append(key)
+        pieces = [_mesh_piece(mesh, key) for mesh, key in zip(unique, unique_keys)]
+        chains, index_of, kinds = self._pack_textures(pieces)
+        arrays = _arrays(pieces, index_of, kinds, 0, 0)
+        arrays["textures"] = self._textures[3]
+        self._packed = (unique, unique_keys, index, pieces, arrays, self._textures[4])
+        return arrays, np.array([index[id(mesh)] for mesh in meshes], np.int64), unique_keys
 
     def _pack_textures(self, pieces):
         """The texture pack's (chains, {id(chain): index}, alpha kinds) for the pieces. Chains it lacks are added in
@@ -251,6 +272,70 @@ class _Packer:
         self._textures = (wanted, {id(chain): k for k, chain in enumerate(wanted)}, kinds,
                           pack_textures(wanted, room), room)
         return self._textures[0], self._textures[1], self._textures[2]
+
+
+def _arrays(pieces, index, kinds, first_vertex, first_face):
+    """The pieces' arrays packed together (as _Packer.pack gives them, without the textures), their vertices and
+    faces numbered from first_vertex and first_face: to go after a pack of that many. index, kinds: the texture
+    pack's {id(chain): index} and alpha kinds."""
+    n_vertices = np.array([len(p.vertices) for p in pieces], np.int64)
+    n_faces = np.array([len(p.faces) for p in pieces], np.int64)
+    mesh_vertex = np.concatenate([[0], np.cumsum(n_vertices)])
+    mesh_face = np.concatenate([[0], np.cumsum(n_faces)])
+    # Every mesh's materials in one table: the chain each shows (-1: none) and its texture's size.
+    table = np.array([-1 if c is None else index[id(c)] for p in pieces for c in p.chains], np.int64)
+    first = np.concatenate([[0], np.cumsum([len(p.chains) for p in pieces])])
+    face_chain = table[np.concatenate([p.materials for p in pieces]) + np.repeat(first[:-1], n_faces)]
+    face_texels = np.concatenate([p.texels for p in pieces])[
+        np.concatenate([p.materials for p in pieces]) + np.repeat(first[:-1], n_faces)]
+    kind_of = np.append(kinds, np.int8(0))  # (chain -1: none)
+    face_kind = kind_of[face_chain]
+    # Whether light goes through any of it (see-through colours or textures), and whether its far side
+    # shows through anything (those, or holes in its textures).
+    tints, clear = [], []
+    for p, at in zip(pieces, first):
+        used = kind_of[table[at + p.used]]
+        tints.append(p.tinted or bool((used == 2).any()))
+        clear.append(tints[-1] or bool(used.any()))
+    faces = (np.concatenate([p.faces for p in pieces]).reshape(-1, 3)
+             + (first_vertex + np.repeat(mesh_vertex[:-1], n_faces))[:, None])
+    c = np.ascontiguousarray
+    return {"vertices": c(np.concatenate([p.vertices for p in pieces]).reshape(-1, 3), np.float64),
+            "normals": c(np.concatenate([p.normals for p in pieces]).reshape(-1, 3), np.float64),
+            "faces": c(faces, np.int64), "uvs": c(np.concatenate([p.uvs for p in pieces]).reshape(-1, 3, 2), np.float64),
+            "colors": c(np.concatenate([p.colors for p in pieces]).reshape(-1, 3, 4), np.float64),
+            "face_chain": c(face_chain, np.int64), "face_kind": c(face_kind, np.int8),
+            "face_texels": c(face_texels, np.float64),
+            "mesh_vertex": (first_vertex + mesh_vertex).astype(np.int64),
+            "mesh_face": (first_face + mesh_face).astype(np.int64),
+            "spheres": np.array([p.sphere for p in pieces], np.float64).reshape(-1, 4),
+            "clear": np.array(clear, np.bool_), "tints": np.array(tints, np.bool_),
+            "planes": np.array([p.plane for p in pieces], np.float64).reshape(-1, 4)}
+
+
+def _joined(arrays, added, textures, room):
+    """A pack (arrays) with more meshes (added: _arrays() of them, numbered to follow) after its own, and the
+    texture pack now in use. Each array is the start of a longer one kept in room ({name: array}), and the meshes
+    are written after it there while it has space: earlier packs, which may still be in use, are left as they
+    were. Otherwise into new arrays with as much space again."""
+    joined = {}
+    for name, more in added.items():
+        old = arrays[name][:-1] if name in ("mesh_vertex", "mesh_face") else arrays[name]  # (the end of one is the
+        end = len(old) + len(more)                                                          # start of the next)
+        whole = room.get(name)
+        if whole is None or whole.base is not None or len(whole) < end or not _starts(whole, old):
+            whole = np.empty((2 * end + 64,) + more.shape[1:], more.dtype)
+            whole[:len(old)] = old
+            room[name] = whole
+        whole[len(old):end] = more
+        joined[name] = whole[:end]
+    joined["textures"] = textures
+    return joined
+
+
+def _starts(whole, part):
+    """Whether part is a view of the start of whole."""
+    return part.base is whole and part.__array_interface__["data"][0] == whole.__array_interface__["data"][0]
 
 
 def _chunks(counts, starts, size):
@@ -328,12 +413,17 @@ class Renderer(ShadowMaps, Mirrors):
     full-screen terminal with a tiny font) is drawn at a lower resolution that fits, and
     stretched to size, so that time and memory stay bounded however big the terminal is;
     None or 0 for no limit. Working memory is a few hundred bytes a pixel.
+    simplify: how many pixels on screen a simpler copy of a mesh (a level of detail, see detail.py) may differ by
+    where it is drawn in the mesh's place, for objects small on screen; 0 (the default) draws every mesh as it
+    is. About 1 makes scenes of many detailed models faster (Castle Panic: half the triangles drawn) for a
+    change to the picture of under a pixel. Levels are made for a mesh the first time it is small enough to use
+    one, a few meshes a frame (detail.detail_levels makes them ahead of time).
     """
 
     def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
                  fog=0.3, outline=0.55, lod_bias=-0.5, background=None, shadow_size=1024, point_shadow_size=256,
                  shadow_softness=1.5, shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
-                 max_pixels=MAX_PIXELS):
+                 max_pixels=MAX_PIXELS, simplify=0.0):
         for n in (samples, edge_samples):
             if n not in SAMPLE_PATTERNS and n != 0:
                 raise ValueError(f"sample counts must be one of {sorted(SAMPLE_PATTERNS)}, not {n}")
@@ -343,6 +433,7 @@ class Renderer(ShadowMaps, Mirrors):
         self.fog = fog
         self.outline = outline
         self.lod_bias = lod_bias
+        self.simplify = simplify
         self.background = background
         self.shadow_size = shadow_size
         self.point_shadow_size = point_shadow_size
@@ -360,7 +451,9 @@ class Renderer(ShadowMaps, Mirrors):
         self.view_proj = None
         self.draws = 0     # renders that rasterized the scene, rather than reusing an unchanged frame
         self._last = None  # what the framebuffer shows, as _scene_state() gives it
-        self._pack = None  # (mesh keys, the pack of those meshes) as last drawn
+        self._pack = None  # (detail version, flat mesh keys, the pack, each mesh's place in it, its keys and flat keys)
+        self._detail_memo = None  # the levels of detail of the meshes last drawn (see _detail)
+        self._chain_rows = {}  # {id(levels): (levels, mesh, keys, row)} (see _detail_rows)
         self._poses_memo = {}  # the scene graph's order as last drawn (see scene_poses), and each object's row in it
         self._colors = None  # (the objects' colours, their linear rgb) as last drawn, if none can change in place
         self._packer = _Packer()
@@ -528,14 +621,18 @@ class Renderer(ShadowMaps, Mirrors):
         self._last = None
         self._pack = None
         self._packer = _Packer()
+        self._detail_memo = None
+        self._chain_rows = {}
+        forget_levels()
         self._shadows = None
         self._settled = {}
         self._caster_ages = {}
 
-    def _instances(self, objects):
+    def _instances(self, objects, camera=None):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and
         position), colours, materials, flags and ids (render-list index + 1). Packs the meshes afresh if the set
-        of meshes has changed."""
+        of meshes has changed. With a camera and simplify on, each object's mesh is the level of detail (see
+        _detail) it is drawn with."""
         # (Wholly clear objects, or with a NaN opacity, have nothing to draw, nor any shadow.)
         candidates = [(i, obj) for i, obj in enumerate(objects)
                       if obj.mesh is not None and len(obj.mesh.faces) and obj.opacity > 0.0]
@@ -577,24 +674,101 @@ class Renderer(ShadowMaps, Mirrors):
         keys = list(map(_mesh_key, meshes))  # (afresh: a mesh's arrays may have been replaced)
         rgb = self._linear_colors(objs)
         double, emissive, cast, alpha, shine, spec, shiny = zip(*map(_drawing_attrs, objs))
+        shine = np.clip(_numbers(shine), 0.0, 1.0)
         flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
-        packed = self._pack
-        if packed is None or not _same(packed[0], flat):
-            packed = self._pack = (flat, self._packer.pack(meshes, keys))
-        mesh_keys, keys = keys, flat
+        version = None
+        if self.simplify > 0 and camera is not None:  # (every level of each mesh packed, and which one each draws)
+            meshes, keys, mesh_idx, version = self._detail(meshes, keys, flat, mesh_idx, linear, where, shine > 0.0,
+                                                           camera)
+        placed = self._pack
+        if placed is None or placed[0] is not version or not _same(placed[1], flat):
+            arrays, at_pack, pack_keys = self._packer.pack(meshes, keys)
+            placed = self._pack = (version, flat, arrays, at_pack, pack_keys,
+                                   [x for key in pack_keys for x in (*key, None)])
+        _, _, arrays, at_pack, mesh_keys, keys = placed
+        mesh_idx = at_pack[mesh_idx]
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
-        double = np.array(double, np.bool_) | (alpha < 1.0) | packed[1]["clear"][mesh_idx]
+        double = np.array(double, np.bool_) | (alpha < 1.0) | arrays["clear"][mesh_idx]
 
         return {"mesh": mesh_idx, "pos": where, "lin": np.ascontiguousarray(linear),
                 "flip": _determinants(linear) < 0.0,
                 "rgb": rgb, "double": double, "alpha": alpha,
-                "shine": np.clip(_numbers(shine), 0.0, 1.0),
+                "shine": shine,
                 "specular": np.maximum(_numbers(spec), 0.0),
                 "shininess": np.maximum(_numbers(shiny), 0.0),  # (None, each light's own, as 0)
                 "ident": np.array(ident, np.int32),
-                "emissive": _numbers(emissive), "cast": np.array(cast, np.bool_), "pack": packed[1],
+                "emissive": _numbers(emissive), "cast": np.array(cast, np.bool_), "pack": arrays,
                 "keys": keys, "mesh_keys": mesh_keys}
+
+    def _detail(self, meshes, keys, flat, mesh_idx, linear, where, shiny, camera):
+        """Levels of detail (detail.py) for the instances seen from camera: (meshes, keys, mesh_idx, version), with
+        every level of each mesh among the meshes (so that an object changing level doesn't repack anything), each
+        instance's mesh the coarsest level that moves no vertex more than `simplify` pixels on screen. Shiny
+        objects (shiny: (N,) bool) never take a level that is flat where their mesh isn't: a flat shiny mesh is
+        a mirror (see Mirrors), a pass over the whole scene. Levels are made for a mesh once an object showing it
+        is small enough to use one, for at most DETAIL_BUDGET seconds a frame; until then it is drawn as it is. version
+        is the same object while the meshes are the same."""
+        memo = self._detail_memo
+        if memo is None or not _same(memo["flat"], flat):
+            chains = [known_levels(mesh) for mesh in meshes]
+            spheres = np.array([(*m.bounds()[0], m.bounds()[1]) for m in meshes], np.float64).reshape(-1, 4)
+            memo = self._detail_memo = {"flat": flat, "chains": chains, "spheres": spheres, "levels": None}
+        chains, spheres = memo["chains"], memo["spheres"]
+        # How far each vertex may move, in its mesh's own units: `simplify` pixels where the object is nearest.
+        eye = np.asarray(camera.position, dtype=float)
+        stretch = np.sqrt((linear ** 2).sum(axis=1)).max(axis=1)  # (its longest column: the scale, for most)
+        centre = np.einsum("nij,nj->ni", linear, spheres[mesh_idx, :3]) + where
+        nearest = np.sqrt(((centre - eye) ** 2).sum(axis=1)) - spheres[mesh_idx, 3] * stretch
+        allowed = float(self.simplify) * self._pixel_size(camera) * nearest / stretch
+        allowed = np.where(np.isfinite(allowed) & (nearest > float(camera.near)), allowed, 0.0)
+        # Levels for meshes now small enough to use one, within the budget.
+        wanted = np.zeros(len(meshes), np.bool_)
+        wanted[mesh_idx[allowed >= FINEST * spheres[mesh_idx, 3]]] = True  # (no level moves less than that, nearly)
+        missing = [j for j in np.flatnonzero(wanted) if chains[j] is None]
+        if missing:
+            start = time.perf_counter()
+            for j in missing:
+                chains[j] = detail_levels(meshes[j])
+                memo["levels"] = None
+                if time.perf_counter() - start > DETAIL_BUDGET:
+                    break
+        if memo["levels"] is None:  # (the pack's meshes, and each level's error, afresh)
+            rows = [self._detail_rows(mesh, key, chain) for mesh, key, chain in zip(meshes, keys, chains)]
+            first = np.cumsum([0] + [len(row[0]) for row in rows[:-1]])
+            most = max(len(row[0]) for row in rows)
+            error = np.full((len(meshes), most), np.inf)
+            mirrorless = error.copy()
+            for j, (_, _, e, m) in enumerate(rows):
+                error[j, :len(e)] = e
+                mirrorless[j, :len(m)] = m
+            memo["levels"] = ([level for row in rows for level in row[0]], [key for row in rows for key in row[1]],
+                              np.array(first, np.int64), error, mirrorless)
+        levels = memo["levels"]
+        every, every_keys, first, error, mirrorless = levels
+        table = np.where(shiny[:, None], mirrorless[mesh_idx], error[mesh_idx])
+        level = (table <= allowed[:, None]).sum(axis=1) - 1
+        return every, every_keys, first[mesh_idx] + np.maximum(level, 0), levels
+
+    def _detail_rows(self, mesh, key, chain):
+        """(levels, their keys, their errors, the errors of those a shiny object may take: up to the first one that
+        is flat where the mesh isn't) of a mesh with levels `chain` (detail_levels, or None for just the mesh),
+        kept from frame to frame for each chain."""
+        if chain is None:
+            return [mesh], [key], [0.0], [0.0]
+        kept = self._chain_rows.get(id(chain))
+        if kept is not None and kept[0] is chain and kept[1] is mesh and _same(kept[2][0][1:], key[1:]):
+            return kept[3]
+        levels = [level for level, _ in chain]
+        keys = [key] + [_mesh_key(level) for level in levels[1:]]
+        errors = [error for _, error in chain]
+        flat = [math.isfinite(_mesh_piece(level, k).plane[0]) for level, k in zip(levels, keys)]
+        shiny = errors[:next((i for i in range(1, len(flat)) if flat[i] and not flat[0]), len(flat))]
+        if len(self._chain_rows) > 4 * len(self._pack[4] if self._pack else ()) + 1024:
+            self._chain_rows.clear()
+        row = (levels, keys, errors, shiny)
+        self._chain_rows[id(chain)] = (chain, mesh, keys, row)
+        return row
 
     def _linear_colors(self, objs):
         """Each object's colour in linear light, (N, 3) (NaN as 0). When every object has the very colour it had
@@ -647,7 +821,7 @@ class Renderer(ShadowMaps, Mirrors):
         lights = as_lights(lights)
         self._fit()
         self._objects = objects = list(objects)  # (once: objects may be a generator)
-        inst = self._instances(objects)
+        inst = self._instances(objects, camera)
         self._light_rows = light_rows(lights, self.shadows)
         aspect = self.width * self.cell_aspect / max(self.height, 1)
         bg_args, bg_state = background_args(self.background, camera, aspect, self._fb.height)

@@ -494,6 +494,28 @@ def lettering():
     return Shot(objects, view, sun, {"background": Gradient((40, 50, 80), (10, 10, 20))})
 
 
+def detail():
+    """Levels of detail (Renderer.simplify, added after 0.12.0): rows of knobbly balls and dice going off into the
+    distance, the farther ones drawn from simpler copies of their meshes (detail.py) that differ by at most a pixel;
+    shiny ones (the gold row) keep their shape. Shadows from the sun."""
+    from unicode3d.detail import detail_levels
+    from unicode3d.examples.dice import make_die
+    knobbly = blob_mesh((1.0, 1.0, 1.0), rings=24, segments=32)
+    knobbly.vertices = knobbly.vertices * (1.0 + 0.08 * np.sin(7.0 * knobbly.vertices[:, :1])
+                                           * np.cos(5.0 * knobbly.vertices[:, 1:2]))
+    die_mesh = make_die()
+    detail_levels(knobbly)  # (made ahead, rather than a few a frame)
+    detail_levels(die_mesh)
+    objects = [Object3D(floor(30.0), color=(150, 150, 140))]
+    for row, z in enumerate(np.arange(1.0, -24.0, -2.5)):
+        objects += [Object3D(knobbly, np.array([-2.0, 0.6, z]), turned(0.3 * row), scale=0.6, color=(200, 90, 60)),
+                    Object3D(die_mesh, np.array([0.0, 0.5, z]), turned(0.5 * row), scale=0.5, color=(240, 240, 230)),
+                    Object3D(knobbly, np.array([2.0, 0.6, z]), turned(0.2 * row), scale=0.6, color=(230, 180, 60),
+                             reflectivity=0.6)]
+    sun = Light(direction=np.array([0.5, -1.0, -0.4]), shadows=True)
+    return Shot(objects, camera((0.0, 2.2, 5.0), (0.0, 0.4, -6.0)), sun, {"background": Sky(), "simplify": 1.0})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -520,6 +542,7 @@ SCENES = {
     "gltf": gltf,
     "ortho": ortho,
     "lettering": lettering,
+    "detail": detail,
 }
 
 

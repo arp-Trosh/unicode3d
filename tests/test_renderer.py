@@ -18,6 +18,7 @@ from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
 from unicode3d.mesh import Mesh, load_obj, make_box
 from unicode3d.queries import Colliders
+from unicode3d.detail import detail_levels
 from unicode3d.background import Fog, Gradient, Sky, SkyBox
 from unicode3d.color import (Color, encode_index, encode_rgb, linear_to_srgb, luminance, put_sgr_color, quantize,
                              sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb)
@@ -499,6 +500,71 @@ class RenderTests(unittest.TestCase):
             change()
             for x, y in zip(scene_poses(objects, memo=memo)[1:], scene_poses(objects)[1:]):
                 np.testing.assert_array_equal(x, y)
+
+    def test_levels_of_detail(self):
+        # A knobbly ball with a colour per face and a texture: each level has fewer faces, keeps faces' colours,
+        # texture coordinates and materials, and moves no vertex further than its error.
+        ball = blob_mesh((1.0, 1.0, 1.0), rings=24, segments=32)
+        ball.vertices = ball.vertices * (1.0 + 0.1 * np.sin(6.0 * ball.vertices[:, :1]))
+        rng = np.random.default_rng(5)
+        ball.face_colors = rng.integers(0, 256, (len(ball.faces), 3))
+        ball.textures = [np.full((4, 4), 0.8)]
+        ball.materials = np.zeros(len(ball.faces), np.int64)
+        ball.uvs = rng.uniform(0, 1, (len(ball.faces), 3, 2))
+        levels = detail_levels(ball)
+        self.assertIs(levels[0][0], ball)
+        self.assertGreater(len(levels), 3)
+        self.assertIs(detail_levels(ball), levels)  # (kept on the mesh)
+        rows = {tuple(c) + tuple(uv.ravel()) for c, uv in zip(ball.face_colors, ball.uvs)}
+        for (finer, e0), (level, error) in zip(levels, levels[1:]):
+            level.check()
+            self.assertLessEqual(len(level.faces), 0.75 * len(finer.faces))
+            self.assertGreaterEqual(error, e0)
+            self.assertIs(level.textures, ball.textures)
+            self.assertTrue({tuple(c) + tuple(uv.ravel()) for c, uv in zip(level.face_colors, level.uvs)} <= rows)
+            nearest = np.sqrt(((level.vertices[:, None] - ball.vertices[None]) ** 2).sum(axis=2)).min(axis=1)
+            self.assertLessEqual(nearest.max(), error + 1e-12)
+        ball.vertices = ball.vertices * 1.0  # (replaced: made afresh)
+        self.assertIsNot(detail_levels(ball), levels)
+        broken = blob_mesh((1.0, 1.0, 1.0))
+        broken.vertices[3] = np.nan
+        self.assertEqual(len(detail_levels(broken)), 1)
+
+    def test_simplify_draws_small_objects_from_levels_of_detail(self):
+        ball = blob_mesh((1.0, 1.0, 1.0), rings=48, segments=64)
+        light = Light()
+
+        def drawn(objects, camera, simplify):
+            renderer = Renderer(80, 30, simplify=simplify)
+            for _ in range(20):  # (levels are made a few meshes a frame)
+                fb = renderer.render(objects, camera, light)
+            inst = renderer._instances(objects, camera)
+            return fb, int(np.diff(inst["pack"]["mesh_face"])[inst["mesh"]].sum()), inst
+
+        # Near: as it is, exactly.
+        near = Camera(position=np.array([0.0, 0.0, 2.5]))
+        full, faces, _ = drawn([Object3D(ball, color=(200, 100, 50))], near, 0.0)
+        same, fewer, _ = drawn([Object3D(ball, color=(200, 100, 50))], near, 1.0)
+        np.testing.assert_array_equal(full.rgb, same.rgb)
+        self.assertEqual(faces, fewer)
+        # Far: far fewer faces, and the picture all but the same.
+        far = Camera(position=np.array([0.0, 0.0, 25.0]), fov=30.0)  # (the ball about 10 pixels across)
+        full, faces, _ = drawn([Object3D(ball, color=(200, 100, 50))], far, 0.0)
+        simple, fewer, _ = drawn([Object3D(ball, color=(200, 100, 50))], far, 1.0)
+        self.assertLess(fewer, faces / 3)
+        self.assertLess(np.abs(simple.colour() - full.colour()).mean(), 0.01)
+        self.assertLessEqual(abs(int(full.drawn.sum()) - int(simple.drawn.sum())), 3)  # (of about 75)
+        # A flattened ball's coarsest levels are flat: a shiny one never takes those (a flat shiny mesh is a
+        # mirror); a matt one does.
+        slab = blob_mesh((1.0, 0.02, 1.0), rings=24, segments=32)
+        for shine, mirror in ((0.0, True), (0.8, False)):
+            _, _, inst = drawn([Object3D(slab, color=(200, 200, 200), reflectivity=shine)], far, 40.0)
+            self.assertEqual(bool(np.isfinite(inst["pack"]["planes"][inst["mesh"][0], 0])), mirror)
+        # Arrays edited in place, and invalidate(): levels made afresh.
+        levels = detail_levels(ball)
+        ball.vertices *= 1.5
+        Renderer(10, 10).invalidate()
+        self.assertIsNot(detail_levels(ball), levels)
 
     def test_vertex_and_face_colours(self):
         quad = Mesh(np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], float), np.array([[0, 1, 2], [0, 2, 3]]))
