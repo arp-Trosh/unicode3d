@@ -11,10 +11,26 @@ from .shadows import shadow_lookup
 from .texture import sample as sample_texture
 
 
+def _decode_exact(level):
+    """A perceived light level (0..1, like an sRGB value) as linear light."""
+    return np.where(level <= 0.04045, level / 12.92, ((level + 0.055) / 1.055) ** 2.4)
+
+
+DECODE_STEPS = 1024
+_DECODE = _decode_exact(np.linspace(0.0, 1.0, DECODE_STEPS + 1))
+# A highlight x ** power (x the cosine at the half vector) is at most exp(-power (1 - x)), as ln x <= x - 1: where
+# power (1 - x) is past this, it is below 1/65,536 and not worked out.
+SPEC_CUTOFF = float(np.log(65536.0))
+
+
 @njit(cache=True, error_model="numpy")
 def _decode(level):
-    """A perceived light level (0..1, like an sRGB value) as linear light."""
-    return level / 12.92 if level <= 0.04045 else ((level + 0.055) / 1.055) ** 2.4
+    """A perceived light level as linear light (_decode_exact), from a table with straight lines between its entries:
+    under 1e-6 off, a fraction of an 8-bit level, and much cheaper than the power. Clamped to 0..1 first
+    (NaN as 0), before it becomes an index."""
+    x = min(1.0, max(0.0, level)) * DECODE_STEPS
+    i = min(int(x), DECODE_STEPS - 1)
+    return _DECODE[i] + (x - i) * (_DECODE[i + 1] - _DECODE[i])
 
 
 @njit(cache=True, error_model="numpy")
@@ -91,9 +107,11 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
             hx, hy, hz = lx + ex, ly + ey, lz + ez
             hl = max(np.sqrt(hx * hx + hy * hy + hz * hz), 1e-12)
             power = shininess if shininess > 0.0 else light[13]
-            spec = light[12] * specular * max((nx * hx + ny * hy + nz * hz) / hl, 0.0) ** power * fade * reach
-            spec_r, spec_g, spec_b = (spec_r + light[7] * spec * tr, spec_g + light[8] * spec * tg,
-                                      spec_b + light[9] * spec * tb)
+            nh = (nx * hx + ny * hy + nz * hz) / hl
+            if nh > 0.0 and power * (1.0 - nh) < SPEC_CUTOFF:  # (else too faint to show, or NaN)
+                spec = light[12] * specular * nh ** power * fade * reach
+                spec_r, spec_g, spec_b = (spec_r + light[7] * spec * tr, spec_g + light[8] * spec * tg,
+                                          spec_b + light[9] * spec * tb)
     r, g, b, a = lerp(8), lerp(9), lerp(10), lerp(11)
     if chain[t] >= 0:
         level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t]) + lod[t]
@@ -101,9 +119,9 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
         r, g, b, a = r * tr, g * tg, b * tb, a * ta
     # Light levels are perceived brightness (0.5 looks half as bright), as artists tune them, so they
     # are decoded like any sRGB value; everything after this point works in linear light.
-    kr = _decode(min(max(level_r, 0.0), 1.0))
-    kg = kr if level_g == level_r else _decode(min(max(level_g, 0.0), 1.0))
-    kb = kr if level_b == level_r else _decode(min(max(level_b, 0.0), 1.0))
+    kr = _decode(level_r)
+    kg = kr if level_g == level_r else _decode(level_g)
+    kb = kr if level_b == level_r else _decode(level_b)
     # (Clamped as min(1, max(0, x)), which turns NaN into 0: Numba's max(a, NaN) is a.)
     if split:
         out[0], out[1], out[2] = min(1.0, max(0.0, r * kr)), min(1.0, max(0.0, g * kg)), min(1.0, max(0.0, b * kb))
