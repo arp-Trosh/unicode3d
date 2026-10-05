@@ -7,6 +7,7 @@ space, and points are column vectors (p' = M @ p). Quaternions are numpy
 arrays ordered [w, x, y, z].
 """
 import math
+import operator
 
 import numpy as np
 from numba import njit
@@ -149,39 +150,80 @@ def scale3(scale):
     return s
 
 
-def scene_poses(nodes, top=None):
+_parent_of = operator.attrgetter("parent")
+
+
+def scene_poses(nodes, top=None, memo=None):
     """The poses in the world of nodes (Nodes and Object3Ds) and all their parents, worked out in one pass:
     (rows, linear (N, 3, 3), position (N, 3), visible (N,) bool), where rows maps id(node) to its row. A point p
     in a node's own space is at linear @ p + position (see Node.world_matrix); a node is visible only if it and
     all its parents are. Each parent is worked out once however many children it has. With top (a node above
-    them), poses are in top's own space instead, and top and what is above it are left out."""
-    rows, order = {}, []
-    for node in nodes:
-        chain = []
-        while node is not None and node is not top and id(node) not in rows:
-            chain.append(node)
-            node = node.parent
-            if len(chain) > 1000:
-                raise ValueError("scene graph has a cycle: an object is its own ancestor")
-        for node in reversed(chain):
-            rows[id(node)] = len(order)
-            order.append(node)
+    them), poses are in top's own space instead, and top and what is above it are left out.
+
+    memo: a dict kept between calls (a Renderer keeps one), in which the order of the nodes and their parents is
+    remembered, to be reused while the same nodes come in the same order with the same parents (the usual frame).
+    Only the order is kept: poses are read afresh every call."""
+    if memo and memo["top"] is top and _same_list(memo["nodes"], nodes) \
+            and _same_list(memo["parents"], list(map(_parent_of, memo["order"]))):
+        rows, order, parent = memo["rows"], memo["order"], memo["parent"]
+    else:
+        rows, order = {}, []
+        for node in nodes:
+            chain = []
+            while node is not None and node is not top and id(node) not in rows:
+                chain.append(node)
+                node = node.parent
+                if len(chain) > 1000:
+                    raise ValueError("scene graph has a cycle: an object is its own ancestor")
+            for node in reversed(chain):
+                rows[id(node)] = len(order)
+                order.append(node)
+        parent = np.array([-1 if node.parent is None or node.parent is top else rows[id(node.parent)]
+                           for node in order], np.int64)
+        if memo is not None:
+            memo.update(top=top, nodes=list(nodes), order=order, parents=list(map(_parent_of, order)), rows=rows,
+                        parent=parent)
     n = len(order)
-    parent = np.array([-1 if node.parent is None or node.parent is top else rows[id(node.parent)] for node in order],
-                      np.int64)
-    position = np.array([node.position for node in order], np.float64).reshape(n, 3)
-    rotation = np.array([node.rotation for node in order], np.float64).reshape(n, 4)
-    scales = [(s, s, s) if isinstance(s, (int, float, np.number)) else s for s in (node.scale for node in order)]
-    try:
-        scale = np.array(scales, np.float64)
-    except (TypeError, ValueError):
-        scale = None
-    if scale is None or scale.shape != (n, 3):  # (something that isn't one number or three: scale3 says what)
-        scale = np.array([scale3(node.scale) for node in order], np.float64).reshape(n, 3)
+    position = _gather([node.position for node in order], n, 3)
+    rotation = _gather([node.rotation for node in order], n, 4)
+    scale = _scales([node.scale for node in order], n)
     visible = np.array([bool(node.visible) for node in order], np.bool_)
     linear, place = np.empty((n, 3, 3)), np.empty((n, 3))
     compose_poses(parent, position, rotation, scale, visible, linear, place)
     return rows, linear, place, visible
+
+
+def _same_list(a, b):
+    """Whether two lists hold the same objects (compared by identity), in the same order."""
+    return len(a) == len(b) and all(map(operator.is_, a, b))
+
+
+def _gather(values, n, k):
+    """values (n of them, each k numbers) as an (n, k) float array. Joining them end to end is about twice as fast
+    as np.array() of the list when they are arrays already (as positions and rotations mostly are)."""
+    try:
+        a = np.concatenate(values).astype(np.float64, copy=False) if n else np.empty(0)
+    except (TypeError, ValueError):  # (a number among them, say: np.array() turns that into the error it was)
+        a = None
+    if a is None or a.shape != (n * k,):
+        a = np.array(values, np.float64)
+    return a.reshape(n, k)
+
+
+def _scales(values, n):
+    """Each node's scale (one number, or three: see scale3) as an (n, 3) float array. Plain floats (most scales)
+    are gathered in one go; the others (threes, ints, ...) after them."""
+    out = np.repeat(np.array([s if type(s) is float else 0.0 for s in values], np.float64).reshape(n, 1), 3, axis=1)
+    odd = [i for i, s in enumerate(values) if type(s) is not float]
+    if odd:
+        try:
+            rest = np.array([values[i] for i in odd], np.float64)
+        except (TypeError, ValueError):  # (ints mixed with threes, say)
+            rest = None
+        if rest is None or rest.shape != (len(odd), 3):
+            rest = np.array([scale3(values[i]) for i in odd], np.float64).reshape(len(odd), 3)  # (it says what's wrong)
+        out[odd] = rest
+    return out
 
 
 @njit(cache=True, error_model="numpy")

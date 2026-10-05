@@ -66,6 +66,33 @@ def _same(a, b):
     return len(a) == len(b) and all(map(operator.is_, a, b))
 
 
+_mesh_of = operator.attrgetter("mesh")
+_color_of = operator.attrgetter("color")
+_drawing_attrs = operator.attrgetter("double_sided", "emissive", "cast_shadows", "opacity", "reflectivity",
+                                     "specular", "shininess")
+
+
+def _numbers(values):
+    """values as a float array, NaN (and None) as 0: a NaN colour or glow would reach the picture."""
+    a = np.array(values, np.float64)
+    return np.where(np.isnan(a), 0.0, a) if np.isnan(a).any() else a
+
+
+def _determinants(m):
+    """The determinants of matrices m (N, 3, 3), written out: several times faster than np.linalg.det for many
+    small matrices."""
+    return (m[:, 0, 0] * (m[:, 1, 1] * m[:, 2, 2] - m[:, 1, 2] * m[:, 2, 1])
+            - m[:, 0, 1] * (m[:, 1, 0] * m[:, 2, 2] - m[:, 1, 2] * m[:, 2, 0])
+            + m[:, 0, 2] * (m[:, 1, 0] * m[:, 2, 1] - m[:, 1, 1] * m[:, 2, 0]))
+
+
+def _immutable_color(color):
+    """Whether a colour can't be changed in place: a number (a named Color too), or a tuple of numbers."""
+    if isinstance(color, (int, np.integer)):
+        return True
+    return type(color) is tuple and all(isinstance(c, (int, float, np.integer, np.floating)) for c in color)
+
+
 def _mesh_key(mesh):
     """What a packed mesh depends on, compared by identity (see Renderer._scene_state)."""
     return (mesh, mesh.vertices, mesh.faces, mesh.uvs, mesh.materials, mesh.vertex_colors, mesh.face_colors,
@@ -334,6 +361,8 @@ class Renderer(ShadowMaps, Mirrors):
         self.draws = 0     # renders that rasterized the scene, rather than reusing an unchanged frame
         self._last = None  # what the framebuffer shows, as _scene_state() gives it
         self._pack = None  # (mesh keys, the pack of those meshes) as last drawn
+        self._poses_memo = {}  # the scene graph's order as last drawn (see scene_poses), and each object's row in it
+        self._colors = None  # (the objects' colours, their linear rgb) as last drawn, if none can change in place
         self._packer = _Packer()
         self._objects = []  # the render list as last drawn, for pick()
         self._eye = self._axes = None  # the camera's position and its pixels' directions (view_axes) then
@@ -512,8 +541,13 @@ class Renderer(ShadowMaps, Mirrors):
                       if obj.mesh is not None and len(obj.mesh.faces) and obj.opacity > 0.0]
         if not candidates:
             return None
-        rows, linear, where, visible = scene_poses([obj for _, obj in candidates])
-        at = np.array([rows[id(obj)] for _, obj in candidates], np.int64)
+        memo = self._poses_memo
+        known = memo.get("order")
+        nodes = [obj for _, obj in candidates]
+        rows, linear, where, visible = scene_poses(nodes, memo=memo)
+        if memo.get("order") is not known or "at" not in memo:  # (the order changed: where each one is, afresh)
+            memo["at"] = np.array([rows[id(obj)] for _, obj in candidates], np.int64)
+        at = memo["at"]
         # Hidden (or under a hidden parent), or NaN or infinite in a pose (a physics blow-up, say): not drawn.
         drawn = visible[at] & np.isfinite(where[at]).all(axis=1) & np.isfinite(linear[at]).all(axis=(1, 2))
         keep = np.flatnonzero(drawn)
@@ -521,48 +555,58 @@ class Renderer(ShadowMaps, Mirrors):
             return None
         at = at[keep]
         linear, where = linear[at], where[at]
-        objs = [candidates[k][1] for k in keep]
-        ident = [candidates[k][0] + 1 for k in keep]
-        meshes, mesh_of, keys, mesh_idx = [], {}, [], []
-        for obj in objs:
-            mesh = obj.mesh
-            m = mesh_of.get(id(mesh))
-            if m is None:
-                m = mesh_of[id(mesh)] = len(meshes)
-                meshes.append(mesh)
-                keys.append(_mesh_key(mesh))
-            mesh_idx.append(m)
-        rgb = [cached_linear_rgb(obj.color) for obj in objs]
-        double = [obj.double_sided for obj in objs]
-        emissive = [obj.emissive for obj in objs]
-        cast = [obj.cast_shadows for obj in objs]
-        alpha = [obj.opacity for obj in objs]
-        shine = [obj.reflectivity for obj in objs]
-        spec = [obj.specular for obj in objs]
-        shiny = [0.0 if obj.shininess is None else obj.shininess for obj in objs]
+        if len(keep) == len(candidates):  # (as usual: every one drawn)
+            objs, ident = nodes, [i + 1 for i, _ in candidates]
+        else:
+            objs = [candidates[k][1] for k in keep]
+            ident = [candidates[k][0] + 1 for k in keep]
+        on = list(map(_mesh_of, objs))
+        last = memo.get("meshes")
+        if last is not None and _same(last[0], on):  # (the same meshes on the same objects: the same indices)
+            meshes, mesh_idx = last[1], last[2]
+        else:
+            meshes, mesh_of, mesh_idx = [], {}, []
+            for mesh in on:
+                m = mesh_of.get(id(mesh))
+                if m is None:
+                    m = mesh_of[id(mesh)] = len(meshes)
+                    meshes.append(mesh)
+                mesh_idx.append(m)
+            mesh_idx = np.array(mesh_idx, np.int64)
+            memo["meshes"] = (on, meshes, mesh_idx)
+        keys = list(map(_mesh_key, meshes))  # (afresh: a mesh's arrays may have been replaced)
+        rgb = self._linear_colors(objs)
+        double, emissive, cast, alpha, shine, spec, shiny = zip(*map(_drawing_attrs, objs))
         flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
         packed = self._pack
         if packed is None or not _same(packed[0], flat):
             packed = self._pack = (flat, self._packer.pack(meshes, keys))
         mesh_keys, keys = keys, flat
-        mesh_idx = np.array(mesh_idx, np.int64)
         alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
         double = np.array(double, np.bool_) | (alpha < 1.0) | packed[1]["clear"][mesh_idx]
 
-        def numbers(values):  # (NaN as 0: a NaN colour or glow would reach the picture)
-            a = np.array(values, np.float64)
-            return np.where(np.isnan(a), 0.0, a) if np.isnan(a).any() else a
-
         return {"mesh": mesh_idx, "pos": where, "lin": np.ascontiguousarray(linear),
-                "flip": np.linalg.det(linear) < 0.0,
-                "rgb": numbers(rgb).reshape(-1, 3), "double": double, "alpha": alpha,
-                "shine": np.clip(numbers(shine), 0.0, 1.0),
-                "specular": np.maximum(numbers(spec), 0.0),
-                "shininess": np.maximum(numbers(shiny), 0.0),
+                "flip": _determinants(linear) < 0.0,
+                "rgb": rgb, "double": double, "alpha": alpha,
+                "shine": np.clip(_numbers(shine), 0.0, 1.0),
+                "specular": np.maximum(_numbers(spec), 0.0),
+                "shininess": np.maximum(_numbers(shiny), 0.0),  # (None, each light's own, as 0)
                 "ident": np.array(ident, np.int32),
-                "emissive": numbers(emissive), "cast": np.array(cast, np.bool_), "pack": packed[1],
+                "emissive": _numbers(emissive), "cast": np.array(cast, np.bool_), "pack": packed[1],
                 "keys": keys, "mesh_keys": mesh_keys}
+
+    def _linear_colors(self, objs):
+        """Each object's colour in linear light, (N, 3) (NaN as 0). When every object has the very colour it had
+        last frame and none of them can change in place (numbers, names, tuples of numbers), last frame's array
+        is used again; otherwise colours are looked up as cached_linear_rgb does."""
+        colors = list(map(_color_of, objs))
+        last = self._colors
+        if last is not None and _same(last[0], colors):
+            return last[1]
+        rgb = _numbers([cached_linear_rgb(c) for c in colors]).reshape(-1, 3)
+        self._colors = (colors, rgb) if all(map(_immutable_color, colors)) else None
+        return rgb
 
     def _scene_state(self, inst, camera):
         """Everything a render depends on: (values compared by equality, objects compared by identity).

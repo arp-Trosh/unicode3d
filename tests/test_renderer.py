@@ -465,6 +465,41 @@ class RenderTests(unittest.TestCase):
         renderer.render([child], camera, Light())
         self.assertEqual(renderer.draws, 2)
 
+    def test_what_is_kept_between_frames_sees_every_change(self):
+        # A renderer keeps the scene graph's order and colours that can't change in place from frame to frame;
+        # each change below must be drawn exactly as a fresh renderer draws it.
+        a, b = Node(position=np.array([-1.0, 0.0, 0.0])), Node(position=np.array([1.0, 0.5, 0.0]), scale=0.5)
+        child = Object3D(make_box(0.6), parent=a, color=(200, 40, 40))
+        other = Object3D(make_box(0.4), position=np.array([0.0, -1.0, 0.0]), color=[40, 200, 40])
+        tinted = Object3D(make_box(0.3), position=np.array([0.0, 1.0, 0.0]), color=np.array([40.0, 40.0, 200.0]))
+        objects = [child, other, tinted]
+        camera, light = Camera(position=np.array([0.0, 1.0, 6.0])), Light()
+        kept = Renderer(60, 24)
+
+        def same():
+            got, fresh = kept.render(objects, camera, light), Renderer(60, 24).render(objects, camera, light)
+            np.testing.assert_array_equal(got.rgb, fresh.rgb)
+            np.testing.assert_array_equal(got.ids, fresh.ids)
+
+        changes = [lambda: None,
+                   lambda: setattr(child, "parent", b),           # re-parented
+                   lambda: setattr(b, "parent", a),               # its parent gets one
+                   lambda: setattr(child, "color", (40, 40, 40)),  # a new tuple
+                   lambda: other.color.__setitem__(0, 250),       # a list edited in place
+                   lambda: tinted.color.__setitem__(2, 90.0),     # an array edited in place
+                   lambda: setattr(b, "scale", (1.0, 2.0, 0.5)),  # a number to three
+                   lambda: setattr(child, "scale", 2),            # an int
+                   lambda: objects.reverse()]                     # the same objects in another order
+        for change in changes:
+            change()
+            same()
+        # scene_poses with a memo gives what it gives without one, through the same kind of changes.
+        memo = {}
+        for change in (lambda: None, lambda: setattr(child, "parent", None), lambda: setattr(b, "parent", None)):
+            change()
+            for x, y in zip(scene_poses(objects, memo=memo)[1:], scene_poses(objects)[1:]):
+                np.testing.assert_array_equal(x, y)
+
     def test_vertex_and_face_colours(self):
         quad = Mesh(np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], float), np.array([[0, 1, 2], [0, 2, 3]]))
         quad.face_colors = np.array([[255, 0, 0], [0, 0, 255]])
