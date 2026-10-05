@@ -414,8 +414,10 @@ class Panel:
 
 class DisplayControls(Panel):
     """The display settings, each clickable and on a function key: glyphs (F2), colours (F3), frame rate (F4),
-    and, if given a Renderer, shadows (F5) and reflections (F6), which it switches with renderer.shadows
-    and renderer.reflections.
+    and, if given a Renderer, shadows (F5), reflections (F6) and detail (F7), which it switches with
+    renderer.shadows, renderer.reflections and renderer.simplify: "standard" detail draws objects small on screen
+    from simpler copies of their meshes that differ by at most a pixel (levels of detail, Renderer.simplify 1),
+    "high" every mesh as it is (simplify 0).
 
     The frame rate shows as achieved/target. Draw it every frame (it needs the
     screen it changes), e.g. at the bottom right:
@@ -430,7 +432,8 @@ class DisplayControls(Panel):
     say: keeping them in a file is the program's part).
     """
 
-    SETTINGS = ("glyphs", "color", "fps", "shadows", "reflections")
+    SETTINGS = ("glyphs", "color", "fps", "shadows", "reflections", "detail")
+    DETAIL = {"standard": 1.0, "high": 0.0}  # each detail setting's Renderer.simplify
 
     def __init__(self, fps_steps=FPS_STEPS, keyboard=False, renderer=None, show=None):
         self.screen = None
@@ -457,7 +460,10 @@ class DisplayControls(Panel):
             self.reflections = Choice("F6", (True, False), key=Key.F6,
                                       show=lambda v: "reflections" if v else "no reflections",
                                       get=lambda: self.renderer.reflections, set=self._set_reflections)
-            widgets += [self.shadows, self.reflections]
+            self.detail = Choice("F7", tuple(self.DETAIL), key=Key.F7, show=lambda v: {"standard": "std detail"}.get(v, f"{v} detail"),
+                                 get=lambda: "high" if not self.renderer.simplify > 0 else "standard",
+                                 set=self._set_detail)
+            widgets += [self.shadows, self.reflections, self.detail]
         self._named = {name: getattr(self, name) for name in self.SETTINGS if hasattr(self, name)}
         unknown = set(show or ()) - set(self.SETTINGS)
         if unknown:
@@ -467,8 +473,8 @@ class DisplayControls(Panel):
         super().__init__(shown, keyboard=keyboard)
 
     def settings(self):
-        """{name: value} of each setting (glyphs, color, fps, and with a renderer shadows and reflections), as
-        strings, numbers and booleans."""
+        """{name: value} of each setting (glyphs, color, fps, and with a renderer shadows, reflections and detail),
+        as strings, numbers and booleans."""
         values = {name: w.value for name, w in self._named.items()}
         values.update({k: v for k, v in self._pending.items() if k in values})
         return values
@@ -509,6 +515,9 @@ class DisplayControls(Panel):
 
     def _set_reflections(self, v):
         self.renderer.reflections = v
+
+    def _set_detail(self, v):
+        self.renderer.simplify = self.DETAIL[v]
 
     def _set_glyphs(self, v):
         if self.screen is not None:

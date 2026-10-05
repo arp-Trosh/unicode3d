@@ -1922,6 +1922,15 @@ class WidgetTests(unittest.TestCase):
         self.assertFalse(renderer.reflections)
         controls.draw(self.screen, 3, 0)
         self.assertIn("F6 no reflections", "".join(self.screen.chars[3]))
+        wide = Screen(glyphs="quad", color="256", size=(4, 120))
+        controls.draw(wide, 3, 0)
+        self.assertIn("F7 high detail", "".join(wide.chars[3]))  # and F7 its levels of detail
+        controls.handle([Key.F7])
+        self.assertEqual(renderer.simplify, 1.0)
+        controls.draw(wide, 3, 0)
+        self.assertIn("F7 std detail", "".join(wide.chars[3]))
+        controls.handle([Key.F7])
+        self.assertEqual(renderer.simplify, 0.0)
 
 
     def test_display_controls_show_some_and_keep_their_settings(self):
@@ -1933,14 +1942,15 @@ class WidgetTests(unittest.TestCase):
         controls.handle([Key.F2, Key.F5])  # the hidden ones still answer their keys
         self.assertEqual((self.screen.mode, renderer.shadows), ("sextant", False))
         self.assertEqual(controls.settings(), {"glyphs": "sextant", "color": "truecolor", "fps": 30,
-                                               "shadows": False, "reflections": True})
+                                               "shadows": False, "reflections": True, "detail": "high"})
         # Settings handed back, as from a file: before the screen is known they wait for it; names and values it
         # doesn't know are skipped.
         later = DisplayControls(renderer=Renderer(10, 5))
         later.apply({"glyphs": "half", "fps": 60, "shadows": False, "color": "rainbow", "volume": 11,
-                     "reflections": 1})
+                     "reflections": 1, "detail": "standard"})
         self.assertEqual(later.settings(), {"glyphs": "half", "color": "truecolor", "fps": 60, "shadows": False,
-                                            "reflections": True})
+                                            "reflections": True, "detail": "standard"})
+        self.assertEqual(later.renderer.simplify, 1.0)
         screen = Screen(glyphs="quad", color="256", size=(4, 80))
         later.handle([], screen)
         self.assertEqual((screen.mode, screen.color_mode, screen.fps), ("half", "256", 60))
@@ -1969,7 +1979,9 @@ class DemoTests(unittest.TestCase):
     def test_dice_demo(self):
         from unicode3d.examples.demo import DiceDemo
         demo = DiceDemo(3, seed=1)
-        self.run_demo(demo, [ord(" "), ord("+"), Key.F3, ord("g"), ord("m"), Key.F6, ord("f"), ord("f")], ord("q"))
+        self.run_demo(demo, [ord(" "), ord("+"), Key.F3, ord("g"), ord("m"), Key.F6, ord("f"), ord("f"), Key.F7],
+                      ord("q"))
+        self.assertEqual(demo.renderer.simplify, 1.0)  # F7: standard detail
         self.assertEqual(demo.finish, "chrome")  # f went plastic, rubber, chrome
         self.assertTrue(all(die.reflectivity == 0.7 and die.shininess == 40.0 for die in demo.dice))
 

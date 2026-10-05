@@ -75,8 +75,10 @@ python3 -m unicode3d.examples.tactics [--seed N]         # an isometric tactics 
 
 Every demo takes the [display options](#display-options), `--fps` included, and shows the display
 settings at the bottom right: F2 cycles the glyph set, F3 the colours, F4 the target frame rate
-(shown as achieved/target), F5 switches shadows on and off and F6 reflections, and each can be
-clicked too. A small font and a large terminal give the most detail.
+(shown as achieved/target), F5 switches shadows on and off, F6 reflections, and F7 the detail between
+high (every model as it is, the default) and standard (levels of detail: objects small on screen drawn
+from simpler copies, see `Renderer.simplify`), and each can be clicked too (where the status line is short of room, detail
+isn't drawn there, but F7 still works). A small font and a large terminal give the most detail.
 
 - **dice** (`python3 -m unicode3d`): textured dice that tumble onto a table, casting shadows, and
   land on a chosen face; f changes what they are made of (plastic, rubber, chrome, pearl), g makes
@@ -1035,7 +1037,8 @@ the user changes it, or you can read `widget.value` every frame.
 
 `DisplayControls()` is the display settings panel from Zombie Dice: glyphs on F2, colours on F3 and
 the frame rate (achieved/target) on F4, each also clickable; `DisplayControls(renderer=renderer)`
-adds shadows on F5 and reflections on F6. Draw it every frame; its `width` stays fixed as the values
+adds shadows on F5, reflections on F6 and detail on F7 ("standard" sets `renderer.simplify` to 1,
+"high" to 0). Draw it every frame; its `width` stays fixed as the values
 change. `DisplayControls(show=("fps",))` draws only the frame rate, while all the keys still work (for
 a program with a settings page of its own, built from `controls.glyphs`, `controls.fps` and the
 others). `controls.settings()` gives the values as a dict ready for JSON, and `controls.apply(values)`
@@ -1216,7 +1219,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `terminal.py`   | `Screen` (cell grid, text, labels, meters, frames, diffed output, held keys), `run`, `compile_kernels`, command-line display flags |
 | `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
-| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections on F2-F6) |
+| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections, detail on F2-F7) |
 | `threads.py`    | `kernel_lock()`, which keeps threads from launching parallel kernels at once where Numba's threading layer can't take it; `prefer_sleeping_workers()` |
 | `precompile.py` | compiling the kernels on several cores at once on the first run (their argument types are in `kernel_signatures.py`) |
 | `kernel_cache.py` | dropping cached kernels compiled with helpers (in other modules) that have since changed |
