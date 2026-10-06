@@ -312,7 +312,7 @@ class Model:
         """The model as it stands now, in as few parts as draw it the same: for things that stand still (scenery, a
         building, a tree), which draw quicker as a few big meshes than as dozens of small ones. Returns a new Model
         whose root is posed, parented and shown as this one's is, with its parts in root's space: those that look
-        alike (the same specular, shininess, emissive, double_sided and cast_shadows) merged into one mesh
+        alike (the same specular, shininess, emissive, double_sided, cast_shadows and simplify) merged into one mesh
         (merge_meshes: textures and normals kept, each part's colour multiplied into its mesh's colours), and
         those that can't merge (see-through, with holes in their textures, or reflective) each moved into a mesh
         of its own. Hidden parts are left out; it has no nodes or animations (its parts no longer move apart).
@@ -332,7 +332,7 @@ class Model:
                                                             for m in range(len(mesh.textures)))))
             look = ((id(part),) if alone else ()) + (
                 float(part.specular), part.shininess, float(part.emissive), bool(part.double_sided),
-                bool(part.cast_shadows))
+                bool(part.cast_shadows), bool(part.simplify))
             groups.setdefault(look, []).append((part, linear[r], position[r]))
         root = Node(np.array(self.root.position, dtype=float), np.array(self.root.rotation, dtype=float),
                     _copy.copy(self.root.scale), self.root.visible, self.root.parent)
@@ -343,7 +343,7 @@ class Model:
                                     double_sided=first.double_sided, parent=root, emissive=first.emissive,
                                     cast_shadows=first.cast_shadows, opacity=first.opacity,
                                     reflectivity=first.reflectivity, specular=first.specular,
-                                    shininess=first.shininess))
+                                    shininess=first.shininess, simplify=first.simplify))
         return Model(root, objects, materials=dict(self.materials), warnings=list(self.warnings))
 
     def world_bounds(self):

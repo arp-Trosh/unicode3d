@@ -650,6 +650,11 @@ class RenderTests(unittest.TestCase):
         np.testing.assert_allclose(np.median(diff[a.drawn]), 0.0, atol=1e-3)
         np.testing.assert_allclose(union_bounds(parts[:4]), baked.world_bounds(), atol=1e-9)  # (the hidden one left out)
         self.assertIs(parts[0].parent, root)  # (the model is left as it was)
+        # A part kept out of levels of detail (simplify=False) stays out of them, in a mesh of its own.
+        parts[2].simplify = False
+        baked = model.bake()
+        self.assertEqual(sorted((o.opacity, o.simplify) for o in baked), [(0.5, True), (1.0, False), (1.0, True)])
+        self.assertEqual(len(next(o for o in baked if not o.simplify).mesh.faces), len(parts[2].mesh.faces))
 
     def test_objects_out_of_view_are_skipped_whole(self):
         camera = Camera(position=np.array([0.0, 0.0, 5.0]))
