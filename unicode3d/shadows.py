@@ -21,6 +21,8 @@ SHADOW_COLUMNS = 10  # per shadow map: kind (0: a Light's, 1: a face of a PointL
                      # size, texel width (a Light's: in the world; a face's: per unit of distance from the light),
                      # depth bias (a Light's: in depth; a face's: in texels), softness, the PointLight's position
                      # (3), whether see-through things are in it (1: its texels in trans are filled in)
+BOX_FILTER = 1.5  # shadow filter radii (texels) up to 1 weigh each texel they cover, up to this take 3 x 3 texels
+SMALL_FILTER = 3.0  # and up to this take 2 x 2 bilinear samples (beyond it 4 x 4)
 CUBE_MARGIN = 8  # texels around each face of a cube map beyond its 90 degrees, so that filtering stays inside it
 _NO_SHADOWS = (np.zeros(0, np.float32), np.zeros((4, 0), np.float32), np.zeros((0, 4, 4)),
                np.zeros((0, SHADOW_COLUMNS)))  # when no light has any
@@ -54,8 +56,9 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
 
     The map is averaged over a square around the point (percentage-closer filtering): softness texels
     either way, or half the pixel's footprint if that is more, so that shadow edges are smoothed at
-    least like the edges of shapes are. Small squares weight each texel by how much of it they cover;
-    large ones take 4 x 4 samples, each blending its 4 nearest texels. The point is first moved off the
+    least like the edges of shapes are. Squares up to a texel either way weight each texel by how much of it
+    they cover; up to BOX_FILTER, two bilinear samples along each axis half a texel either way of the point (3 x 3
+    texels); larger ones take 2 x 2 samples (up to SMALL_FILTER) or 4 x 4, each blending its 4 nearest texels. The point is first moved off the
     surface along its normal, more the more the surface slopes away from the light and the larger the
     square, so that the surface does not shadow itself.
 
@@ -95,7 +98,22 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
     if not (abs(u) < 1e9 and abs(v) < 1e9):  # far outside the map (or NaN): nothing there casts a shadow
         return 1.0, 1.0, 1.0, 1.0
     lit = tr = tg = tb = 0.0
-    if radius <= 3.0:  # at most 8 x 8 texels
+    if 1.0 < radius <= BOX_FILTER:  # two bilinear samples half a texel either way, along each axis: 3 x 3 texels
+        x0, y0 = int(np.floor(u - 0.5)), int(np.floor(v - 0.5))
+        fx, fy = u - 0.5 - x0, v - 0.5 - y0
+        for j in range(3):
+            wy = 1.0 - fy if j == 0 else 1.0 if j == 1 else fy
+            for i in range(3):
+                w = wy * (1.0 - fx if i == 0 else 1.0 if i == 1 else fx)
+                if w <= 0.0:
+                    continue
+                if _lit_texel(texels, offset, size, x0 + i, y0 + j, d):
+                    lit += w
+                if tinted:
+                    r, g, b = _through(trans, offset, size, x0 + i, y0 + j, d)
+                    tr, tg, tb = tr + w * r, tg + w * g, tb + w * b
+        total = 4.0
+    elif radius <= BOX_FILTER:  # at most 3 x 3 texels
         for y in range(int(np.floor(v - radius + 0.5)), int(np.floor(v + radius + 0.5)) + 1):
             wy = min(v + radius, y + 0.5) - max(v - radius, y - 0.5)
             if wy <= 0.0:
@@ -111,13 +129,14 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
                     tr, tg, tb = tr + wx * wy * r, tg + wx * wy * g, tb + wx * wy * b
         total = 4.0 * radius * radius
     else:
-        step = radius / 2.0
-        for j in range(4):
-            sv = v + (j - 1.5) * step
+        taps = 2 if radius <= SMALL_FILTER else 4  # bilinear samples either way
+        step = 2.0 * radius / taps
+        for j in range(taps):
+            sv = v + (j - 0.5 * (taps - 1)) * step
             y0 = int(np.floor(sv))
             fy = sv - y0
-            for i in range(4):
-                su = u + (i - 1.5) * step
+            for i in range(taps):
+                su = u + (i - 0.5 * (taps - 1)) * step
                 x0 = int(np.floor(su))
                 fx = su - x0
                 for y, x, w in ((y0, x0, (1.0 - fy) * (1.0 - fx)), (y0, x0 + 1, (1.0 - fy) * fx),
@@ -127,7 +146,7 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
                     if tinted:
                         r, g, b = _through(trans, offset, size, x, y, d)
                         tr, tg, tb = tr + w * r, tg + w * g, tb + w * b
-        total = 16.0
+        total = float(taps * taps)
     if not tinted:
         return lit / total, 1.0, 1.0, 1.0
     return lit / total, min(tr / total, 1.0), min(tg / total, 1.0), min(tb / total, 1.0)
