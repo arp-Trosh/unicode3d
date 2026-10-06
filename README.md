@@ -42,7 +42,7 @@ Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it.
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.14.0
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.15.0
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
@@ -1283,7 +1283,7 @@ Releases are git tags (`v0.1.0`, ...) following [semantic versioning](https://se
 release (`0.1.1`) fixes bugs, a minor release (`0.2.0`) adds features, and before 1.0 a minor release
 may also change the API. `unicode3d.__version__` holds the version. The `main` branch can be ahead
 of the latest tag; pin a tag in a game. To release: bump `__version__` in `unicode3d/__init__.py`,
-commit, then tag it and push the tag (`git tag v0.14.0 && git push --tags`).
+commit, then tag it and push the tag (`git tag v0.15.0 && git push --tags`).
 
 </details>
 
