@@ -203,6 +203,37 @@ def bin_bands(xs, ys, select, want, height, span, per_chunk, band_start, band_tr
                     cursor[b] += 1
 
 
+SPAN_SLACK = 1e-6  # pixels a row's span is widened by at least
+SPAN_ROUNDING = 1e-12  # and this much per pixel of the coordinates' size: about 1,000 times the rounding error
+
+
+@njit(cache=True, error_model="numpy")
+def _row_span(lo, hi, xa, ya, ex, ey, per_area, cy_lo, cy_hi, width):
+    """(lo, hi) narrowed to the sample x positions where the barycentric weight of edge (xa, ya) + t (ex, ey) can
+    pass rasterize()'s test (weight >= -1e-4) at some sample height cy_lo..cy_hi: the weight is
+    (ex (cy - ya) - ey (cx - xa)) / area, a straight line in cx.
+
+    The span is a pre-filter: every sample inside it still gets the exact tests, so it only has to be sure not to
+    leave out a sample they would pass. Worked out in floating point a different way from them, it can be off by
+    rounding, so it is widened by SPAN_SLACK plus SPAN_ROUNDING times the sizes involved (the coordinates, and how
+    far the edge's height makes cx move: unbounded for an edge within a hair of horizontal, which then narrows
+    nothing). Comparisons that are false for NaN leave (lo, hi) as they are."""
+    d = -ey * per_area  # how the weight changes with cx
+    if d == 0.0:  # a horizontal edge: it bounds rows, which the bounding box does already
+        return lo, hi
+    g = ex * per_area  # with cy
+    a, b = g * (cy_lo - ya), g * (cy_hi - ya)
+    c = (a if a > b else b) + d * -xa  # the weight at cx = 0, at the row's best sample height
+    edge = (-1e-4 - c) / d  # where the weight crosses the threshold
+    slack = SPAN_SLACK + SPAN_ROUNDING * ((abs(a) + abs(b)) / abs(d) + abs(xa) + abs(edge) + width + 2.0)
+    if d > 0.0:  # the weight grows with cx: samples left of the edge fail
+        if edge - slack > lo:
+            lo = edge - slack
+    elif edge + slack < hi:
+        hi = edge + slack
+    return lo, hi
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
 def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_start, band_tris, see, attrs, chain, lod,
               texels, levels, first, clear):
@@ -215,6 +246,9 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
     xs, ys, inv_w: (T, 3) pixel coordinates and 1/w of each triangle corner.
     band_tris[band_start[b]:band_start[b + 1]]: the triangles that may touch band b of
     ROW_BAND rows, in order (from count_bands and bin_bands).
+
+    Each row of a triangle is walked only over the pixels its edges allow (_row_span), not its whole bounding box;
+    the samples there get the same tests, so the result is the same as testing every sample in the box.
 
     Where triangles tie, the first one wins. Rows of pixels are split into bands
     that are rasterized in parallel (in a scattered order, see _scattered), each band
@@ -260,7 +294,13 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
             holes = see[t] == 2
             per_area = 1.0 / area  # (multiplying by it is several times quicker than dividing by area)
             for py in range(by0, by1 + 1):
-                for px in range(bx0, bx1 + 1):
+                # Only the pixels of this row whose samples might pass all three edge tests (see _row_span).
+                lo, hi = bx0 + oxmin, bx1 + oxmax
+                lo, hi = _row_span(lo, hi, x1, y1, x2 - x1, y2 - y1, per_area, py + oymin, py + oymax, width)
+                lo, hi = _row_span(lo, hi, x2, y2, x0 - x2, y0 - y2, per_area, py + oymin, py + oymax, width)
+                lo, hi = _row_span(lo, hi, x0, y0, x1 - x0, y1 - y0, per_area, py + oymin, py + oymax, width)
+                ax, bx = pixel_range(lo - oxmax, hi - oxmin, bx0, bx1)
+                for px in range(ax, bx + 1):
                     col = slots[py * width + px]
                     if col < 0:
                         continue
