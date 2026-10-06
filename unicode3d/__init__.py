@@ -6,7 +6,7 @@ Draws with Unicode block characters in 24-bit, 256 or 16 colours, whatever the
 terminal supports, with an ASCII fallback; runs in Windows Terminal and Unix
 terminals alike. Ported in spirit from https://github.com/ShakedAp/ASCII-renderer.
 """
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 from .threads import prefer_sleeping_workers as _prefer_sleeping_workers
 
