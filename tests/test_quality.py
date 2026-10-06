@@ -33,7 +33,7 @@ def play(quality, seconds, frame_time, target=TARGET):
 class AutoQualityTests(unittest.TestCase):
     def test_steps_down_in_order_while_slow_and_never_touches_shadows(self):
         r = renderer()
-        q = AutoQuality(r, "auto")
+        q = AutoQuality(r, "auto", min_fps=0)
         self.assertEqual(play(q, 30, lambda level: 0.1), [0, 1, 2, 3, 4])
         self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[3]])  # (70% replaces 85%)
         self.assertEqual((r.edge_samples, r.simplify, r.max_pixels), (0, 2.0, int(0.7 * 200 * 120)))
@@ -43,18 +43,18 @@ class AutoQualityTests(unittest.TestCase):
         self.assertEqual((r.edge_samples, r.simplify, r.max_pixels), (8, 1.0, Renderer(1, 1).max_pixels))
 
     def test_stops_where_frames_keep_up(self):
-        q = AutoQuality(renderer(), "auto")
+        q = AutoQuality(renderer(), "auto", min_fps=0)
         # Edge samples off is enough here: frames then take 0.9 of the target, neither slow nor with time to spare.
         self.assertEqual(play(q, 60, lambda level: TARGET * (1.3 if level == 0 else 0.9)), [0, 1])
 
     def test_one_slow_frame_is_not_enough(self):
-        q = AutoQuality(renderer(), "auto")
+        q = AutoQuality(renderer(), "auto", min_fps=0)
         frames = iter([0.5] + [0.02] * 100000)
         self.assertEqual(play(q, 20, lambda level: next(frames)), [0])
 
     def test_frames_reused_unchanged_do_not_count(self):
         r = renderer()
-        q = AutoQuality(r, "auto")
+        q = AutoQuality(r, "auto", min_fps=0)
         for _ in range(200):  # cheap frames the renderer didn't draw: they say nothing about drawing
             q.update(0.001, TARGET)
         play(q, 3, lambda level: 0.1)
@@ -66,7 +66,7 @@ class AutoQualityTests(unittest.TestCase):
 
     def test_settles_rather_than_flickering_between_two_steps(self):
         # Fast enough to step up from level 1, too slow once there: each try is undone, and the tries get rarer.
-        q = AutoQuality(renderer(), "auto")
+        q = AutoQuality(renderer(), "auto", min_fps=0)
         levels = play(q, 300, lambda level: TARGET * (1.2 if level == 0 else 0.5))
         tries = levels.count(0) - 1  # steps back up to 0
         self.assertGreaterEqual(tries, 2)
@@ -75,7 +75,7 @@ class AutoQualityTests(unittest.TestCase):
 
     def test_the_users_settings_are_the_ceiling(self):
         r = renderer()
-        q = AutoQuality(r, "auto")
+        q = AutoQuality(r, "auto", min_fps=0)
         play(q, 10, lambda level: 0.1)
         self.assertEqual(q.level, 4)
         r.edge_samples = 4  # the program changes a setting itself: that is the user's choice now
@@ -87,6 +87,19 @@ class AutoQualityTests(unittest.TestCase):
         self.assertEqual(play(q, 30, lambda level: 0.1)[-1], 2)
         self.assertEqual((q.level, q.steps), (2, [STEPS[3]]))
         self.assertEqual(r.simplify, 3.0)
+
+    def test_steps_down_only_below_min_fps(self):
+        # Aiming at 30 fps, frames at 22-29 fps are left as they are (the game plays well there); below 20 it steps.
+        q = AutoQuality(renderer(), "auto")
+        self.assertEqual(q.min_fps, 20)
+        self.assertEqual(play(q, 30, lambda level: 1 / 22), [0])
+        self.assertEqual(play(q, 30, lambda level: 1 / 18 if level == 0 else 1 / 24), [0, 1])
+        # Back up only with room to spare below a 20 fps frame (FAST of it: 37.5 ms, under 27 fps).
+        self.assertEqual(play(q, 60, lambda level: 1 / 25), [1])
+        self.assertEqual(play(q, 60, lambda level: 1 / 30), [1, 0])
+        # A target slower than min_fps still counts: aiming at 15 fps, 18 fps is fine.
+        q = AutoQuality(renderer(), "auto")
+        self.assertEqual(play(q, 30, lambda level: 1 / 18, target=1 / 15), [0])
 
     def test_render_scale_follows_the_framebuffer(self):
         r = renderer()

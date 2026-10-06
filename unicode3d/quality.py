@@ -9,6 +9,7 @@ STEPS = ("edge samples off", "detail 2 px", "render scale 85%", "render scale 70
 SIMPLIFY = 2.0  # Renderer.simplify at the "detail" step (pixels)
 SCALES = (0.85, 0.70)  # parts of the framebuffer's pixels drawn at the "render scale" steps
 
+MIN_FPS = 20.0  # by default, steps down only while frames run slower than this (as well as than the target)
 WINDOW = 1.0  # seconds of frames judged at a time (and at least MIN_FRAMES of them)
 MIN_FRAMES = 5
 SLOW = 1.10  # a step down when the median frame takes more than this times the target
@@ -36,13 +37,17 @@ class AutoQuality:
     Call update(frame_time, target) once a frame with how long the last frame took to make (seconds, without any
     wait for the frame rate) and the time a frame may take. It judges the median of about a second of frames, so
     one slow frame doesn't step it down; frames the renderer reused unchanged (Renderer.draws not counting up) and
-    frames of no measured time are left out. Steps down when frames take more than SLOW times the target; steps up
-    when they take less than FAST times it for FAST_FOR seconds, waiting BACK_OFF times longer each time a step up
-    had to be undone (up to MAX_WAIT), so that it settles rather than flickering between two steps.
+    frames of no measured time are left out. Steps down when frames take more than SLOW times the target and are
+    slower than min_fps frames a second (the picture is only given up for frame rates that get in the way: a game
+    aiming at 30 plays well at 20); steps up when they take less than FAST times the target, or than FAST times a
+    min_fps frame if that is longer, for FAST_FOR seconds, waiting BACK_OFF times longer each time a step up had to
+    be undone (up to MAX_WAIT), so that it settles rather than flickering between two steps. min_fps 0: the target
+    alone.
     """
 
-    def __init__(self, renderer, mode="high"):
+    def __init__(self, renderer, mode="high", min_fps=MIN_FPS):
         self.renderer = renderer
+        self.min_fps = min_fps
         self._user = self._settings()
         self._applied = dict(self._user)  # what this last set
         self.level = 0  # steps down from the user's settings
@@ -110,12 +115,15 @@ class AutoQuality:
             return
         typical = statistics.median(self._times)
         self._times, self._span = [], 0.0
-        if typical > SLOW * target and self.level < len(self._steps()):
+        slow, fast = SLOW * target, FAST * target
+        if self.min_fps > 0.0:  # (and no steps down above min_fps)
+            slow, fast = max(slow, 1.0 / self.min_fps), max(fast, FAST / self.min_fps)
+        if typical > slow and self.level < len(self._steps()):
             if self._since_up is not None and self._since_up < UNDONE:
                 self._wait = min(self._wait * BACK_OFF, MAX_WAIT)  # the step up didn't hold
             self._since_up, self._fast_for = None, 0.0
             self._set_level(self.level + 1)
-        elif typical < FAST * target and self.level > 0:
+        elif typical < fast and self.level > 0:
             self._fast_for += WINDOW
             if self._fast_for >= self._wait:
                 self._fast_for, self._since_up = 0.0, 0.0

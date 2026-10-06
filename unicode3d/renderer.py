@@ -71,6 +71,7 @@ def _same(a, b):
 
 _mesh_of = operator.attrgetter("mesh")
 _color_of = operator.attrgetter("color")
+_simplify_of = operator.attrgetter("simplify")
 _drawing_attrs = operator.attrgetter("double_sided", "emissive", "cast_shadows", "opacity", "reflectivity",
                                      "specular", "shininess")
 
@@ -417,7 +418,8 @@ class Renderer(ShadowMaps, Mirrors):
     where it is drawn in the mesh's place, for objects small on screen; 0 (the default) draws every mesh as it
     is. About 1 makes scenes of many detailed models faster (Castle Panic: half the triangles drawn) for a
     change to the picture of under a pixel. Levels are made for a mesh the first time it is small enough to use
-    one, a few meshes a frame (detail.detail_levels makes them ahead of time).
+    one, a few meshes a frame (detail.detail_levels makes them ahead of time). Objects with simplify=False
+    (lettering, say) are always drawn as they are.
     """
 
     def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
@@ -680,8 +682,9 @@ class Renderer(ShadowMaps, Mirrors):
         flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
         version = None
         if self.simplify > 0 and camera is not None:  # (every level of each mesh packed, and which one each draws)
+            simplified = np.fromiter(map(_simplify_of, objs), np.bool_, len(objs))
             meshes, keys, mesh_idx, version = self._detail(meshes, keys, flat, mesh_idx, linear, where, shine > 0.0,
-                                                           camera)
+                                                           simplified, camera)
         placed = self._pack
         if placed is None or placed[0] is not version or not _same(placed[1], flat):
             arrays, at_pack, pack_keys = self._packer.pack(meshes, keys)
@@ -703,12 +706,13 @@ class Renderer(ShadowMaps, Mirrors):
                 "emissive": _numbers(emissive), "cast": np.array(cast, np.bool_), "pack": arrays,
                 "keys": keys, "mesh_keys": mesh_keys}
 
-    def _detail(self, meshes, keys, flat, mesh_idx, linear, where, shiny, camera):
+    def _detail(self, meshes, keys, flat, mesh_idx, linear, where, shiny, simplified, camera):
         """Levels of detail (detail.py) for the instances seen from camera: (meshes, keys, mesh_idx, version), with
         every level of each mesh among the meshes (so that an object changing level doesn't repack anything), each
         instance's mesh the coarsest level that moves no vertex more than `simplify` pixels on screen. Shiny
         objects (shiny: (N,) bool) never take a level that is flat where their mesh isn't: a flat shiny mesh is
-        a mirror (see Mirrors), a pass over the whole scene. Levels are made for a mesh once an object showing it
+        a mirror (see Mirrors), a pass over the whole scene; objects not `simplified` ((N,) bool: Object3D.simplify)
+        are drawn as they are. Levels are made for a mesh once an object showing it
         is small enough to use one, for at most DETAIL_BUDGET seconds a frame; until then it is drawn as it is. version
         is the same object while the meshes are the same."""
         memo = self._detail_memo
@@ -723,7 +727,7 @@ class Renderer(ShadowMaps, Mirrors):
         centre = np.einsum("nij,nj->ni", linear, spheres[mesh_idx, :3]) + where
         nearest = np.sqrt(((centre - eye) ** 2).sum(axis=1)) - spheres[mesh_idx, 3] * stretch
         allowed = float(self.simplify) * self._pixel_size(camera) * nearest / stretch
-        allowed = np.where(np.isfinite(allowed) & (nearest > float(camera.near)), allowed, 0.0)
+        allowed = np.where(np.isfinite(allowed) & (nearest > float(camera.near)) & simplified, allowed, 0.0)
         # Levels for meshes now small enough to use one, within the budget.
         wanted = np.zeros(len(meshes), np.bool_)
         wanted[mesh_idx[allowed >= FINEST * spheres[mesh_idx, 3]]] = True  # (no level moves less than that, nearly)

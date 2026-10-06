@@ -420,7 +420,7 @@ class DisplayControls(Panel):
     from simpler copies of their meshes that differ by at most a pixel (levels of detail, Renderer.simplify 1),
     "high" every mesh as it is (simplify 0). Quality (quality.AutoQuality, as `self.auto_quality`): "high" draws
     as the other settings say (the default); "auto" steps the picture down below them while frames take longer
-    than the frame rate allows, and back up when there is time (shown as "auto -n", n steps down); "fast" holds
+    than the frame rate allows and run under AutoQuality.min_fps (20), and back up when there is time (shown as "auto -n", n steps down); "fast" holds
     the lowest step. Shadows and reflections are left as they are set. Frames are timed by run()
     (screen.frame_time), once a frame when the controls are drawn or handled. quality: the mode to start in (None:
     the renderer's as it is; DisplayControls on one renderer share its AutoQuality.of()).

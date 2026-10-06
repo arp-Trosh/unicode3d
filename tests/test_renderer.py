@@ -554,6 +554,10 @@ class RenderTests(unittest.TestCase):
         self.assertLess(fewer, faces / 3)
         self.assertLess(np.abs(simple.colour() - full.colour()).mean(), 0.01)
         self.assertLessEqual(abs(int(full.drawn.sum()) - int(simple.drawn.sum())), 3)  # (of about 75)
+        # An object with simplify=False (lettering, say) is drawn as it is, however small, beside one that isn't.
+        exact = Object3D(ball, color=(200, 100, 50), simplify=False)
+        _, both, _ = drawn([exact, Object3D(ball, position=np.array([1.5, 0.0, 0.0]))], far, 1.0)
+        self.assertEqual(both, faces + fewer)
         # A flattened ball's coarsest levels are flat: a shiny one never takes those (a flat shiny mesh is a
         # mirror); a matt one does.
         slab = blob_mesh((1.0, 0.02, 1.0), rings=24, segments=32)

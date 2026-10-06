@@ -1054,8 +1054,9 @@ pixels and stretched (softer). Shadows and reflections are never changed. It onl
 settings as the user (or the program) set them, and those are what F7 and `settings()` show; the bar shows
 "auto -2" while two steps down. It judges about a second of frames at a time (`run()` times each frame,
 `screen.frame_time`, without the wait for the frame rate), steps down when they take over 10% longer than
-allowed and back up after 3 s with a quarter to spare, waiting longer each time a step up doesn't hold, so it
-settles instead of flickering. "fast" holds the lowest step; "high", the default, leaves the renderer as it is
+allowed and run under 20 fps (`AutoQuality.min_fps`: a game aiming at 30 plays well at 20, so the picture is
+kept until frames get that slow; 0 for the frame rate alone) and back up after 3 s with a quarter to spare,
+waiting longer each time a step up doesn't hold, so it settles instead of flickering. "fast" holds the lowest step; "high", the default, leaves the renderer as it is
 (benchmarks and tests stay repeatable). The same works without `DisplayControls`:
 `AutoQuality.of(renderer).update(frame_seconds, 1 / fps)` once a frame (`unicode3d.quality`).
 
@@ -1132,7 +1133,10 @@ many pixels; shiny objects never take a level that would make them flat (a flat 
 mirror). Levels are made for a mesh the first time it is small enough to use one, a few meshes a
 frame; call `detail_levels(mesh)` ahead of time (while loading, say) to have them ready. In Castle
 Panic at 1 pixel it draws half the triangles and its frames are about 15% faster, the picture
-changed by a shade here and there.
+changed by a shade here and there. Moving a corner a pixel or two can close the gap in a letter, or
+sink a thin plate laid on another part (a shield's painted face on its back) behind it, as each part's
+levels are made on their own. Give such parts `Object3D(..., simplify=False)`: they are always drawn as
+they are.
 
 **Huge terminals.** A full-screen terminal with a tiny font can have a million cells or more: kitty
 at font size 2 on a 1080p screen is about 960x215 cells, 1920x645 pixels in `sextant` mode. Frames

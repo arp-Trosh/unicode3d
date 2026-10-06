@@ -183,6 +183,10 @@ class Object3D(_Placed):
                             # (cloth, rubber, stone), more than 1 for glossier ones than the lights are set for
     shininess: float = None  # how tight its highlights are (the Blinn-Phong exponent): about 5 is broad and soft,
                              # 100 a pin-point, as on chrome; None takes each light's `shininess`
+    simplify: bool = True   # whether a level of detail may stand in for its mesh (Renderer.simplify): False for
+                            # shapes that every edge matters to, such as lettering, which a level of detail can
+                            # make illegible (it may move corners a pixel or two, closing the gaps in a letter),
+                            # and thin plates laid on other parts, which it can sink behind them
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
