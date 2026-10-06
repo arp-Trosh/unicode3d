@@ -463,7 +463,8 @@ class Renderer(ShadowMaps, Mirrors):
         self._buffers = _Buffers()
         self._shadows = None  # (what the shadow maps depend on, the maps as _shadow_maps() returns them)
         self._settled = {}  # each shadowed light's map of its settled casters (shadows._Settled), by light
-        self._caster_ages = {}  # shadow draws each solid caster's row has been unchanged for
+        self._caster_ages = None  # (shadows._Rows of the solid casters, shadow draws each has been unchanged for)
+        self._caster_meshes = None  # (the pack's mesh keys, the id of each one's Mesh, the keys by those ids)
         self._shadow_draws = 0
         self.resize(width, height)
 
@@ -626,7 +627,8 @@ class Renderer(ShadowMaps, Mirrors):
         forget_levels()
         self._shadows = None
         self._settled = {}
-        self._caster_ages = {}
+        self._caster_ages = None
+        self._caster_meshes = None
 
     def _instances(self, objects, camera=None):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and

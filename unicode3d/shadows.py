@@ -203,28 +203,66 @@ _NO_BASE = np.zeros((0, 0), np.float32)  # rasterize_depth's base when there is 
 SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins the settled ones (see _shadow_maps)
 
 
-def _caster_rows(inst):
-    """Each instance's mesh (the Mesh itself, not its place in the pack, which moves as meshes come and go), pose,
-    colour and opacity as bytes: what its part of a shadow map is drawn from."""
-    mesh = np.array([id(key[0]) for key in inst["mesh_keys"]], np.int64)[inst["mesh"]]
-    rows = np.concatenate([mesh[:, None].view(np.float64), inst["pos"], inst["lin"].reshape(-1, 9), inst["rgb"],
-                           inst["alpha"][:, None]], axis=1)
-    return np.ascontiguousarray(rows).view(f"V{rows.shape[1] * 8}").ravel().tolist()
+_ROW_MIX = np.random.default_rng(1).integers(1, 2 ** 63, 17, dtype=np.uint64) * np.uint64(2) + np.uint64(1)  # odd
+
+
+def _caster_rows(inst, mesh_ids):
+    """Each instance's mesh (the Mesh itself, by its id in mesh_ids, not its place in the pack, which moves as meshes
+    come and go), pose, colour and opacity: what its part of a shadow map is drawn from. Returns their bits ((N, 17)
+    uint64) and a hash of each row ((N,) uint64)."""
+    rows = np.concatenate([mesh_ids[inst["mesh"]][:, None].view(np.float64), inst["pos"], inst["lin"].reshape(-1, 9),
+                           inst["rgb"], inst["alpha"][:, None]], axis=1).view(np.uint64)
+    return rows, (rows * _ROW_MIX).sum(axis=1, dtype=np.uint64)  # (wrapping round)
+
+
+class _Rows:
+    """Rows of _caster_rows() (each once), sorted by their hashes, to look others up among them."""
+
+    def __init__(self, rows, hashes):
+        order = np.argsort(hashes, kind="stable")
+        rows, hashes = rows[order], hashes[order]
+        # The same row twice has the same hash, so copies sit together (unless a row of the same hash comes between,
+        # which only makes the map a little slower: a copy left in is never found, so the map never looks current).
+        once = np.ones(len(rows), np.bool_)
+        once[1:] = (rows[1:] != rows[:-1]).any(axis=1)
+        self.rows, self.hashes, self.order = rows[once], hashes[once], order[once]
+
+    def __len__(self):
+        return len(self.hashes)
+
+    def find(self, rows, hashes):
+        """Where each of `rows` (with their hashes) is among these, -1 for those that aren't. (A row is looked for
+        only at the first of its hash: one of another row's hash before it hides it, which is as if it weren't
+        there.)"""
+        if not len(self.hashes):
+            return np.full(len(hashes), -1, np.int64)
+        at = np.minimum(np.searchsorted(self.hashes, hashes), len(self.hashes) - 1)
+        return np.where((self.rows[at] == rows).all(axis=1), at, -1)
 
 
 class _Settled:
-    """A light's shadow map of its settled casters (base), the rows they were drawn from, what the map's view
-    was then (key), their meshes' keys then (renderer._mesh_key, by id of the Mesh: replacing a mesh's arrays
-    changes its key) and when it was made or last looked over for casters newly settled (a shadow draw's number)."""
+    """A light's shadow map of its settled casters (base), the rows they were drawn from (a _Rows), what the map's
+    view was then (key), their meshes' keys then (renderer._mesh_key, by id of the Mesh: replacing a mesh's arrays
+    changes its key), the pack's list of keys they were last checked against (mesh_keys) and when it was made or last
+    looked over for casters newly settled (a shadow draw's number)."""
 
-    def __init__(self, key, meshes, rows, base, made):
-        self.key, self.meshes, self.rows, self.base, self.made = key, meshes, rows, base, made
+    def __init__(self, key, mesh_keys, meshes, rows, base, made):
+        self.key, self.mesh_keys, self.meshes, self.rows = key, mesh_keys, meshes, rows
+        self.base, self.made = base, made
 
-    def current(self, key, meshes, rows):
-        """Whether it still holds: the same view, its meshes unchanged, and every one of its rows among `rows`."""
-        return (key == self.key and self.rows <= rows
-                and all(len(now := meshes.get(i, ())) == len(then) and all(map(operator.is_, now, then))
-                        for i, then in self.meshes.items()))
+    def current(self, key, mesh_keys, meshes, found):
+        """Whether it still holds: the same view, its meshes unchanged (mesh_keys: the pack's keys; meshes: by id of
+        the Mesh), and every one of its rows among the casters (found: where each caster is among its rows)."""
+        if key != self.key:
+            return False
+        if mesh_keys is not self.mesh_keys:  # (the pack made again: the same list while its meshes are the same)
+            if not all(len(now := meshes.get(i, ())) == len(then) and all(map(operator.is_, now, then))
+                       for i, then in self.meshes.items()):
+                return False
+            self.mesh_keys = mesh_keys
+        present = np.zeros(len(self.rows), np.bool_)
+        present[found[found >= 0]] = True
+        return bool(present.all())
 
 
 class ShadowMaps:
@@ -283,14 +321,25 @@ class ShadowMaps:
         texels = buf.get("shadow_texels", (int(areas.sum()),), np.float32)
         clear = (inst["alpha"] < 1.0) | pack["tints"][inst["mesh"]]  # which objects light goes through
         trans = buf.get("shadow_trans", (4, int(areas.sum())), np.float32) if clear[cast].any() else _NO_SHADOWS[1]
-        # Which casters have settled (see above), by their rows.
-        rows, see_through = _caster_rows(inst), clear.tolist()
-        last_ages = self._caster_ages
-        self._caster_ages = ages = {row: last_ages.get(row, 0) + 1
-                                    for row in {rows[c] for c in cast.tolist() if not see_through[c]}}
+        # Which casters have settled (see above), by their rows: each solid caster's count of draws unchanged.
+        mesh_keys = inst["mesh_keys"]
+        memo = self._caster_meshes
+        if memo is None or memo[0] is not mesh_keys:  # (the same list while the pack is)
+            memo = self._caster_meshes = (mesh_keys, np.array([id(key[0]) for key in mesh_keys], np.int64),
+                                          {id(key[0]): key for key in mesh_keys})
+        _, mesh_ids, meshes = memo
+        rows, hashes = _caster_rows(inst, mesh_ids)
+        solid = cast[~clear[cast]]
+        age = np.zeros(len(rows), np.int64)  # (of solid casters)
+        age[solid] = 1
+        if self._caster_ages is not None:
+            known, last_age = self._caster_ages
+            at = known.find(rows[solid], hashes[solid])
+            age[solid] += np.where(at >= 0, last_age[np.maximum(at, 0)], 0)
+        known = _Rows(rows[solid], hashes[solid])
+        self._caster_ages = (known, age[solid[known.order]])
         self._shadow_draws += 1
         settled = self._settled
-        meshes = {id(key[0]): key for key in inst["mesh_keys"]}
         m = 0
         for nth, (view_mats, view_rows, casters, near) in enumerate(views):
             offset, n, sides, first = int(params[m, 1]), int(params[m, 2]), len(view_rows), m
@@ -300,24 +349,27 @@ class ShadowMaps:
                 depth.fill(0.0)
                 continue
             view_key = (view_mats.tobytes(), n)
-            listed = casters.tolist()
-            here = {rows[c] for c in listed if not see_through[c]}
+            here = casters[~clear[casters]]
             entry = settled.get(nth)
-            stale = entry is None or not entry.current(view_key, meshes, here)
+            found = None if entry is None else entry.rows.find(rows[here], hashes[here])
+            stale = entry is None or not entry.current(view_key, mesh_keys, meshes, found)
             if not stale and self._shadow_draws - entry.made >= SETTLE_DRAWS:  # any newly settled to take in?
-                stale = any(ages[row] >= SETTLE_DRAWS and row not in entry.rows for row in here)
+                stale = bool(((age[here] >= SETTLE_DRAWS) & (found < 0)).any())
                 entry.made = self._shadow_draws  # (if not, look again in as many draws)
             if stale:
                 entry = None
-                ready = frozenset(row for row in here if ages[row] >= SETTLE_DRAWS)
-                if ready:  # draw the settled casters' map afresh
-                    still = np.array([c for c in listed if not see_through[c] and rows[c] in ready], np.int64)
+                still = here[age[here] >= SETTLE_DRAWS]
+                if len(still):  # draw the settled casters' map afresh
                     self._draw_casters(pack, inst, still, view_mats, near, n, sides, depth, _NO_BASE, None, offset)
-                    used = {id(inst["mesh_keys"][i][0]): inst["mesh_keys"][i] for i in np.unique(inst["mesh"][still])}
-                    entry = _Settled(view_key, used, ready, depth.copy(), self._shadow_draws)
+                    used = {id(mesh_keys[i][0]): mesh_keys[i] for i in np.unique(inst["mesh"][still]).tolist()}
+                    entry = _Settled(view_key, mesh_keys, used, _Rows(rows[still], hashes[still]), depth.copy(),
+                                     self._shadow_draws)
+                    found = entry.rows.find(rows[here], hashes[here])
                 settled[nth] = entry
             if entry is not None:
-                casters = np.array([c for c in listed if see_through[c] or rows[c] not in entry.rows], np.int64)
+                kept = np.zeros(len(rows), np.bool_)
+                kept[here[found >= 0]] = True
+                casters = casters[~kept[casters]]
                 if not len(casters):
                     depth[:] = entry.base
                     continue
