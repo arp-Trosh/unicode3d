@@ -16,8 +16,11 @@ UP = np.array([0.0, 1.0, 0.0])
 
 
 def normalize(v):
+    """v scaled to length 1 (as it is if shorter than 1e-12). The length is the square root of the squares added up
+    in order, as the kernels work it out (animation._normalize4): np.linalg.norm goes through BLAS, whose rounding
+    differs between CPUs."""
     v = np.asarray(v, dtype=float)
-    n = np.linalg.norm(v)
+    n = math.sqrt(float((v * v).sum()))
     return v / n if n > 1e-12 else v
 
 
@@ -120,13 +123,18 @@ def quat_slerp(a, b, t):
     """The rotation a fraction t (0..1) of the way from quaternion a to b, turning at a steady rate about one
     axis (spherical linear interpolation), the short way round."""
     a, b = normalize(a), normalize(b)
-    d = float(np.dot(a, b))
+    d = float(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])  # (as the kernels do: see normalize)
     if d < 0.0:  # q and -q are the same rotation: go the shorter way
         b, d = -b, -d
     if d > 0.9995:  # nearly the same: a straight line, normalized, is as good and avoids dividing by ~0
         return normalize(a + t * (b - a))
-    angle = np.arccos(min(d, 1.0))
-    return (np.sin((1.0 - t) * angle) * a + np.sin(t * angle) * b) / np.sin(angle)
+    angle = math.acos(min(d, 1.0))
+    return (_sin((1.0 - t) * angle) * a + _sin(t * angle) * b) / _sin(angle)
+
+
+def _sin(x):
+    """math.sin(x), but NaN (as in the kernels and np.sin) rather than a ValueError for an infinity."""
+    return math.sin(x) if abs(x) < math.inf else math.nan
 
 def quat_between(u, v):
     """Shortest rotation taking direction u onto direction v."""
