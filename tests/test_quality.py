@@ -35,7 +35,7 @@ class AutoQualityTests(unittest.TestCase):
         r = renderer()
         q = AutoQuality(r, "auto")
         self.assertEqual(play(q, 30, lambda level: 0.1), [0, 1, 2, 3, 4])
-        self.assertEqual(q.steps, list(STEPS))
+        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[3]])  # (70% replaces 85%)
         self.assertEqual((r.edge_samples, r.simplify, r.max_pixels), (0, 2.0, int(0.7 * 200 * 120)))
         self.assertTrue(r.shadows and r.reflections)
         # Plenty of time again: back up, step by step, to the settings it started from.
@@ -85,7 +85,7 @@ class AutoQualityTests(unittest.TestCase):
         # A step that would change nothing is skipped: edge samples already off, high detail kept at 2 px.
         r.edge_samples, r.simplify = 0, 3.0
         self.assertEqual(play(q, 30, lambda level: 0.1)[-1], 2)
-        self.assertEqual(q.steps, list(STEPS[2:]))
+        self.assertEqual((q.level, q.steps), (2, [STEPS[3]]))
         self.assertEqual(r.simplify, 3.0)
 
     def test_render_scale_follows_the_framebuffer(self):

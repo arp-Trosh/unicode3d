@@ -88,8 +88,10 @@ class AutoQuality:
 
     @property
     def steps(self):
-        """The names of the steps taken now (of STEPS)."""
-        return [name for name, _, _ in self._steps()[:self.level]]
+        """The names of the steps in effect now (of STEPS), in order: a later step of the same setting replaces an
+        earlier one (render scale 70% replaces 85%)."""
+        taken = self._steps()[:self.level]
+        return [name for i, (name, setting, _) in enumerate(taken) if all(s != setting for _, s, _ in taken[i + 1:])]
 
     def update(self, frame_time, target):
         """Take the time the last frame took (seconds) and the time one may take; step if it is time to."""
