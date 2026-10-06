@@ -77,8 +77,9 @@ Every demo takes the [display options](#display-options), `--fps` included, and 
 settings at the bottom right: F2 cycles the glyph set, F3 the colours, F4 the target frame rate
 (shown as achieved/target), F5 switches shadows on and off, F6 reflections, and F7 the detail between
 high (every model as it is, the default) and standard (levels of detail: objects small on screen drawn
-from simpler copies, see `Renderer.simplify`), and each can be clicked too (where the status line is short of room, detail
-isn't drawn there, but F7 still works). A small font and a large terminal give the most detail.
+from simpler copies, see `Renderer.simplify`), and F8 the quality (high as set, auto, or fast: see
+[automatic quality](#automatic-quality)), and each can be clicked too (where the status line is short of room, detail
+and quality aren't drawn there, but F7 and F8 still work). A small font and a large terminal give the most detail.
 
 - **dice** (`python3 -m unicode3d`): textured dice that tumble onto a table, casting shadows, and
   land on a chosen face; f changes what they are made of (plastic, rubber, chrome, pearl), g makes
@@ -1037,13 +1038,26 @@ the user changes it, or you can read `widget.value` every frame.
 
 `DisplayControls()` is the display settings panel from Zombie Dice: glyphs on F2, colours on F3 and
 the frame rate (achieved/target) on F4, each also clickable; `DisplayControls(renderer=renderer)`
-adds shadows on F5, reflections on F6 and detail on F7 ("standard" sets `renderer.simplify` to 1,
-"high" to 0). Draw it every frame; its `width` stays fixed as the values
+adds shadows on F5, reflections on F6, detail on F7 ("standard" sets `renderer.simplify` to 1,
+"high" to 0) and quality on F8 (below). Draw it every frame; its `width` stays fixed as the values
 change. `DisplayControls(show=("fps",))` draws only the frame rate, while all the keys still work (for
 a program with a settings page of its own, built from `controls.glyphs`, `controls.fps` and the
 others). `controls.settings()` gives the values as a dict ready for JSON, and `controls.apply(values)`
 puts them back on the next run, skipping any this terminal can't take; where to keep them is up to the
 program.
+
+<a id="automatic-quality"></a>**Automatic quality.** On a slow machine, quality "auto" (F8, `DisplayControls(renderer=renderer, quality="auto")`, or
+`controls.apply({"quality": "auto"})`) lowers the picture while frames take longer than the frame rate
+allows, and raises it again when there is time to spare. The steps, in order: edge samples off (edges
+stay smoothed, more coarsely), levels of detail at 2 pixels, then the picture drawn at 85% and 70% of its
+pixels and stretched (softer). Shadows and reflections are never changed. It only ever goes below the
+settings as the user (or the program) set them, and those are what F7 and `settings()` show; the bar shows
+"auto -2" while two steps down. It judges about a second of frames at a time (`run()` times each frame,
+`screen.frame_time`, without the wait for the frame rate), steps down when they take over 10% longer than
+allowed and back up after 3 s with a quarter to spare, waiting longer each time a step up doesn't hold, so it
+settles instead of flickering. "fast" holds the lowest step; "high", the default, leaves the renderer as it is
+(benchmarks and tests stay repeatable). The same works without `DisplayControls`:
+`AutoQuality.of(renderer).update(frame_seconds, 1 / fps)` once a frame (`unicode3d.quality`).
 
 ```python
 from unicode3d.ui import Button, DisplayControls, Panel, Slider, Toggle
@@ -1219,7 +1233,8 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `terminal.py`   | `Screen` (cell grid, text, labels, meters, frames, diffed output, held keys), `run`, `compile_kernels`, command-line display flags |
 | `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
-| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections, detail on F2-F7) |
+| `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections, detail, quality on F2-F8) |
+| `quality.py`    | `AutoQuality`: the picture stepped down while frames run long, and back up (no kernels) |
 | `threads.py`    | `kernel_lock()`, which keeps threads from launching parallel kernels at once where Numba's threading layer can't take it; `prefer_sleeping_workers()` |
 | `precompile.py` | compiling the kernels on several cores at once on the first run (their argument types are in `kernel_signatures.py`) |
 | `kernel_cache.py` | dropping cached kernels compiled with helpers (in other modules) that have since changed |

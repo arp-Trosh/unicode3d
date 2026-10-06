@@ -25,6 +25,7 @@ DisplayControls is the panel of display settings every program can offer
 from .color import COLOR_MODES, Color
 from .glyphs import GLYPH_MODES
 from .keys import Key, MouseEvent
+from .quality import MODES as QUALITY_MODES, AutoQuality
 
 ACTIVATE = (Key.ENTER, 10, ord(" "))
 FPS_STEPS = (30, 60, 120, 144)
@@ -414,10 +415,15 @@ class Panel:
 
 class DisplayControls(Panel):
     """The display settings, each clickable and on a function key: glyphs (F2), colours (F3), frame rate (F4),
-    and, if given a Renderer, shadows (F5), reflections (F6) and detail (F7), which it switches with
+    and, if given a Renderer, shadows (F5), reflections (F6), detail (F7) and quality (F8), which it switches with
     renderer.shadows, renderer.reflections and renderer.simplify: "standard" detail draws objects small on screen
     from simpler copies of their meshes that differ by at most a pixel (levels of detail, Renderer.simplify 1),
-    "high" every mesh as it is (simplify 0).
+    "high" every mesh as it is (simplify 0). Quality (quality.AutoQuality, as `self.auto_quality`): "high" draws
+    as the other settings say (the default); "auto" steps the picture down below them while frames take longer
+    than the frame rate allows, and back up when there is time (shown as "auto -n", n steps down); "fast" holds
+    the lowest step. Shadows and reflections are left as they are set. Frames are timed by run()
+    (screen.frame_time), once a frame when the controls are drawn or handled. quality: the mode to start in (None:
+    the renderer's as it is; DisplayControls on one renderer share its AutoQuality.of()).
 
     The frame rate shows as achieved/target. Draw it every frame (it needs the
     screen it changes), e.g. at the bottom right:
@@ -432,12 +438,16 @@ class DisplayControls(Panel):
     say: keeping them in a file is the program's part).
     """
 
-    SETTINGS = ("glyphs", "color", "fps", "shadows", "reflections", "detail")
+    SETTINGS = ("glyphs", "color", "fps", "shadows", "reflections", "detail", "quality")
     DETAIL = {"standard": 1.0, "high": 0.0}  # each detail setting's Renderer.simplify
 
-    def __init__(self, fps_steps=FPS_STEPS, keyboard=False, renderer=None, show=None):
+    def __init__(self, fps_steps=FPS_STEPS, keyboard=False, renderer=None, show=None, quality=None):
         self.screen = None
         self.renderer = renderer
+        self.auto_quality = AutoQuality.of(renderer) if renderer is not None else None  # (shared by the renderer's)
+        if quality is not None and self.auto_quality is not None:
+            self.auto_quality.mode = quality
+        self._timed = None  # the screen's frame_count when the quality was last given a frame time
         self._pending = {}  # values given to apply() before the screen was known
         steps = tuple(fps_steps)
         fps_width = len(f"999/{max(steps)}fps")
@@ -461,9 +471,11 @@ class DisplayControls(Panel):
                                       show=lambda v: "reflections" if v else "no reflections",
                                       get=lambda: self.renderer.reflections, set=self._set_reflections)
             self.detail = Choice("F7", tuple(self.DETAIL), key=Key.F7, show=lambda v: {"standard": "std detail"}.get(v, f"{v} detail"),
-                                 get=lambda: "high" if not self.renderer.simplify > 0 else "standard",
+                                 get=lambda: "high" if not self.auto_quality.user("simplify") > 0 else "standard",
                                  set=self._set_detail)
-            widgets += [self.shadows, self.reflections, self.detail]
+            self.quality = Choice("F8", QUALITY_MODES, key=Key.F8, width=len("auto -4"), show=self._quality_text,
+                                  get=lambda: self.auto_quality.mode, set=self._set_quality)
+            widgets += [self.shadows, self.reflections, self.detail, self.quality]
         self._named = {name: getattr(self, name) for name in self.SETTINGS if hasattr(self, name)}
         unknown = set(show or ()) - set(self.SETTINGS)
         if unknown:
@@ -517,7 +529,24 @@ class DisplayControls(Panel):
         self.renderer.reflections = v
 
     def _set_detail(self, v):
-        self.renderer.simplify = self.DETAIL[v]
+        self.auto_quality.set_user("simplify", self.DETAIL[v])
+
+    def _set_quality(self, v):
+        self.auto_quality.mode = v
+
+    def _quality_text(self, mode):
+        auto = self.auto_quality
+        level = auto.level if auto is not None and mode == auto.mode == "auto" else 0
+        return f"auto -{level}" if level else mode
+
+    def _time_frame(self):
+        """Give the quality the last frame's time, once a frame (run() times them)."""
+        screen = self.screen
+        if self.auto_quality is None or screen is None or screen.frame_count == self._timed:
+            return
+        self._timed = screen.frame_count
+        if screen.frame_time is not None:
+            self.auto_quality.update(screen.frame_time, 1.0 / (screen.fps or 30))
 
     def _set_glyphs(self, v):
         if self.screen is not None:
@@ -530,8 +559,10 @@ class DisplayControls(Panel):
     def handle(self, events, screen=None):
         if screen is not None or self.screen is not None:
             self._found_screen(screen if screen is not None else self.screen)
+            self._time_frame()
         return super().handle(events)
 
     def draw(self, screen, y, x):
         self._found_screen(screen)
+        self._time_frame()
         super().draw(screen, y, x)

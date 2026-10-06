@@ -3,20 +3,21 @@
 """The status line the demos share: help text on the left, display settings on the right.
 
 The display settings (glyphs F2, colours F3, frame rate F4, shadows F5, reflections F6,
-detail F7) are ui.DisplayControls, so they work by key or by click on any screen of any demo.
+detail F7, quality F8) are ui.DisplayControls, so they work by key or by click on any screen of any demo.
 """
 from ..ui import DisplayControls
 
 
-HELP_ROOM = 40  # columns of help text kept before detail (F7) is left out of the bar
+HELP_ROOM = 40  # columns of help text kept before detail (F7) and quality (F8) are left out of the bar
 
 
 class StatusBar:
     def __init__(self, renderer=None):
         self.wide = DisplayControls(renderer=renderer)
-        # Where all of them would leave too little room for the help text: all but detail drawn, F7 still
-        # switching it. (Both read and write the same screen and renderer, so they always agree.)
-        self.narrow = DisplayControls(renderer=renderer, show=[n for n in DisplayControls.SETTINGS if n != "detail"])
+        # Where all of them would leave too little room for the help text: all but detail and quality drawn, F7
+        # and F8 still switching them. (Both read and write the same screen and renderer, so they always agree.)
+        self.narrow = DisplayControls(renderer=renderer,
+                                      show=[n for n in DisplayControls.SETTINGS if n not in ("detail", "quality")])
         self.controls = self.wide
 
     def handle(self, events, screen):

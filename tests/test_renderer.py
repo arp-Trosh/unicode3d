@@ -1959,14 +1959,14 @@ class WidgetTests(unittest.TestCase):
         controls.handle([Key.F2, Key.F5])  # the hidden ones still answer their keys
         self.assertEqual((self.screen.mode, renderer.shadows), ("sextant", False))
         self.assertEqual(controls.settings(), {"glyphs": "sextant", "color": "truecolor", "fps": 30,
-                                               "shadows": False, "reflections": True, "detail": "high"})
+                                               "shadows": False, "reflections": True, "detail": "high", "quality": "high"})
         # Settings handed back, as from a file: before the screen is known they wait for it; names and values it
         # doesn't know are skipped.
         later = DisplayControls(renderer=Renderer(10, 5))
         later.apply({"glyphs": "half", "fps": 60, "shadows": False, "color": "rainbow", "volume": 11,
                      "reflections": 1, "detail": "standard"})
         self.assertEqual(later.settings(), {"glyphs": "half", "color": "truecolor", "fps": 60, "shadows": False,
-                                            "reflections": True, "detail": "standard"})
+                                            "reflections": True, "detail": "standard", "quality": "high"})
         self.assertEqual(later.renderer.simplify, 1.0)
         screen = Screen(glyphs="quad", color="256", size=(4, 80))
         later.handle([], screen)

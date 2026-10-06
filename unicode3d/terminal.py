@@ -235,6 +235,8 @@ class Screen:
         self.background = None if background is None else to_linear_rgb(background)
         self.fps = 30               # frames a second run() aims for; change it any time
         self.measured_fps = None    # frames run() actually drew in the last second
+        self.frame_time = None      # seconds run() took to make the last frame (not counting the wait for the rate)
+        self.frame_count = 0        # frames run() has made
         self.color_tolerance = 1    # levels a cell's colours may be off before it's sent again (truecolor only)
         self.key_release = console is not None and console.key_release  # keys() returns KeyRelease events
         self.held = HeldKeys()      # which keys are down, updated by keys()
@@ -732,7 +734,9 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
                     screen.poll_size()
                     if frame_fn(screen, dt, screen.keys()) is False:
                         return
-                    remaining = _frame_period(screen.fps) - (time.perf_counter() - start)
+                    screen.frame_time = time.perf_counter() - start
+                    screen.frame_count += 1
+                    remaining = _frame_period(screen.fps) - screen.frame_time
                     if remaining > 0:
                         time.sleep(remaining)
             finally:
