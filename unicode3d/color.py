@@ -57,9 +57,19 @@ HUE_RGB = {
 
 
 def srgb_to_linear(c):
-    """sRGB values 0..1 to linear light."""
-    c = np.asarray(c, dtype=float)
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    """sRGB values 0..1 to linear light (in a parallel kernel: a 1024 x 1024 texture's took 40 ms in numpy)."""
+    c = np.asarray(c, dtype=float, order="C")
+    out = np.empty_like(c)
+    with kernel_lock():
+        _decode_srgb(c.reshape(-1), out.reshape(-1))
+    return out
+
+
+@njit(cache=True, error_model="numpy", parallel=True)
+def _decode_srgb(srgb, out):
+    for i in prange(srgb.shape[0]):
+        c = srgb[i]
+        out[i] = c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4  # (NaN stays NaN, as in numpy)
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
