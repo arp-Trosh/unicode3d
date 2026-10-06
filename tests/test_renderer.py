@@ -849,6 +849,23 @@ class RenderTests(unittest.TestCase):
         fb = renderer.render([pane(1.0, opacity=0.5)], camera, flat)
         self.assertTrue(0.4 < fb.alpha[fb.height // 2, fb.width // 2] < 0.7)
 
+    def test_glass_resting_on_a_surface_hides_the_face_touching_it(self):
+        # A glass case's bottom on a table lies in the table's own plane: rounding used to decide, pixel by pixel and
+        # differently as the camera moved, whether it was in front, so the table flickered under the case (the room
+        # demo's dice). A see-through face exactly on a solid one never shows, from anywhere.
+        table = Object3D(block_mesh((0.0, 0.5, 0.0), (3.0, 1.0, 3.0)), color=(90, 90, 110))
+        glass = Object3D(block_mesh((0.1, 0.0, -0.2), (1.1, 0.0, 1.1)), np.array([0.0, 1.0, 0.0]),
+                         color=(200, 225, 255), opacity=0.15, double_sided=True)  # just a bottom face, on the top
+        light = Light(direction=np.array([0.5, -1.0, -0.35]), ambient=0.3, diffuse=0.6)
+        renderer = Renderer(80, 30, fog=0, outline=0)
+        for k in range(12):
+            a = 0.6 + 0.004 * k
+            camera = Camera(position=np.array([np.sin(a) * 2.6, 1.9, np.cos(a) * 2.6]), target=np.array([0.0, 1.0, 0.0]))
+            bare = renderer.render([table], camera, light).copy()
+            fb = renderer.render([table, glass], camera, light)
+            np.testing.assert_array_equal(fb.rgb, bare.rgb, err_msg=f"camera {k}")
+            np.testing.assert_array_equal(fb.ids, bare.ids, err_msg=f"camera {k}")
+
     def test_vertex_and_face_alpha(self):
         # A pane solid at its left edge and clear at its right, over a red wall; and a box with its
         # faces clear or solid by turns.

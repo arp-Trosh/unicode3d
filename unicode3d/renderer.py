@@ -949,7 +949,7 @@ class Renderer(ShadowMaps, Mirrors):
             return None  # no see-through surface where it is drawn
         rasterize_layers(solid, fb.width, fb.height, scene["xs"], scene["ys"], scene["inv_w"], scene["tri_inst"],
                          np.array(pattern, dtype=float), band_start, band_tris, layers["depth"], layers["tri"],
-                         layers["cover"], layers["count"])
+                         layers["cover"], layers["count"], float(self._ortho))
         return layers
 
     def _blend_layers(self, scene, layers, n_samples, target=None):

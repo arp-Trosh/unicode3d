@@ -330,6 +330,9 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
 
 
 LAYER_MERGE = 0.02  # fragments of one object this close in depth (relative) are one surface: one layer
+LAYER_FRONT = 1e-5  # a see-through surface must be nearer than the solid one by this part of the solid one's distance
+                    # from the camera's plane to show: one touching it (glass standing on a table) would otherwise
+                    # flicker in and out with rounding
 
 
 @njit(cache=True, error_model="numpy")
@@ -344,10 +347,11 @@ def bit_count(mask):
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, band_start, band_tris, layer_depth,
-                     layer_tri, layer_cover, layer_count):
+                     layer_tri, layer_cover, layer_count, offset):
     """The see-through surfaces in front of the solid ones: for each pixel, the K nearest (K =
     layer_depth.shape[1]) covering any of its sample positions `offsets` (at most 16) where they are
-    nearer than the solid surface (solid (width * height, S): rasterize()'s depth at the same positions),
+    nearer than the solid surface (solid (width * height, S): rasterize()'s depth at the same positions) by more
+    than LAYER_FRONT of its distance from the camera's plane (offset in front of the eye: see shading._plane_depth),
     nearest first. Per pixel and layer: its depth (1/w: the nearest of the samples it covers), a
     triangle to shade it with, and which samples it covers (bit s for offsets[s]); layer_count (width *
     height,) counts the layers, and where more surfaces cover a pixel the farthest are left out.
@@ -396,7 +400,10 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
                         if b2 < -1e-4:
                             continue
                         z = b0 * w0 + b1 * w1 + b2 * w2
-                        if z > solid[c, s]:
+                        limit = solid[c, s]
+                        if limit > 0.0:  # (0: nothing solid there; infinite: a pixel to leave alone)
+                            limit = 1.0 / ((1.0 - LAYER_FRONT) / limit + LAYER_FRONT * offset)
+                        if z > limit:
                             cover |= 1 << s
                             nearest = max(nearest, z)
                     if cover == 0:
