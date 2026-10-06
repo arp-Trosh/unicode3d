@@ -24,7 +24,7 @@ from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
 from .transforms import normalize, perspective, scene_poses, view_axes
-from .detail import FINEST, detail_levels, forget_levels, known_levels
+from .detail import FINEST, allowed_errors, detail_levels, forget_levels, known_levels, pick_levels
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
@@ -66,14 +66,11 @@ def _objects_of(owner):
 
 def _same(a, b):
     """Whether two lists hold the same objects (compared by identity), in the same order."""
-    return len(a) == len(b) and all(map(operator.is_, a, b))
+    return a is b or len(a) == len(b) and all(map(operator.is_, a, b))
 
 
-_mesh_of = operator.attrgetter("mesh")
-_color_of = operator.attrgetter("color")
-_simplify_of = operator.attrgetter("simplify")
-_drawing_attrs = operator.attrgetter("double_sided", "emissive", "cast_shadows", "opacity", "reflectivity",
-                                     "specular", "shininess")
+_object_attrs = operator.attrgetter("mesh", "opacity", "color", "simplify", "double_sided", "emissive",
+                                    "cast_shadows", "reflectivity", "specular", "shininess")  # (see _instances)
 
 
 def _numbers(values):
@@ -457,7 +454,8 @@ class Renderer(ShadowMaps, Mirrors):
         self._detail_memo = None  # the levels of detail of the meshes last drawn (see _detail)
         self._chain_rows = {}  # {id(levels): (levels, mesh, keys, row)} (see _detail_rows)
         self._poses_memo = {}  # the scene graph's order as last drawn (see scene_poses), and each object's row in it
-        self._colors = None  # (the objects' colours, their linear rgb) as last drawn, if none can change in place
+        self._flat = []  # the meshes' keys as last drawn, end to end (see _instances)
+        self._colors = None  # (the objects' colours, their linear rgb, ...) as last drawn, if none can change in place
         self._packer = _Packer()
         self._objects = []  # the render list as last drawn, for pick()
         self._eye = self._axes = None  # the camera's position and its pixels' directions (view_axes) then
@@ -637,17 +635,22 @@ class Renderer(ShadowMaps, Mirrors):
         position), colours, materials, flags and ids (render-list index + 1). Packs the meshes afresh if the set
         of meshes has changed. With a camera and simplify on, each object's mesh is the level of detail (see
         _detail) it is drawn with."""
-        # (Wholly clear objects, or with a NaN opacity, have nothing to draw, nor any shadow.)
-        candidates = [(i, obj) for i, obj in enumerate(objects)
-                      if obj.mesh is not None and len(obj.mesh.faces) and obj.opacity > 0.0]
+        # Everything read from each object, in one pass (_object_attrs). Wholly clear objects, or with a NaN
+        # opacity, have nothing to draw, nor any shadow.
+        attrs = list(map(_object_attrs, objects))
+        candidates = [i for i, a in enumerate(attrs) if a[0] is not None and len(a[0].faces) and a[1] > 0.0]
         if not candidates:
             return None
         memo = self._poses_memo
         known = memo.get("order")
-        nodes = [obj for _, obj in candidates]
+        if len(candidates) == len(objects):  # (as usual: every one has something to draw)
+            nodes = objects
+        else:
+            nodes = [objects[i] for i in candidates]
+            attrs = [attrs[i] for i in candidates]
         rows, linear, where, visible = scene_poses(nodes, memo=memo)
         if memo.get("order") is not known or "at" not in memo:  # (the order changed: where each one is, afresh)
-            memo["at"] = np.array([rows[id(obj)] for _, obj in candidates], np.int64)
+            memo["at"] = np.array([rows[id(obj)] for obj in nodes], np.int64)
         at = memo["at"]
         # Hidden (or under a hidden parent), or NaN or infinite in a pose (a physics blow-up, say): not drawn.
         drawn = visible[at] & np.isfinite(where[at]).all(axis=1) & np.isfinite(linear[at]).all(axis=(1, 2))
@@ -657,11 +660,11 @@ class Renderer(ShadowMaps, Mirrors):
         at = at[keep]
         linear, where = linear[at], where[at]
         if len(keep) == len(candidates):  # (as usual: every one drawn)
-            objs, ident = nodes, [i + 1 for i, _ in candidates]
+            ident = np.array(candidates, np.int32) + 1
         else:
-            objs = [candidates[k][1] for k in keep]
-            ident = [candidates[k][0] + 1 for k in keep]
-        on = list(map(_mesh_of, objs))
+            attrs = [attrs[k] for k in keep]
+            ident = np.array(candidates, np.int32)[keep] + 1
+        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny = zip(*attrs)
         last = memo.get("meshes")
         if last is not None and _same(last[0], on):  # (the same meshes on the same objects: the same indices)
             meshes, mesh_idx = last[1], last[2]
@@ -676,13 +679,16 @@ class Renderer(ShadowMaps, Mirrors):
             mesh_idx = np.array(mesh_idx, np.int64)
             memo["meshes"] = (on, meshes, mesh_idx)
         keys = list(map(_mesh_key, meshes))  # (afresh: a mesh's arrays may have been replaced)
-        rgb = self._linear_colors(objs)
-        double, emissive, cast, alpha, shine, spec, shiny = zip(*map(_drawing_attrs, objs))
-        shine = np.clip(_numbers(shine), 0.0, 1.0)
+        rgb = self._linear_colors(colors)
+        emissive, shine, spec, shiny = _numbers((emissive, shine, spec, shiny))
+        shine = np.clip(shine, 0.0, 1.0)
         flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
+        if _same(self._flat, flat):  # (as usual: then the same list, which _detail and the pack find at once)
+            flat = self._flat
+        self._flat = flat
         version = None
         if self.simplify > 0 and camera is not None:  # (every level of each mesh packed, and which one each draws)
-            simplified = np.fromiter(map(_simplify_of, objs), np.bool_, len(objs))
+            simplified = np.fromiter(simplify, np.bool_, len(simplify))
             meshes, keys, mesh_idx, version = self._detail(meshes, keys, flat, mesh_idx, linear, where, shine > 0.0,
                                                            simplified, camera)
         placed = self._pack
@@ -700,10 +706,10 @@ class Renderer(ShadowMaps, Mirrors):
                 "flip": _determinants(linear) < 0.0,
                 "rgb": rgb, "double": double, "alpha": alpha,
                 "shine": shine,
-                "specular": np.maximum(_numbers(spec), 0.0),
-                "shininess": np.maximum(_numbers(shiny), 0.0),  # (None, each light's own, as 0)
-                "ident": np.array(ident, np.int32),
-                "emissive": _numbers(emissive), "cast": np.array(cast, np.bool_), "pack": arrays,
+                "specular": np.maximum(spec, 0.0),
+                "shininess": np.maximum(shiny, 0.0),  # (None, each light's own, as 0)
+                "ident": ident,
+                "emissive": emissive, "cast": np.array(cast, np.bool_), "pack": arrays,
                 "keys": keys, "mesh_keys": mesh_keys}
 
     def _detail(self, meshes, keys, flat, mesh_idx, linear, where, shiny, simplified, camera):
@@ -722,12 +728,10 @@ class Renderer(ShadowMaps, Mirrors):
             memo = self._detail_memo = {"flat": flat, "chains": chains, "spheres": spheres, "levels": None}
         chains, spheres = memo["chains"], memo["spheres"]
         # How far each vertex may move, in its mesh's own units: `simplify` pixels where the object is nearest.
-        eye = np.asarray(camera.position, dtype=float)
-        stretch = np.sqrt((linear ** 2).sum(axis=1)).max(axis=1)  # (its longest column: the scale, for most)
-        centre = np.einsum("nij,nj->ni", linear, spheres[mesh_idx, :3]) + where
-        nearest = np.sqrt(((centre - eye) ** 2).sum(axis=1)) - spheres[mesh_idx, 3] * stretch
-        allowed = float(self.simplify) * self._pixel_size(camera) * nearest / stretch
-        allowed = np.where(np.isfinite(allowed) & (nearest > float(camera.near)) & simplified, allowed, 0.0)
+        allowed = np.empty(len(mesh_idx))
+        allowed_errors(np.ascontiguousarray(linear), np.ascontiguousarray(where), mesh_idx, spheres,
+                       np.ascontiguousarray(camera.position, np.float64), float(self.simplify) * self._pixel_size(camera),
+                       float(camera.near), simplified, allowed)
         # Levels for meshes now small enough to use one, within the budget.
         wanted = np.zeros(len(meshes), np.bool_)
         wanted[mesh_idx[allowed >= FINEST * spheres[mesh_idx, 3]]] = True  # (no level moves less than that, nearly)
@@ -752,9 +756,9 @@ class Renderer(ShadowMaps, Mirrors):
                               np.array(first, np.int64), error, mirrorless)
         levels = memo["levels"]
         every, every_keys, first, error, mirrorless = levels
-        table = np.where(shiny[:, None], mirrorless[mesh_idx], error[mesh_idx])
-        level = (table <= allowed[:, None]).sum(axis=1) - 1
-        return every, every_keys, first[mesh_idx] + np.maximum(level, 0), levels
+        level = np.empty(len(mesh_idx), np.int64)
+        pick_levels(mesh_idx, allowed, shiny, error, mirrorless, first, level)
+        return every, every_keys, level, levels
 
     def _detail_rows(self, mesh, key, chain):
         """(levels, their keys, their errors, the errors of those a shiny object may take: up to the first one that
@@ -776,16 +780,29 @@ class Renderer(ShadowMaps, Mirrors):
         self._chain_rows[id(chain)] = (chain, mesh, keys, row)
         return row
 
-    def _linear_colors(self, objs):
-        """Each object's colour in linear light, (N, 3) (NaN as 0). When every object has the very colour it had
-        last frame and none of them can change in place (numbers, names, tuples of numbers), last frame's array
-        is used again; otherwise colours are looked up as cached_linear_rgb does."""
-        colors = list(map(_color_of, objs))
+    def _linear_colors(self, colors):
+        """The objects' colours (Object3D.color) in linear light, (N, 3) (NaN as 0). When every object has the very
+        colour it had last frame and none of them can change in place (numbers, names, tuples of numbers), last
+        frame's array is used again. When some are new (objects added or removed, or given another colour), the
+        rows of the colours it had are reused (those colour objects are kept, so their ids are theirs) and only the
+        new ones are looked up as cached_linear_rgb does."""
         last = self._colors
         if last is not None and _same(last[0], colors):
             return last[1]
-        rgb = _numbers([cached_linear_rgb(c) for c in colors]).reshape(-1, 3)
-        self._colors = (colors, rgb) if all(map(_immutable_color, colors)) else None
+        if last is None:
+            rgb = _numbers([cached_linear_rgb(c) for c in colors]).reshape(-1, 3)
+            immutable = all(map(_immutable_color, colors))
+        else:
+            if last[2] is None:
+                last[2] = {id(c): k for k, c in enumerate(last[0])}
+            row = last[2].get
+            rows = np.fromiter((row(id(c), -1) for c in colors), np.int64, len(colors))
+            rgb = last[1][rows]
+            new = np.flatnonzero(rows < 0).tolist()
+            if new:
+                rgb[new] = _numbers([cached_linear_rgb(colors[k]) for k in new]).reshape(-1, 3)
+            immutable = all(_immutable_color(colors[k]) for k in new)
+        self._colors = [colors, rgb, None] if immutable else None  # (None: {id(colour): row}, made when wanted)
         return rgb
 
     def _scene_state(self, inst, camera):

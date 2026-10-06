@@ -494,6 +494,21 @@ class RenderTests(unittest.TestCase):
         for change in changes:
             change()
             same()
+        # Colours that can't change in place, while objects come and go: the rows of those kept are reused.
+        extra = Object3D(make_box(0.2), position=np.array([1.0, -1.0, 0.0]), color=(250, 250, 40))
+        later = Object3D(make_box(0.25), position=np.array([-1.0, 1.0, 0.0]), color=Color.RED)
+        changes = [lambda: (setattr(other, "color", (40, 200, 40)), setattr(tinted, "color", (40, 40, 200))),
+                   lambda: objects.append(extra),                    # one more, with a colour of its own
+                   lambda: objects.insert(0, later),                 # one more, at the front
+                   lambda: objects.remove(other),                    # one fewer
+                   lambda: (objects.append(other), setattr(child, "color", (90, 90, 90))),  # and a new colour
+                   lambda: setattr(extra, "color", np.array([10.0, 250.0, 10.0])),  # one that can change in place
+                   lambda: extra.color.__setitem__(1, 30.0),         # ... edited in place
+                   lambda: objects.remove(extra),
+                   lambda: setattr(later, "color", (5, 5, 250))]
+        for change in changes:
+            change()
+            same()
         # scene_poses with a memo gives what it gives without one, through the same kind of changes.
         memo = {}
         for change in (lambda: None, lambda: setattr(child, "parent", None), lambda: setattr(b, "parent", None)):

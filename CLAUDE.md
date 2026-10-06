@@ -91,7 +91,7 @@ stop the program: frames may be slower or wrong for a moment, never an exception
 the `Renderer`, which inherits its shadow-map methods from `shadows.ShadowMaps` and its mirror passes from
 `mirrors.Mirrors`; `shading.py` the shading kernels; `raster.py` projection and rasterizing; `lights.py` the
 lights; `models.py` and `gltf.py` loading models (OBJ and glTF; no kernels); `kernel_cache.py` keeps Numba's
-cache in step with helpers in other modules; `detail.py` levels of detail (simpler copies of meshes, for `Renderer.simplify`; no kernels); `queries.py` the ray and overlap queries (`Colliders`, with a bounding volume hierarchy per mesh built in a kernel and
+cache in step with helpers in other modules; `detail.py` levels of detail (simpler copies of meshes, for `Renderer.simplify`, made in Python, and two small kernels picking the level each object takes); `queries.py` the ray and overlap queries (`Colliders`, with a bounding volume hierarchy per mesh built in a kernel and
 shared through `mesh_tree`); `threads.py` has the lock that keeps threads from launching
 parallel kernels at once where Numba can't take that, and `prefer_sleeping_workers()` (run on import: OpenMP
 preferred, its workers sleeping between kernels; compare threading layers with `NUMBA_THREADING_LAYER=tbb`). Instances reach the kernels as `inst` dicts of arrays

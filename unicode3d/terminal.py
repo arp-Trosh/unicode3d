@@ -529,6 +529,8 @@ def compile_kernels():
     screen.draw_frame(renderer.render(objects, Camera(), lights))
     renderer.max_pixels = 16 * 8  # drawn smaller than the screen needs, and stretched (as in huge terminals)
     screen.draw_frame(renderer.render(objects, Camera(), lights))
+    renderer.simplify = 1.0  # levels of detail: which one each object takes
+    screen.draw_frame(renderer.render(objects, Camera(position=np.array([0.0, 0.0, 6.0])), lights))
     screen.render_updates()
     # Ray and overlap queries.
     solid = Colliders(objects)
