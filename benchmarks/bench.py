@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""Frame-time benchmark: python -m benchmarks.bench [--size 180x50] [--frames 30] [--glyphs sextant] [--color truecolor]
+"""Frame-time benchmark: python -m benchmarks.bench [--size 180x50] [--frames N] [--glyphs sextant] [--color truecolor]
 [--threads N] [--scene NAME]
 
-Renders a few fixed, spinning scenes off-screen and reports the time each stage
-of a frame takes:
+Renders scenes off-screen and reports the time each stage of a frame takes:
+a few fixed, spinning set pieces (dice ... sphere-27k), and three that load the
+engine as kinds of game would (corridor, arena, board: see genres.py), each
+moving its world as a game loop does and writing text over the picture:
 
   render          Renderer.render: rasterizing and shading the scene into pixels (and shadow maps)
   draw_frame      Screen.draw_frame: pixels into glyphs and terminal colours
   render_updates  Screen.render_updates: the changed cells as escape sequences
+  game            (the genre scenes) the game's own update (characters' clips, particles) and its text
+
+Run the genre scenes at a usual window and at a full screen with a small font
+(--size 480x130, say) too: they are where per-pixel costs show.
 
 It starts with what it runs on (CPU, threads, versions), as times mean little
 without it, and compile_kernels() (compiling the kernels, or loading them from
@@ -37,7 +43,9 @@ from unicode3d import __version__
 from unicode3d.terminal import Screen, compile_kernels
 from unicode3d.transforms import normalize, quat_axis_angle, quat_mul
 
-STAGES = ("render", "draw_frame", "render_updates")
+from .genres import DT, GENRES
+
+STAGES = ("render", "draw_frame", "render_updates", "game")
 SPIN = quat_axis_angle([0.3, 1.0, 0.2], 0.05)
 
 
@@ -123,6 +131,7 @@ SCENES = {
     "spawn-60": lambda: spawn_scene(60),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
+    **GENRES,
 }
 
 
@@ -160,19 +169,40 @@ def machine():
 
 
 class Frames:
-    """A scene, a renderer and an off-screen screen; step() spins the objects and draws one frame."""
+    """A scene, a renderer and an off-screen screen; step() moves the scene on (spins the objects, or runs a genre
+    scene's update) and draws one frame."""
 
     def __init__(self, scene, cols, rows, glyphs, color):
-        self.objects, self.camera, self.light, *rest = SCENES[scene]()
-        still = rest[0] if rest else []
-        self.churn = rest[1] if len(rest) > 1 else None  # (frame number: the objects to draw then)
+        spec = SCENES[scene]()
+        self.game = None if isinstance(spec, tuple) else spec  # (a genres.Game)
+        options = {}
+        if self.game:
+            self.objects, options, self.frames = spec.objects, spec.renderer_options, spec.frames
+        else:
+            self.objects, self.camera, self.light, *rest = spec
+            still = rest[0] if rest else []
+            self.churn = rest[1] if len(rest) > 1 else None  # (frame number: the objects to draw then)
+            self.moving = [obj for obj in self.objects if not any(obj is s for s in still)]
+            self.frames = 30
         self.frame = 0
-        self.moving = [obj for obj in self.objects if not any(obj is s for s in still)]
         self.screen = Screen(None, glyphs=glyphs, color=color, size=(rows, cols))
-        self.renderer = Renderer(cols, rows, self.screen.cell_pixels)
+        self.renderer = Renderer(cols, rows, self.screen.cell_pixels, **options)
         self.triangles = sum(len(obj.mesh.faces) for obj in self.objects)
 
     def step(self):
+        if self.game:
+            t0 = time.perf_counter()
+            objects, camera, lights = self.game.update(DT)
+            t1 = time.perf_counter()
+            fb = self.renderer.render(objects, camera, lights)
+            t2 = time.perf_counter()
+            self.screen.draw_frame(fb)
+            t3 = time.perf_counter()
+            self.game.hud(self.screen, self.renderer)
+            t4 = time.perf_counter()
+            out = self.screen.render_updates()
+            t5 = time.perf_counter()
+            return (t2 - t1, t3 - t2, t5 - t4, (t1 - t0) + (t4 - t3)), len(out.encode())
         for obj in self.moving:
             obj.rotation = quat_mul(SPIN, obj.rotation)
         self.frame += 1
@@ -184,13 +214,13 @@ class Frames:
         t2 = time.perf_counter()
         out = self.screen.render_updates()
         t3 = time.perf_counter()
-        return (t1 - t0, t2 - t1, t3 - t2), len(out.encode())
+        return (t1 - t0, t2 - t1, t3 - t2, 0.0), len(out.encode())
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--size", default="180x50", help="terminal size in cells, COLSxROWS (default 180x50)")
-    parser.add_argument("--frames", type=int, default=30, help="frames timed per scene (default 30)")
+    parser.add_argument("--frames", type=int, help="frames timed per scene (default 30; the genre scenes 300)")
     parser.add_argument("--glyphs", default="sextant", choices=("half", "quad", "sextant", "ascii"))
     parser.add_argument("--color", default="truecolor", choices=("truecolor", "256", "16", "mono"))
     parser.add_argument("--threads", type=int, help="threads the kernels run on (default: one per logical core)")
@@ -205,10 +235,10 @@ def main():
     ready = time.perf_counter() - t0
     print("\n".join(machine()))
     print(f"Kernels:  compiled or loaded from the cache in {ready:.1f} s")
-    print(f"Frames:   {cols}x{rows} cells, {args.glyphs} glyphs, {args.color}; median of {args.frames} "
-          f"frames, ms\n")
+    print(f"Frames:   {cols}x{rows} cells, {args.glyphs} glyphs, {args.color}; median of "
+          f"{args.frames or '30 (genre scenes: 300)'} frames, ms\n")
     print(f"{'scene':12} {'objects':>7} {'tris':>7} {'first':>7} " + " ".join(f"{s:>15}" for s in STAGES)
-          + f" {'total':>8} {'fps':>6} {'KB out':>7}")
+          + f" {'total':>8} {'p90':>7} {'fps':>6} {'KB out':>7}")
     for name in args.scene or SCENES:
         frames = Frames(name, cols, rows, args.glyphs, args.color)
         t0 = time.perf_counter()
@@ -217,15 +247,16 @@ def main():
         for _ in range(2):
             frames.step()
         times, sizes = [], []
-        for _ in range(args.frames):
+        for _ in range(args.frames or frames.frames):
             t, size = frames.step()
             times.append(t)
             sizes.append(size)
         stage_ms = [1000 * statistics.median(t[i] for t in times) for i in range(len(STAGES))]
         total = 1000 * statistics.median(sum(t) for t in times)
+        p90 = 1000 * statistics.quantiles([sum(t) for t in times], n=10)[-1]
         print(f"{name:12} {len(frames.objects):7d} {frames.triangles:7d} {1000 * first:7.1f} "
               + " ".join(f"{ms:15.2f}" for ms in stage_ms)
-              + f" {total:8.2f} {1000 / total:6.1f} {statistics.median(sizes) / 1024:7.1f}")
+              + f" {total:8.2f} {p90:7.2f} {1000 / total:6.1f} {statistics.median(sizes) / 1024:7.1f}")
 
 
 if __name__ == "__main__":
