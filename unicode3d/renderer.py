@@ -20,7 +20,7 @@ from .mirrors import Mirrors
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, SAMPLE_PATTERNS, SOLID, VERTEX_CHUNK, FrameBuffer,
                      bin_bands, count_bands, project, rasterize, rasterize_layers, transform, upscale, NO_CLIP)
 from .shading import blend, post_effects, resolve, resolve_cells
-from .shadows import ShadowMaps
+from .shadows import SHADOW_FITS, ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
 from .transforms import normalize, perspective, scene_poses, view_axes
@@ -400,6 +400,15 @@ class Renderer(ShadowMaps, Mirrors):
     PointLight with shadows, which together see all round it.
     shadow_softness: how far shadow edges are blurred, in shadow-map texels either way (at
     least over a pixel on screen, so that they look as smooth as the edges of shapes).
+    shadow_fit: what each Light's shadow map covers. "scene" (the default): everything in the scene, so that
+    moving only the camera costs nothing, but shadows are as coarse as the scene is big. "view": only what the
+    camera can see of the scene (and a margin), so that shadows are sharper the less of the scene is seen (an
+    isometric game's view of a big level: about 4x), and casters whose shadows fall out of sight aren't drawn. Its
+    box moves in whole texels and changes size in steps, so shadows keep still as the camera moves; the casters
+    that keep still are drawn into a map up to 1024 texels wider, which stays put while the camera moves about in
+    it (redrawn when the camera leaves it). More texels of the map are drawn into than with "scene", as it is
+    finer. Scenes with mirrors (which show what the camera doesn't) get "scene"'s maps, as do views of most of the
+    scene. PointLights' shadows are the same either way.
     shadows: False draws no shadows whatever the lights say (a graphics setting, e.g. for
     slow machines); True draws those of the lights that have them.
     transparency_layers: how many see-through surfaces (Object3D.opacity, or alpha in mesh
@@ -431,7 +440,7 @@ class Renderer(ShadowMaps, Mirrors):
 
     def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
                  fog=0.3, outline=0.55, lod_bias=-0.5, background=None, shadow_size=1024, point_shadow_size=256,
-                 shadow_softness=1.5, shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
+                 shadow_softness=1.5, shadow_fit="scene", shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
                  max_pixels=MAX_PIXELS, simplify=0.0, shading="cell"):
         for n in (samples, edge_samples):
             if n not in SAMPLE_PATTERNS and n != 0:
@@ -448,6 +457,7 @@ class Renderer(ShadowMaps, Mirrors):
         self.shadow_size = shadow_size
         self.point_shadow_size = point_shadow_size
         self.shadow_softness = shadow_softness
+        self.shadow_fit = shadow_fit
         self.shadows = shadows
         self.transparency_layers = transparency_layers
         self.reflections = reflections
@@ -477,6 +487,9 @@ class Renderer(ShadowMaps, Mirrors):
         self._caster_ages = None  # (shadows._Rows of the solid casters, shadow draws each has been unchanged for)
         self._caster_meshes = None  # (the pack's mesh keys, the id of each one's Mesh, the keys by those ids)
         self._shadow_draws = 0
+        self._settled_draws = 0  # maps of settled casters drawn (shadows._Settled), for tests and benchmarks
+        self._view_fits = {}  # each view-fitted Light's map's (light, half-width, its region's centre), by light
+        self._mesh_boxes = None  # (the pack, each mesh's box: middles and half-widths) for shadow_fit "view"
         self.resize(width, height)
 
     @property
@@ -489,6 +502,17 @@ class Renderer(ShadowMaps, Mirrors):
         if value not in SHADINGS:
             raise ValueError(f"shading must be one of {SHADINGS}, not {value!r}")
         self._shading = value
+
+    @property
+    def shadow_fit(self):
+        """What each Light's shadow map covers: "scene" or "view" (see the class)."""
+        return self._shadow_fit
+
+    @shadow_fit.setter
+    def shadow_fit(self, value):
+        if value not in SHADOW_FITS:
+            raise ValueError(f"shadow_fit must be one of {SHADOW_FITS}, not {value!r}")
+        self._shadow_fit = value
 
     def resize(self, width, height, cell_pixels=None):
         """Set the size in cells, and optionally the pixels per cell (e.g. Screen.cell_pixels)."""
@@ -837,7 +861,7 @@ class Renderer(ShadowMaps, Mirrors):
         values = [self.width, self.height, self.cell_pixels, self.max_pixels, self.cell_aspect, self.samples,
                   self.edge_samples, self.transparency_layers, self.reflections, self.mirror_bounces,
                   fog[:3] + (fog[3].tobytes(), fog[4]), self.outline, self.lod_bias, self.shadow_size,
-                  self.point_shadow_size, self.shadow_softness, self._shading,
+                  self.point_shadow_size, self.shadow_softness, self._shadow_fit, self._shading,
                   np.asarray(camera.position, float).tobytes(), np.asarray(camera.target, float).tobytes(),
                   np.asarray(camera.up, float).tobytes(), camera.fov, camera.near, camera.far,
                   self._light_rows.tobytes()]

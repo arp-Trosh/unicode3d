@@ -378,6 +378,10 @@ class RenderTests(unittest.TestCase):
             renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), max_pixels=2000)
             fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), shadowed)
             frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
+            # The suns' maps fitted to the view (reflections off: mirrors would draw the whole scene's).
+            renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), reflections=False, shadow_fit="view")
+            fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 3.0])), shadowed)
+            frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
             # Fog in the world, into the background and into a colour.
             for fog in (Fog(start=4.0, end=7.0), Fog(start=3.0, end=8.0, color=(200, 100, 50))):
                 renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), fog=fog)
@@ -851,6 +855,117 @@ class RenderTests(unittest.TestCase):
         box.cast_shadows = True
         renderer.shadows = False
         self.assertAlmostEqual(at(renderer.render([floor, box], camera, sun), 1.0, 0.0, 0.0), unlit, places=9)
+
+    def test_shadows_fitted_to_the_view(self):
+        # shadow_fit "view": a Light's map covers what the camera sees of a big floor, not all of it, so its texels
+        # are finer, and the shadow is where the whole scene's map puts it.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (60.0, 0.1, 60.0)), color=(255, 255, 255))
+        box = Object3D(block_mesh((0.0, 1.0, 0.0), (0.6, 0.6, 0.6)), color=(255, 255, 255))
+        sun = Light(direction=np.array([1.0, -1.0, 0.0]), shadows=True)
+        ambient = Light(direction=sun.direction, diffuse=0.0, specular=0.0)
+
+        def camera(x=0.0, z=0.0):
+            return Camera(position=np.array([x, 6.0, z]), target=np.array([x, 0.0, z]), up=np.array([0.0, 0.0, -1.0]))
+
+        def at(renderer, fb, *point):
+            x, y = renderer.project(point)
+            return lum(fb)[int(y * 2), int(x)]
+
+        texel = {}
+        for fit in ("scene", "view"):
+            renderer = Renderer(60, 30, fog=0, outline=0, shading="pixel", shadow_fit=fit)
+            fb = renderer.render([floor, box], camera(), sun).copy()
+            texel[fit] = renderer._shadows[1][3][0, 3]
+            shadow, lit = at(renderer, fb, 1.0, 0.0, 0.0), at(renderer, fb, -1.0, 0.0, 0.0)
+            unlit = at(renderer, renderer.render([floor, box], camera(), ambient), 1.0, 0.0, 0.0)
+            self.assertAlmostEqual(shadow, unlit, places=9, msg=fit)
+            self.assertGreater(lit, shadow + 0.1, fit)
+        self.assertLess(texel["view"], texel["scene"] / 4)
+        with self.assertRaises(ValueError):
+            Renderer(10, 10, shadow_fit="near")
+
+    def test_view_fitted_shadow_maps_keep_still(self):
+        # As the camera moves (by less than a texel, or more), the map's box moves in whole texels: the floor's
+        # points keep the depths they had (the shadows don't crawl), and the box keeps its size. While the map
+        # stays inside its region, the settled casters' map isn't drawn again; once it leaves, it is, once.
+        from unicode3d import shadows
+
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (60.0, 0.1, 60.0)), color=(255, 255, 255))
+        posts = [Object3D(block_mesh((x, 1.0, z), (0.3, 2.0, 0.3)), color=(255, 255, 255))
+                 for x in range(-20, 21, 4) for z in range(-20, 21, 4)]
+        sun = Light(direction=np.array([0.6, -1.0, 0.3]), shadows=True)
+        renderer = Renderer(60, 30, fog=0, outline=0, shadow_fit="view")
+        grid = np.stack(np.meshgrid(np.linspace(-2.0, 2.0, 41), [0.0], np.linspace(-1.5, 1.5, 31)), -1).reshape(-1, 3)
+
+        def frame(f, x):
+            walker = Object3D(block_mesh((x + 1.0 + 0.01 * f, 0.5, 0.5), (0.3, 1.0, 0.3)), color=(255, 255, 255))
+            camera = Camera(position=np.array([x, 6.0, 3.0]), target=np.array([x, 0.0, 0.0]))
+            renderer.render([floor, walker, *posts], camera, sun)
+            texels, _, mats, params = renderer._shadows[1]
+            n, t = int(params[0, 2]), params[0, 3]
+            clip = grid @ mats[0, :2, :3].T + mats[0, :2, 3]
+            u = np.floor((clip[:, 0] + 1.0) * 0.5 * n).astype(int)
+            v = np.floor((1.0 - clip[:, 1]) * 0.5 * n).astype(int)
+            inside = (u >= 0) & (u < n) & (v >= 0) & (v < n)
+            return t, np.where(inside, texels[np.where(inside, v * n + u, 0)], -1.0)
+
+        settle = shadows.SETTLE_DRAWS
+        try:
+            shadows.SETTLE_DRAWS = 3
+            for f in range(5):  # the floor and posts settle (the walker moves every frame)
+                frame(f, 0.0)
+            texel, depths = frame(5, 0.0)
+            self.assertTrue((depths > 0.0).all())  # (every point in the map, and on the floor)
+            draws, kept = renderer._settled_draws, renderer._settled[0]
+            for f, step in enumerate((0.3, 0.37, 0.71, 1.9), 6):  # under a texel and more, while in the region
+                t, moved = frame(f, 0.0 + step * 0.01 if step < 1 else step)
+                self.assertEqual(t, texel)
+                away = grid[:, 0] < 0.0  # (from the walker, which moves)
+                np.testing.assert_array_equal(moved[away], depths[away])
+            self.assertEqual(renderer._settled_draws, draws)
+            self.assertIs(renderer._settled[0], kept)
+            # Far off: out of the region, which moves, and the settled casters are drawn into it again.
+            frame(10, 40.0 * texel)
+            self.assertEqual(renderer._settled_draws, draws)
+            frame(11, 1200.0 * texel)
+            self.assertEqual(renderer._settled_draws, draws + 1)
+        finally:
+            shadows.SETTLE_DRAWS = settle
+        # The same depths as the whole scene's map would give, to the texel's size: compared through the picture
+        # in test_shadows_fitted_to_the_view.
+
+    def test_view_fitted_shadow_maps_fall_back(self):
+        # Mirrors show what the camera doesn't see, so a scene with one gets the whole scene's map; so does a view
+        # of most of the scene, and odd views (NaN, the horizon, orthographic, tiny or huge scenes) draw something.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (60.0, 0.1, 60.0)), color=(255, 255, 255))
+        box = Object3D(block_mesh((0.0, 1.0, 0.0), (0.6, 0.6, 0.6)), color=(255, 255, 255))
+        mirror = Object3D(flat_quad(2.0, 1.5), np.array([0.0, 1.0, -2.0]), reflectivity=0.8)
+        sun = Light(direction=np.array([1.0, -1.0, 0.0]), shadows=True)
+        near = Camera(position=np.array([0.0, 6.0, 3.0]), target=np.zeros(3))
+
+        def texel(renderer, objects, camera=near):
+            fb = renderer.render(objects, camera, sun)
+            self.assertTrue(np.isfinite(fb.rgb).all())
+            return renderer._shadows[1][3][0, 3] if renderer._shadows else None
+
+        whole = texel(Renderer(60, 30), [floor, box])
+        view = Renderer(60, 30, shadow_fit="view")
+        self.assertLess(texel(view, [floor, box]), whole / 4)
+        self.assertEqual(texel(view, [floor, box, mirror]), whole)
+        self.assertLess(texel(Renderer(60, 30, shadow_fit="view", reflections=False), [floor, box, mirror]), whole / 4)
+        far = Camera(position=np.array([0.0, 200.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
+        self.assertEqual(texel(view, [floor, box], far), whole)  # (all of it in view)
+        horizon = Camera(position=np.array([0.0, 0.5, 0.0]), target=np.array([1.0, 0.5, 0.0]), far=1e6)
+        ortho = Camera(position=np.array([3.0, 3.0, 4.0]), target=np.zeros(3), projection="ortho", size=4.0)
+        broken = Camera(position=np.array([np.nan, 1.0, 0.0]))
+        for camera in (horizon, ortho, broken, near):
+            texel(view, [floor, box], camera)
+        for scale in (1e-6, 1e6):
+            tiny = [Object3D(o.mesh, scale=scale, color=(255, 255, 255)) for o in (floor, box)]
+            texel(view, tiny, Camera(position=np.array([0.0, 6.0, 3.0]) * scale, target=np.zeros(3),
+                                     near=0.1 * scale, far=100.0 * scale))
+        view.resize(1, 1)
+        texel(view, [floor, box])
 
     def test_point_light_shadows(self):
         # A low lamp in the middle of a floor with a box on each side: each box's shadow runs away from

@@ -1134,11 +1134,12 @@ def _surface_uv(surf, t, b0, b1, b2):
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def rasterize_depth(depth, base, xs, ys, dep, tri_side, side_rows, band_start, band_tris, see, surf, chain, lod,
-                    texels, levels, first):
+def rasterize_depth(depth, base, base_x, base_y, xs, ys, dep, tri_side, side_rows, band_start, band_tris, see, surf,
+                    chain, lod, texels, levels, first):
     """A shadow map: the largest `dep` (nearest the light) of any triangle covering each texel's centre,
     into depth (height, width), which it clears first (to `base`, a map of other triangles drawn before, if that
-    has rows; else to 0, where there is none). Triangle t is kept to rows
+    has rows; else to 0, where there is none). base may be larger than depth: depth is then cleared to its part from
+    row base_y and column base_x (the caller keeps that inside it). Triangle t is kept to rows
     tri_side[t] * side_rows to (tri_side[t] + 1) * side_rows - 1 (one face of a cube map, see
     project_cube; for any other map, tri_side is 0 and side_rows the height). Cut-outs (see[t] == 2)
     cover only texels where their texture's alpha is at least a half, so light shines through their holes.
@@ -1155,7 +1156,7 @@ def rasterize_depth(depth, base, xs, ys, dep, tri_side, side_rows, band_start, b
         band_y0 = band * ROW_BAND
         band_y1 = min(band_y0 + ROW_BAND, height) - 1
         if base.shape[0]:
-            depth[band_y0:band_y1 + 1, :] = base[band_y0:band_y1 + 1, :]
+            depth[band_y0:band_y1 + 1, :] = base[base_y + band_y0:base_y + band_y1 + 1, base_x:base_x + width]
         else:
             depth[band_y0:band_y1 + 1, :] = 0.0
         for i in range(band_start[band], band_start[band + 1]):
