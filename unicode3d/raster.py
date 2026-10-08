@@ -500,7 +500,9 @@ def texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain):
     return 0.5 * np.log2(max(along_x, along_y, 1e-18))
 
 
-@njit(cache=True, error_model="numpy")
+# The helpers transform() and project() call per face (and per instance and run) are inlined into them
+# (inline="always"), as shading's are: a call that passes arrays costs more than the work in it.
+@njit(cache=True, error_model="numpy", inline="always")
 def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
     """Store triangle `corners` (3, 4 + ATTRS: clip xyzw | attributes) as screen triangle k."""
     for j in range(3):
@@ -511,7 +513,7 @@ def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
         attrs[k, j, :] = corners[j, 4:]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _outside_view(view_proj, cx, cy, cz, radius, near):
     """Whether a sphere lies wholly outside the view: beyond the left, right, top or bottom edge, or
     behind the near plane w = near."""
@@ -530,7 +532,7 @@ def _outside_view(view_proj, cx, cy, cz, radius, near):
     return False
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def stretch(lin):
     """At most how much the linear map lin (3, 3) lengthens any vector (at least its largest singular value,
     and exactly that for a rotation times a scale along each axis): how far a bounding sphere's radius grows."""
@@ -543,7 +545,7 @@ def stretch(lin):
     return np.sqrt(most)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _normal_matrix(lin, out):
     """What turns normals when lin (3, 3) turns and stretches points, into out (3, 3): the inverse transpose, up
     to a positive factor (the cofactors, times the sign of the determinant), which stays finite when lin is
@@ -560,7 +562,7 @@ def _normal_matrix(lin, out):
                 out[i, j] = -out[i, j]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _face_ahead(world, faces, f, v0, near):
     """How many corners of face f are in front of the near plane."""
     ahead = 0
@@ -569,7 +571,7 @@ def _face_ahead(world, faces, f, v0, near):
     return ahead
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _facing(world, faces, f, v0, eye):
     """Whether face f (world positions in `world`) faces the eye."""
     a, b, c = world[v0 + faces[f, 0]], world[v0 + faces[f, 1]], world[v0 + faces[f, 2]]
@@ -582,13 +584,13 @@ def _facing(world, faces, f, v0, eye):
 NO_CLIP = np.array([0.0, 0.0, 0.0, 1.0])  # a clipping plane (a, b, c, d: keeps a x + b y + c z + d > 0) keeping all
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _plane_distance(world, v, clip):
     """How far in front of clipping plane `clip` vertex v of `world` is (positive: kept)."""
     return clip[0] * world[v, 0] + clip[1] * world[v, 1] + clip[2] * world[v, 2] + clip[3]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _near_clip_distances(w0, w1, w2, d0, d1, d2, near, out):
     """Clip a triangle whose corners have clip-space w (w0, w1, w2) and plane distances (d0, d1, d2)
     against the near plane w = near, into out (4,): the plane distances of the polygon left, which it
@@ -607,7 +609,7 @@ def _near_clip_distances(w0, w1, w2, d0, d1, d2, near, out):
     return n
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _plane_clipped_length(ds, n):
     """How many corners a polygon of n corners with plane distances ds keeps, clipped against the plane."""
     m = 0
