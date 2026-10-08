@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""The rasterizer against a plain reference: every sample of every pixel in the triangle's bounding box tested
-(rasterize as it was before it walked spans, roadmap item 26), on random and awkward triangles."""
+"""The rasterizers against plain references: every sample of every pixel in the triangle's bounding box tested
+(rasterize as it was before it walked spans, roadmap item 26, and rasterize_layers as it was before it did too), on
+random and awkward triangles."""
 import unittest
 
 import numpy as np
 from numba import njit
 
-from unicode3d.raster import (ROW_BAND, SAMPLE_PATTERNS, _row_span, bin_bands, count_bands, drawable, pixel_range,
-                              rasterize, texture_lod)
+from unicode3d.raster import (LAYER_FRONT, LAYER_MERGE, ROW_BAND, SAMPLE_PATTERNS, _row_span, bin_bands, bit_count,
+                              count_bands, drawable, pixel_range, rasterize, rasterize_layers, rasterize_pixels,
+                              texture_lod)
 from unicode3d.texture import sample_alpha
 
 
@@ -71,6 +73,87 @@ def reference_rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slot
                                     continue
                             depth[col, s] = z
                             tris[col, s] = t
+
+
+@njit(cache=False, error_model="numpy")
+def reference_rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, band_start, band_tris,
+                               layer_depth, layer_tri, layer_cover, layer_count, offset):
+    """rasterize_layers() as it was before spans (9a52786), serial: each sample of each pixel in the box tested
+    (multiplying by 1 / area as the kernel now does, rather than dividing)."""
+    n_samples, k_max = offsets.shape[0], layer_depth.shape[1]
+    oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
+    oymin, oymax = offsets[:, 1].min(), offsets[:, 1].max()
+    n_bands = (height + ROW_BAND - 1) // ROW_BAND
+    for band in range(n_bands):
+        band_y0 = band * ROW_BAND
+        band_y1 = min(band_y0 + ROW_BAND, height) - 1
+        layer_count[band_y0 * width:(band_y1 + 1) * width] = 0
+        for i in range(band_start[band], band_start[band + 1]):
+            t = band_tris[i]
+            x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
+            y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
+            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+            if not drawable(area):
+                continue
+            by0, by1 = pixel_range(min(y0, y1, y2) - oymax, max(y0, y1, y2) - oymin, band_y0, band_y1)
+            if by0 > by1:
+                continue
+            bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
+            w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+            per_area = 1.0 / area  # (as the kernel: multiplied, not divided, so the last bit agrees)
+            for py in range(by0, by1 + 1):
+                for px in range(bx0, bx1 + 1):
+                    c = py * width + px
+                    cover, nearest = 0, 0.0
+                    for s in range(n_samples):
+                        cx, cy = px + offsets[s, 0], py + offsets[s, 1]
+                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) * per_area
+                        if b0 < -1e-4:
+                            continue
+                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) * per_area
+                        if b1 < -1e-4:
+                            continue
+                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) * per_area
+                        if b2 < -1e-4:
+                            continue
+                        z = b0 * w0 + b1 * w1 + b2 * w2
+                        limit = solid[c, s]
+                        if limit > 0.0:
+                            limit = 1.0 / ((1.0 - LAYER_FRONT) / limit + LAYER_FRONT * offset)
+                        if z > limit:
+                            cover |= 1 << s
+                            nearest = max(nearest, z)
+                    if cover == 0:
+                        continue
+                    n = layer_count[c]
+                    for j in range(n):
+                        other = layer_tri[c, j]
+                        if (tri_inst[other] == tri_inst[t]
+                                and abs(layer_depth[c, j] - nearest) <= LAYER_MERGE * max(layer_depth[c, j], nearest)):
+                            if bit_count(layer_cover[c, j]) >= bit_count(cover):
+                                t_keep = other
+                            else:
+                                t_keep = t
+                            cover |= layer_cover[c, j]
+                            nearest = max(nearest, layer_depth[c, j])
+                            for k in range(j, n - 1):
+                                layer_depth[c, k], layer_tri[c, k], layer_cover[c, k] = (layer_depth[c, k + 1],
+                                                                                         layer_tri[c, k + 1],
+                                                                                         layer_cover[c, k + 1])
+                            n -= 1
+                            break
+                    else:
+                        t_keep = t
+                    if n == k_max and nearest <= layer_depth[c, k_max - 1]:
+                        continue
+                    j = n if n < k_max else k_max - 1
+                    while j > 0 and layer_depth[c, j - 1] < nearest:
+                        layer_depth[c, j], layer_tri[c, j], layer_cover[c, j] = (layer_depth[c, j - 1],
+                                                                                 layer_tri[c, j - 1],
+                                                                                 layer_cover[c, j - 1])
+                        j -= 1
+                    layer_depth[c, j], layer_tri[c, j], layer_cover[c, j] = nearest, t_keep, cover
+                    layer_count[c] = min(n + 1, k_max)
 
 
 def triangles(rng, kind, n, width, height):
@@ -175,12 +258,39 @@ def draw(kernel, xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, 
     depth = np.full((m, n_samples), 7.0)  # (anything: clear empties a whole frame's, others are filled here)
     tris = np.full((m, n_samples), 99, np.int32)
     whole = m == width * height
-    if not whole:
+    if not whole or kernel is rasterize_pixels:  # (which leaves emptying them to its caller)
         depth.fill(0.0)
         tris.fill(-1)
-    kernel(depth, tris, width, height, xs, ys, inv_w, np.array(SAMPLE_PATTERNS[n_samples], float), slots, band_start,
-           band_tris, see, attrs, chain, lod, *texture, whole)
+    offsets = np.array(SAMPLE_PATTERNS[n_samples], float)
+    if kernel is rasterize_pixels:  # (the pixels in order, with their rows: as Renderer._accumulate gives them)
+        pixels = np.flatnonzero(slots >= 0)
+        row_start = np.searchsorted(pixels, np.arange(height + 1) * width)
+        kernel(depth, tris, width, height, xs, ys, inv_w, offsets, pixels, row_start,
+               np.full(width * height, -99, np.int64), band_start, band_tris, see, attrs, chain, lod, *texture)
+    else:
+        kernel(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_start, band_tris, see, attrs, chain,
+               lod, *texture, whole)
     return depth, tris
+
+
+def draw_layers(kernel, xs, ys, inv_w, tri_inst, solid, width, height, n_samples, k_max, offset):
+    """The layer lists from one kernel, binned as Renderer._layers does (every triangle see-through)."""
+    n_bands = (height + ROW_BAND - 1) // ROW_BAND
+    span = np.tile([-np.inf, np.inf], (n_bands, 1))
+    select = np.ones(len(xs), np.int64)
+    band_count = np.zeros(n_bands, np.int64)
+    per_chunk = count_bands(xs, ys, select, 2, height, span, band_count)
+    band_start = np.zeros(n_bands + 1, np.int64)
+    np.cumsum(band_count, out=band_start[1:])
+    band_tris = np.zeros(int(band_start[-1]), np.int64)
+    bin_bands(xs, ys, select, 2, height, span, per_chunk, band_start, band_tris)
+    m = width * height
+    # (filled with anything: only the first layer_count of each pixel's are written, and compared)
+    out = np.full((m, k_max), 7.0), np.full((m, k_max), 99, np.int32), np.full((m, k_max), 5, np.int32)
+    count = np.full(m, 3, np.int32)
+    kernel(solid, width, height, xs, ys, inv_w, tri_inst, np.array(SAMPLE_PATTERNS[n_samples], float), band_start,
+           band_tris, *out, count, offset)
+    return out + (count,)
 
 
 @njit(cache=False, error_model="numpy")
@@ -224,7 +334,8 @@ class RasterizeTests(unittest.TestCase):
     def test_same_samples_as_testing_the_whole_box(self):
         """Walking spans covers exactly the samples testing every sample of the bounding box does: random,
         tiny, sliver, nearly flat, huge, on-the-grid, mesh and broken triangles, cut-outs among them, at every
-        sample count, for whole frames and for scattered pixels (as the edge pass and mirrors draw)."""
+        sample count, for whole frames and for scattered pixels (as the edge pass and mirrors draw, through
+        rasterize_pixels, which the whole frames check too: every pixel listed)."""
         rng = np.random.default_rng(26)
         size = 8
         alpha = rng.random((size, size))
@@ -245,7 +356,7 @@ class RasterizeTests(unittest.TestCase):
             for n_samples in (1, 4, 8, 16):
                 for scattered in (False, True):
                     if scattered:
-                        pixels = np.flatnonzero(rng.random(width * height) < 0.3)
+                        pixels = np.flatnonzero(rng.random(width * height) < rng.choice([0.02, 0.3, 0.9]))
                         if not len(pixels):
                             continue
                         slots = np.full(width * height, -1, np.int64)
@@ -254,13 +365,47 @@ class RasterizeTests(unittest.TestCase):
                         slots = np.arange(width * height, dtype=np.int64)
                     args = (xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, n_samples, slots)
                     want_depth, want_tris = draw(reference_rasterize, *args)
-                    got_depth, got_tris = draw(rasterize, *args)
-                    where = f"{kind}, {width}x{height}, {n_samples} samples, scattered {scattered}"
-                    np.testing.assert_array_equal(got_tris, want_tris, err_msg=where)
-                    np.testing.assert_array_equal(got_depth, want_depth, err_msg=where)
+                    for kernel in (rasterize, rasterize_pixels):
+                        got_depth, got_tris = draw(kernel, *args)
+                        where = f"{kind}, {width}x{height}, {n_samples} samples, scattered {scattered}, {kernel}"
+                        np.testing.assert_array_equal(got_tris, want_tris, err_msg=where)
+                        np.testing.assert_array_equal(got_depth, want_depth, err_msg=where)
                     checked += int((want_tris >= 0).sum())
         self.assertGreater(checked, 100000)  # (the cases do cover samples)
 
+
+    def test_same_layers_as_testing_the_whole_box(self):
+        """rasterize_layers() walking spans makes the same layer lists as testing every sample of the bounding box:
+        the same kinds of triangles, of a few objects (so that layers merge), over solid surfaces at random depths
+        (some nearer than the triangles, some infinite, some empty), at every sample count and up to 4 layers."""
+        rng = np.random.default_rng(2626)
+        checked = 0
+        for trial in range(40):
+            kind = KINDS[trial % len(KINDS)]
+            width, height = (int(rng.integers(1, 90)), int(rng.integers(1, 50))) if trial % 3 else (61, 37)
+            xs, ys = triangles(rng, kind, int(rng.integers(20, 300)), width, height)
+            xs, ys = np.ascontiguousarray(xs, float), np.ascontiguousarray(ys, float)
+            n = xs.shape[0]
+            inv_w = rng.uniform(0.01, 2.0, (n, 3))
+            if trial % 4 == 1:  # one object at one depth: every neighbour merges
+                inv_w[:] = rng.uniform(0.5, 1.0)
+            tri_inst = rng.integers(0, int(rng.integers(1, 6)), n).astype(np.int64)
+            offset = float(rng.choice([0.0, 0.1, 1.0]))
+            for n_samples in (1, 4, 8, 16):
+                solid = rng.uniform(0.0, 1.0, (width * height, n_samples))
+                solid[rng.random(solid.shape) < 0.3] = 0.0
+                solid[rng.random(solid.shape) < 0.05] = np.inf
+                k_max = int(rng.integers(1, 5))
+                args = (xs, ys, inv_w, tri_inst, solid, width, height, n_samples, k_max, offset)
+                want = draw_layers(reference_rasterize_layers, *args)
+                got = draw_layers(rasterize_layers, *args)
+                where = f"{kind}, {width}x{height}, {n_samples} samples, {k_max} layers"
+                np.testing.assert_array_equal(got[3], want[3], err_msg=where)
+                held = np.arange(k_max)[None, :] < want[3][:, None]
+                for a, b in zip(got[:3], want[:3]):
+                    np.testing.assert_array_equal(a[held], b[held], err_msg=where)
+                checked += int(want[3].sum())
+        self.assertGreater(checked, 50000)  # (the cases do cover layers)
 
 if __name__ == "__main__":
     unittest.main()
