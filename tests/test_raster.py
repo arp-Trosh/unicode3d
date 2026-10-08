@@ -243,8 +243,96 @@ def triangles(rng, kind, n, width, height):
 KINDS = ("random", "tiny", "sliver", "flat", "huge", "grid", "mesh", "edge", "bad", "edge")
 
 
-def draw(kernel, xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, n_samples, slots):
-    """depth and tris from one kernel, binned as Renderer._bins does."""
+def occluding(rng, kind, n, width, height):
+    """n triangles (xs, ys, inv_w: (n, 3)) that hide one another, of one kind, for rasterize()'s early-out: walls
+    across the frame at a few depths with things in front of and behind them, triangles nested in one another,
+    coplanar copies (exact ties), triangles a hair behind or in front of a wall, huge walls, and broken depths."""
+    def tri_around(m, size):
+        cx, cy = rng.uniform(-2, width + 2, m), rng.uniform(-2, height + 2, m)
+        return (cx[:, None] + rng.uniform(-1, 1, (m, 3)) * size[:, None],
+                cy[:, None] + rng.uniform(-1, 1, (m, 3)) * size[:, None])
+
+    def walls(m, scale=1.0):  # pairs of triangles covering the frame (and more)
+        k = (m + 1) // 2
+        x0, x1 = -scale * rng.uniform(1, 5, k), width + scale * rng.uniform(1, 5, k)
+        y0, y1 = -scale * rng.uniform(1, 5, k), height + scale * rng.uniform(1, 5, k)
+        xs = np.concatenate([np.stack([x0, x1, x1], 1), np.stack([x0, x1, x0], 1)])[:m]
+        ys = np.concatenate([np.stack([y0, y0, y1], 1), np.stack([y0, y1, y1], 1)])[:m]
+        return xs, ys
+
+    def tilted(depth, m):  # 1/w at the corners: a plane a little off facing the camera
+        return depth[:, None] * (1.0 + rng.uniform(-0.05, 0.05, (m, 3)))
+
+    n_walls = max(n // 8, 2)
+    wx, wy = walls(n_walls, 1e6 if kind == "huge" else 1.0)
+    w_depth = np.repeat(rng.uniform(0.2, 1.0, (n_walls + 1) // 2), 2)[:n_walls]
+    w_inv = tilted(w_depth, n_walls) if kind != "flat" else np.repeat(w_depth[:, None], 3, 1)
+    m = n - n_walls
+    if kind == "nested":  # each triangle within the one before it (so a box's tiles end at its edges)
+        size = 40.0 * 0.9 ** np.arange(m)
+        cx, cy = rng.uniform(0, width), rng.uniform(0, height)
+        ang = rng.uniform(0, 2 * np.pi, (m, 1)) + np.array([0, 2.1, 4.2])
+        xs, ys = cx + size[:, None] * np.cos(ang), cy + size[:, None] * np.sin(ang)
+        inv = tilted(rng.uniform(0.1, 1.2, m), m)
+    elif kind == "coplanar":  # copies of a few triangles, the same in every way: the first must keep them
+        bx, by = tri_around(4, rng.uniform(5, 60, 4))
+        bi = tilted(rng.uniform(0.2, 1.0, 4), 4)
+        pick = rng.integers(0, 4, m)
+        xs, ys, inv = bx[pick], by[pick], bi[pick]
+    elif kind == "hair":  # a hair behind or in front of a wall drawn first: the bound's slack
+        xs, ys = tri_around(m, rng.uniform(1, 50, m))
+        j = rng.integers(0, n_walls, m)
+        rel = 10.0 ** rng.uniform(-16, -2, (m, 1)) * rng.choice([-1.0, 1.0], (m, 1))
+        inv = np.repeat(w_depth[j][:, None], 3, 1) * (1.0 + rel)
+        w_inv = np.repeat(w_depth[:, None], 3, 1)
+    elif kind == "corner":  # a sample just beyond a near corner (weights 1 + l, -l / 2, -l / 2): nearer than the
+        # corner by a part l of it, so in front of a wall drawn first, over all the tiles it touches, at less than that
+        m = max(n // 8, 1)
+        offsets = np.array(SAMPLE_PATTERNS[1] + SAMPLE_PATTERNS[4] + SAMPLE_PATTERNS[8] + SAMPLE_PATTERNS[16])
+        pick = offsets[rng.integers(0, len(offsets), m)]
+        sx = rng.integers(0, max(width, 1), m) + pick[:, 0]
+        sy = rng.integers(0, max(height, 1), m) + pick[:, 1]
+        far_x, far_y = tri_around(m, rng.uniform(2, 20, m))
+        lam = rng.uniform(1.0, 1.99, m) * 1e-4
+        mx, my = (far_x[:, 1] + far_x[:, 2]) / 2, (far_y[:, 1] + far_y[:, 2]) / 2
+        xs = np.stack([(sx + lam * mx) / (1 + lam), far_x[:, 1], far_x[:, 2]], 1)
+        ys = np.stack([(sy + lam * my) / (1 + lam), far_y[:, 1], far_y[:, 2]], 1)
+        w0 = rng.uniform(0.2, 1.0, m)
+        inv = np.stack([w0, w0 * 1e-6, w0 * 1e-6], 1)
+        x0 = np.floor((xs.min(axis=1) - 2) / 8) * 8 - 1
+        x1 = np.ceil((xs.max(axis=1) + 2) / 8) * 8 + 1
+        y0 = np.floor((ys.min(axis=1) - 2) / 4) * 4 - 1
+        y1 = np.ceil((ys.max(axis=1) + 2) / 4) * 4 + 1
+        wx = np.concatenate([np.stack([x0, x1, x1], 1), np.stack([x0, x1, x0], 1)])
+        wy = np.concatenate([np.stack([y0, y0, y1], 1), np.stack([y0, y1, y1], 1)])
+        w_inv = np.tile(w0 * (1 + lam * rng.uniform(0.3, 0.9, m)), 2)[:, None].repeat(3, 1)
+        return (np.ascontiguousarray(np.concatenate([wx, xs]), float),
+                np.ascontiguousarray(np.concatenate([wy, ys]), float),
+                np.ascontiguousarray(np.concatenate([w_inv, inv]), float))
+    elif kind == "bad":  # NaN, infinite, negative and zero depths, and broken corners
+        xs, ys = tri_around(m, rng.uniform(1, 40, m))
+        inv = tilted(rng.uniform(0.1, 1.2, m), m)
+        bad = rng.random((m, 3)) < 0.15
+        inv[bad] = rng.choice([np.nan, np.inf, -np.inf, -0.5, 0.0, 1e300], bad.sum())
+        bad = rng.random((m, 3)) < 0.05
+        xs[bad] = rng.choice([np.nan, np.inf, -1e300], bad.sum())
+    else:  # "random", "flat", "huge": things of every size in front of and behind the walls
+        xs, ys = tri_around(m, 10.0 ** rng.uniform(-1, 2.5, m))
+        inv = tilted(rng.uniform(0.1, 1.2, m), m)
+    xs, ys, inv = np.concatenate([wx, xs]), np.concatenate([wy, ys]), np.concatenate([w_inv, inv])
+    order = rng.permutation(len(xs))
+    if rng.random() < 0.5:  # near to far, as the early-out likes best (else in any order)
+        near = np.nan_to_num(inv.max(axis=1), nan=0.0)
+        order = np.argsort(-near, kind="stable")
+    return (np.ascontiguousarray(xs[order], float), np.ascontiguousarray(ys[order], float),
+            np.ascontiguousarray(inv[order], float))
+
+
+OCCLUDING = ("random", "nested", "coplanar", "hair", "flat", "huge", "bad", "corner")
+
+
+def bins(xs, ys, see, height):
+    """(band_start, band_tris): the triangles touching each band of rows, as Renderer._bins gives them."""
     n_bands = (height + ROW_BAND - 1) // ROW_BAND
     span = np.tile([-np.inf, np.inf], (n_bands, 1))
     select = see.astype(np.int64)
@@ -254,6 +342,12 @@ def draw(kernel, xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, 
     np.cumsum(band_count, out=band_start[1:])
     band_tris = np.zeros(int(band_start[-1]), np.int64)
     bin_bands(xs, ys, select, 7, height, span, per_chunk, band_start, band_tris)
+    return band_start, band_tris
+
+
+def draw(kernel, xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, n_samples, slots):
+    """depth and tris from one kernel, binned as Renderer._bins does."""
+    band_start, band_tris = bins(xs, ys, see, height)
     m = int(slots.max()) + 1
     depth = np.full((m, n_samples), 7.0)  # (anything: clear empties a whole frame's, others are filled here)
     tris = np.full((m, n_samples), 99, np.int32)
@@ -373,6 +467,56 @@ class RasterizeTests(unittest.TestCase):
                     checked += int((want_tris >= 0).sum())
         self.assertGreater(checked, 100000)  # (the cases do cover samples)
 
+
+    def test_hidden_triangles_are_skipped_exactly(self):
+        """rasterize() leaving out tiles of triangles behind what it has drawn (see nearest_bound) changes no
+        sample: frames of walls with things in front and behind, nested, coplanar (ties keep the first), a hair
+        behind or in front, huge and broken triangles, cut-outs among them, near to far or in any order, at every
+        sample count; drawn into empty frames, and over ones already holding depths (some NaN, infinite, negative
+        or empty)."""
+        rng = np.random.default_rng(32)
+        size = 8
+        alpha = rng.random((size, size))
+        texels = np.concatenate([rng.random((size * size, 3)), alpha.reshape(-1, 1)], 1).astype(np.float32)
+        texture = (texels, np.array([[0, size, size]], np.int64), np.array([0, 1], np.int64))
+        checked = 0
+        for trial in range(42):
+            kind = OCCLUDING[trial % len(OCCLUDING)]
+            width, height = (int(rng.integers(1, 120)), int(rng.integers(1, 40))) if trial % 3 else (97, 33)
+            xs, ys, inv_w = occluding(rng, kind, int(rng.integers(16, 200)), width, height)
+            n = xs.shape[0]
+            see = np.where(rng.random(n) < 0.2, 2, 0).astype(np.int8)
+            attrs = rng.uniform(-0.5, 1.5, (n, 3, 12))
+            chain = np.where(see == 2, 0, -1).astype(np.int64)
+            lod = rng.uniform(-1, 1, n)
+            slots = np.arange(width * height, dtype=np.int64)
+            for n_samples in (1, 4, 8, 16):
+                args = (xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, n_samples, slots)
+                want_depth, want_tris = draw(reference_rasterize, *args)
+                got_depth, got_tris = draw(rasterize, *args)
+                where = f"{kind}, {width}x{height}, {n_samples} samples"
+                np.testing.assert_array_equal(got_tris, want_tris, err_msg=where)
+                np.testing.assert_array_equal(got_depth, want_depth, err_msg=where)
+                checked += int((want_tris >= 0).sum())
+                # Over depths already there (clear off), some of the pixels left out.
+                before = rng.uniform(0.0, 1.2, (width * height, n_samples))
+                odd = rng.random(before.shape)
+                before[odd < 0.3] = 0.0
+                before[(odd > 0.97)] = np.nan
+                before[(odd > 0.94) & (odd <= 0.97)] = np.inf
+                before[(odd > 0.91) & (odd <= 0.94)] = -0.5
+                part = slots.copy()
+                part[rng.random(width * height) < 0.1] = -1
+                out = []
+                for kernel in (reference_rasterize, rasterize):
+                    depth, tris = before.copy(), np.full(before.shape, -1, np.int32)
+                    band_start, band_tris = bins(xs, ys, see, height)
+                    kernel(depth, tris, width, height, xs, ys, inv_w, np.array(SAMPLE_PATTERNS[n_samples], float),
+                           part, band_start, band_tris, see, attrs, chain, lod, *texture, False)
+                    out.append((depth, tris))
+                np.testing.assert_array_equal(out[1][1], out[0][1], err_msg=where + ", over depths")
+                np.testing.assert_array_equal(out[1][0], out[0][0], err_msg=where + ", over depths")
+        self.assertGreater(checked, 100000)
 
     def test_same_layers_as_testing_the_whole_box(self):
         """rasterize_layers() walking spans makes the same layer lists as testing every sample of the bounding box:

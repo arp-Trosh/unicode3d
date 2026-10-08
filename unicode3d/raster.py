@@ -234,6 +234,60 @@ def _row_span(lo, hi, xa, ya, ex, ey, per_area, cy_lo, cy_hi, width):
     return lo, hi
 
 
+OCCLUSION_TILE = 8  # columns of pixels in each tile (by ROW_BAND rows) whose farthest depth rasterize() keeps
+OCCLUSION_STALE = 2  # triangles drawn over a tile before rasterize() looks for its farthest depth again
+OCCLUSION_WAIT = 4  # and more after looking found it farther than a triangle
+
+
+@njit(cache=True, error_model="numpy")
+def nearest_bound(x0, x1, x2, y0, y1, y2, w0, w1, w2, area):
+    """A depth (1/w) that no sample rasterize() writes for this triangle can be nearer than, given its corners'
+    pixel coordinates and 1/w and its signed area as rasterize() works them out; NaN where none is sure.
+
+    A sample's depth is b0 w0 + b1 w1 + b2 w2, from weights that rasterize() lets go down to -1e-4 each (two at
+    most, as they add up to 1) and that it works out with rounding: their sum is 1 to within a few dozen rounding
+    steps of the size of the products in them (the box's width times its height, with a pixel or two each way for
+    the samples around it) relative to the area. So the depth is at most the largest of the corners' times
+    1 + 2e-4 + that error, and a little more for rounding the sum. A triangle with a negative or NaN corner, or so
+    thin that the error could be large (1e-3), gets NaN."""
+    if not (w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0):
+        return np.nan
+    bw = max(x0, x1, x2) - min(x0, x1, x2)
+    bh = max(y0, y1, y2) - min(y0, y1, y2)
+    rounding = 2e-14 * (bw + 2.0) * (bh + 2.0) / abs(area) + 1e-12
+    if not rounding < 1e-3:
+        return np.nan
+    return max(w0, w1, w2) * (1.0 + 2.5e-4 + rounding)
+
+
+@njit(cache=True, error_model="numpy", inline="always")
+def _behind(z, k, far, drawn, depth, slots, width, band_y0, band_y1):
+    """Whether no sample of tile k of a band (rows band_y0..band_y1, OCCLUSION_TILE columns from
+    k * OCCLUSION_TILE) is farther than z, so that a triangle no nearer than z anywhere changes none of them.
+
+    far[k] is at most the farthest of them (NaN samples left out: nothing replaces them): samples only come
+    nearer, so it stays so as triangles are drawn. drawn[k] counts the triangles drawn over the tile since far[k]
+    was worked out; from OCCLUSION_STALE of them it is worked out again, where it would answer no."""
+    if z <= far[k]:
+        return True
+    if drawn[k] < OCCLUSION_STALE or z != z:  # (NaN: no bound)
+        return False
+    m = np.inf
+    for py in range(band_y0, band_y1 + 1):
+        for px in range(k * OCCLUSION_TILE, min((k + 1) * OCCLUSION_TILE, width)):
+            col = slots[py * width + px]
+            if col >= 0:
+                for s in range(depth.shape[1]):
+                    d = depth[col, s]
+                    if d < z:  # (no: far[k] stays as it was, and is not looked for again for a while)
+                        drawn[k] = -OCCLUSION_WAIT
+                        return False
+                    if d < m:
+                        m = d
+    far[k], drawn[k] = m, 0
+    return True
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
 def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_start, band_tris, see, attrs, chain, lod,
               texels, levels, first, clear):
@@ -254,6 +308,12 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
     that are rasterized in parallel (in a scattered order, see _scattered), each band
     taking its triangles in order.
 
+    Each band also keeps, for tiles of OCCLUSION_TILE of its columns, a depth that none of the tile's samples is
+    farther than (see _behind), and leaves out of a triangle's box the tiles at either end where that is no farther
+    than the triangle can be near anywhere (nearest_bound): a triangle behind walls already drawn is skipped, or
+    walked over less. Its samples there would all have failed the depth test, ties included, so the result is the
+    same.
+
     Cut-outs (see[t] == 2: textures with holes, see project()) cover only the sample positions where
     their texture's alpha (from mipmap chain chain[t], at the uv in attrs, at the mip level texture_lod gives
     there plus lod[t]) is above (s + 0.5) / S for sample s of S: partly clear texels cover some of a pixel's
@@ -271,6 +331,10 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
         band = _scattered(nth, n_bands)
         band_y0 = band * ROW_BAND
         band_y1 = min(band_y0 + ROW_BAND, height) - 1
+        # Per tile of the band's pixels (OCCLUSION_TILE columns): a depth no sample there is farther than, and the
+        # triangles drawn over it since (see _behind).
+        n_tiles = (width + OCCLUSION_TILE - 1) // OCCLUSION_TILE
+        far, drawn = np.full(n_tiles, -np.inf), np.full(n_tiles, OCCLUSION_STALE, np.int64)
         if clear:
             for c in range(band_y0 * width, (band_y1 + 1) * width):
                 col = slots[c]
@@ -291,6 +355,17 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
                 continue
             bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+            # Less the tiles at either end of the box that are nowhere farther than the triangle can be near: its
+            # samples there would all fail the depth test (ties keep the first).
+            near = nearest_bound(x0, x1, x2, y0, y1, y2, w0, w1, w2, area)
+            k0, k1 = bx0 // OCCLUSION_TILE, bx1 // OCCLUSION_TILE
+            while k0 <= k1 and _behind(near, k0, far, drawn, depth, slots, width, band_y0, band_y1):
+                k0 += 1
+            while k1 >= k0 and _behind(near, k1, far, drawn, depth, slots, width, band_y0, band_y1):
+                k1 -= 1
+            if k0 > k1:
+                continue
+            bx0, bx1 = max(bx0, k0 * OCCLUSION_TILE), min(bx1, (k1 + 1) * OCCLUSION_TILE - 1)
             holes = see[t] == 2
             per_area = 1.0 / area  # (multiplying by it is several times quicker than dividing by area)
             for py in range(by0, by1 + 1):
@@ -327,6 +402,8 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
                                     continue
                             depth[col, s] = z
                             tris[col, s] = t
+            for k in range(k0, k1 + 1):
+                drawn[k] += 1
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
