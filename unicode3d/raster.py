@@ -809,9 +809,12 @@ SURFACE = 7  # per corner of a shadow map's triangle: linear rgb | alpha | u / w
 
 
 NO_TEXEL = 3  # the kind (`see`) of a shadow map's triangle that covers no texel (see project_depth): in no bin
+# The helpers project_depth(), count_cube() and project_cube() call per face are inlined into them (inline="always",
+# as shading's are): a call passes each of its arrays as a structure of several words, and with about a dozen arrays
+# that cost several times the work of projecting a face.
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _shadow_corner(corners, j, width, height, perspective):
     """Corner j of triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) in a width x height shadow map: x, y
     and its depth (see project_depth)."""
@@ -820,7 +823,7 @@ def _shadow_corner(corners, j, width, height, perspective):
             iw if perspective else (1.0 - corners[j, 2] * iw) * 0.5)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _emit_surface(corners, k, surf):
     """What the surface of triangle `corners` does to light, as triangle k's surf (see project_depth)."""
     for j in range(3):
@@ -829,7 +832,7 @@ def _emit_surface(corners, k, surf):
         surf[k, j, 4], surf[k, j, 5], surf[k, j, 6] = corners[j, 8] * iw, corners[j, 9] * iw, iw
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _covers_texel(x0, x1, x2, y0, y1, y2, width, height):
     """Whether a triangle of a width x height shadow map, corners (x0, y0), (x1, y1), (x2, y2), may cover a texel's
     centre. rasterize_depth() and rasterize_tint() only write texels whose centre is inside the triangle, widened
@@ -843,7 +846,7 @@ def _covers_texel(x0, x1, x2, y0, y1, y2, width, height):
     return np.floor(x_hi - 0.5) >= np.ceil(x_lo - 0.5) and np.floor(y_hi - 0.5) >= np.ceil(y_lo - 0.5)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, out):
     """Corner j of face f of instance inst as a shadow map needs it: linear rgb into out[4:7], alpha into
     out[7] and uv into out[8:10]."""
@@ -853,7 +856,7 @@ def _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, out):
     out[8], out[9] = uvs[f, j, 0], uvs[f, j, 1]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _face_kind(colors, inst_alpha, face_kind, inst, f):
     """Kind of face f of instance inst, as project() gives triangles: 1 see-through, 2 cut-out, 0 solid."""
     if face_kind[f] == 2 or inst_alpha[inst] < 1.0:
@@ -864,7 +867,7 @@ def _face_kind(colors, inst_alpha, face_kind, inst, f):
     return 2 if face_kind[f] == 1 else 0
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod):
     """Triangle k of a shadow map, from face f: its kind, mipmap chain, and mip level for one texel of the
     map (log2 of how many texture texels span it)."""
@@ -879,7 +882,7 @@ def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, s
     lod[k] = 0.5 * np.log2(max(abs(d1u * d2v - d1v * d2u) * face_texels[f] / max(px_area, 1e-9), 1e-9))
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _shadow_triangle(corners, k, f, kind, width, height, perspective, colors, uvs, inst_rgb, inst_alpha, face_kind,
                      inst, face_chain, face_texels, xs, ys, depth, surf, see, chain, lod):
     """Store triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) from face f of instance inst as triangle k of
@@ -976,7 +979,7 @@ def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_v
                 k_cut += 1
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _cube_face_corners(world, faces, f, base, mat, near, corners):
     """Face f's corners in the clip space of one face of a cube map (`mat`), into corners[:, 0:4], and how
     many of them are in front of its near plane: 0 if none, or if all lie beyond one of its sides."""
