@@ -18,7 +18,9 @@ MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}
 # The helpers resolve() and resolve_cells() call per pixel are inlined into them (inline="always"): a call passes
 # each of its many arrays as a structure of several words, which cost more than the shading itself (inlined, a
 # pixel's shading took a third less time). They compile into each kernel calling them, so the kernels take longer
-# to compile (seconds, once: Numba's cache keeps them).
+# to compile (seconds, once: Numba's cache keeps them). So are the texture sampler's (texture.sample and the helpers
+# it calls) and raster's barycentric and texture_lod: called, a textured pixel's sampling cost about a tenth of
+# resolve_cells's time more.
 
 
 def _decode_exact(level):

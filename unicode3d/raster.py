@@ -441,7 +441,7 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
                     layer_count[c] = min(n + 1, k_max)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def barycentric(xs, ys, t, cx, cy):
     """Barycentric weights of point (cx, cy) in triangle t, clamped to the triangle.
 
@@ -465,7 +465,7 @@ def barycentric(xs, ys, t, cx, cy):
 ATTRS = 12  # per-corner attributes of a screen triangle: world xyz | normal xyz | uv | linear rgb | alpha
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain):
     """The mip level to sample triangle t's texture (mipmap chain `chain`) at, at barycentric weights b: log2 of
     how many texels of its finest level a pixel spans there, along whichever of the screen's x and y it spans
