@@ -329,6 +329,96 @@ def rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_st
                             tris[col, s] = t
 
 
+@njit(cache=True, error_model="numpy", parallel=True)
+def rasterize_pixels(depth, tris, width, height, xs, ys, inv_w, offsets, pixels, row_start, next_pixel, band_start,
+                     band_tris, see, attrs, chain, lod, texels, levels, first):
+    """rasterize() for scattered pixels (the edge pass and mirrors): the same tests in the same order, so the same
+    result as rasterize() with slots marking just these pixels, but each band skips the triangles and rows that
+    reach none of its pixels, and walks only its pixels within each row's span rather than every pixel of it.
+
+    pixels: the flat indices of the pixels drawn, increasing; depth and tris (as for rasterize()) have a row for
+    each, in that order, and are not cleared here. row_start (height + 1,): pixels[row_start[y]:row_start[y + 1]]
+    are those in row y. next_pixel (width * height,): scratch space, where each band notes, for each of its pixels q,
+    where in `pixels` the first one at or after q is, so that a row's pixels within a span are found at once."""
+    n_samples = offsets.shape[0]
+    oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
+    oymin, oymax = offsets[:, 1].min(), offsets[:, 1].max()
+    n_bands = (height + ROW_BAND - 1) // ROW_BAND
+    for nth in prange(n_bands):
+        band = _scattered(nth, n_bands)
+        band_y0 = band * ROW_BAND
+        band_y1 = min(band_y0 + ROW_BAND, height) - 1
+        # The columns the band's pixels span, so that triangles wholly beside them are skipped.
+        col_lo, col_hi = width, -1
+        for py in range(band_y0, band_y1 + 1):
+            r0, r1 = row_start[py], row_start[py + 1]
+            if r0 < r1:
+                col_lo = min(col_lo, pixels[r0] - py * width)
+                col_hi = max(col_hi, pixels[r1 - 1] - py * width)
+        if col_lo > col_hi:
+            continue
+        j = row_start[band_y1 + 1]
+        for q in range((band_y1 + 1) * width - 1, band_y0 * width - 1, -1):
+            if j > 0 and pixels[j - 1] >= q:
+                j -= 1
+            next_pixel[q] = j
+        for i in range(band_start[band], band_start[band + 1]):
+            t = band_tris[i]
+            x0, x1, x2 = xs[t, 0], xs[t, 1], xs[t, 2]
+            y0, y1, y2 = ys[t, 0], ys[t, 1], ys[t, 2]
+            area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+            if not drawable(area):
+                continue
+            by0, by1 = pixel_range(min(y0, y1, y2) - oymax, max(y0, y1, y2) - oymin, band_y0, band_y1)
+            if by0 > by1:
+                continue
+            bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
+            if bx0 > bx1 or bx1 < col_lo or bx0 > col_hi:  # (none of the band's pixels in the box)
+                continue
+            w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+            holes = see[t] == 2
+            per_area = 1.0 / area
+            for py in range(by0, by1 + 1):
+                row = py * width
+                r1 = row_start[py + 1]
+                col = next_pixel[row + bx0]
+                if col >= r1 or pixels[col] > row + bx1:
+                    continue  # none of the pixels are in this row of the box
+                lo, hi = bx0 + oxmin, bx1 + oxmax
+                lo, hi = _row_span(lo, hi, x1, y1, x2 - x1, y2 - y1, per_area, py + oymin, py + oymax, width)
+                lo, hi = _row_span(lo, hi, x2, y2, x0 - x2, y0 - y2, per_area, py + oymin, py + oymax, width)
+                lo, hi = _row_span(lo, hi, x0, y0, x1 - x0, y1 - y0, per_area, py + oymin, py + oymax, width)
+                ax, bx = pixel_range(lo - oxmax, hi - oxmin, bx0, bx1)
+                if ax > bx:
+                    continue
+                col = next_pixel[row + ax]
+                while col < r1 and pixels[col] <= row + bx:
+                    px = pixels[col] - row
+                    for s in range(n_samples):  # (the tests of rasterize())
+                        cx, cy = px + offsets[s, 0], py + offsets[s, 1]
+                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) * per_area
+                        if b0 < -1e-4:
+                            continue
+                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) * per_area
+                        if b1 < -1e-4:
+                            continue
+                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) * per_area
+                        if b2 < -1e-4:
+                            continue
+                        z = b0 * w0 + b1 * w1 + b2 * w2
+                        if z > depth[col, s]:
+                            if holes:
+                                u = (b0 * w0 * attrs[t, 0, 6] + b1 * w1 * attrs[t, 1, 6] + b2 * w2 * attrs[t, 2, 6]) / z
+                                v = (b0 * w0 * attrs[t, 0, 7] + b1 * w1 * attrs[t, 1, 7] + b2 * w2 * attrs[t, 2, 7]) / z
+                                level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t])
+                                if (sample_alpha(texels, levels, first, chain[t], u, v, level + lod[t])
+                                        <= (s + 0.5) / n_samples):
+                                    continue
+                            depth[col, s] = z
+                            tris[col, s] = t
+                    col += 1
+
+
 LAYER_MERGE = 0.02  # fragments of one object this close in depth (relative) are one surface: one layer
 LAYER_FRONT = 1e-5  # a see-through surface must be nearer than the solid one by this part of the solid one's distance
                     # from the camera's plane to show: one touching it (glass standing on a table) would otherwise

@@ -18,7 +18,8 @@ from .color import cached_linear_rgb
 from .lights import LIGHT_COLUMNS, as_lights, light_rows
 from .mirrors import Mirrors
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, SAMPLE_PATTERNS, SOLID, VERTEX_CHUNK, FrameBuffer,
-                     bin_bands, count_bands, project, rasterize, rasterize_layers, transform, upscale, NO_CLIP)
+                     bin_bands, count_bands, project, rasterize, rasterize_layers, rasterize_pixels, transform, upscale,
+                     NO_CLIP)
 from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
@@ -1084,7 +1085,8 @@ class Renderer(ShadowMaps, Mirrors):
     # ----- sampling and shading ---------------------------------------------------------
 
     def _accumulate(self, scene, pattern, name, pixels=None, depth=None, ids=None, frame_samples=None):
-        """Render every sample position in `pattern`, in all pixels or just the given flat pixel indices.
+        """Render every sample position in `pattern`, in all pixels or just the given flat pixel indices (in
+        increasing order: see raster.rasterize_pixels).
 
         Returns _resolve()'s per-pixel outputs (rgb, cover, more) and, at each sample, its depth,
         triangle and colour (sample_depth, tris, sample_rgb), in buffers named after `name`; the depth
@@ -1096,20 +1098,23 @@ class Renderer(ShadowMaps, Mirrors):
         n = len(pattern)
         whole = pixels is None
         if whole:
-            pixels = slots = buf.arange(fb.width * fb.height)
-        else:
-            slots = buf.get("slots", (fb.width * fb.height,), np.int64)
-            slots.fill(-1)
-            slots[pixels] = buf.arange(fb.width * fb.height)[:len(pixels)]
+            pixels = buf.arange(fb.width * fb.height)
         m = len(pixels)
         sample_depth = buf.get(name + "_sample_depth", (m, n))
         tris = buf.get(name + "_tris", (m, n), np.int32)
-        if not whole:  # (a whole frame's are emptied by rasterize, band by band)
+        offsets = np.array(pattern, dtype=float)
+        if whole:  # (its samples are emptied by rasterize, band by band)
+            rasterize(sample_depth, tris, fb.width, fb.height, scene["xs"], scene["ys"], scene["inv_w"], offsets,
+                      pixels, *scene["bands"], scene["see"], scene["attrs"], scene["chain"], scene["lod"],
+                      *scene["textures"], True)
+        else:  # (a few pixels: the edge pass, or a mirror's)
             sample_depth.fill(0.0)
             tris.fill(-1)
-        rasterize(sample_depth, tris, fb.width, fb.height, scene["xs"], scene["ys"], scene["inv_w"],
-                  np.array(pattern, dtype=float), slots, *scene["bands"], scene["see"], scene["attrs"], scene["chain"],
-                  scene["lod"], *scene["textures"], whole)
+            row_start = np.searchsorted(pixels, buf.arange(fb.height + 1) * fb.width)
+            rasterize_pixels(sample_depth, tris, fb.width, fb.height, scene["xs"], scene["ys"], scene["inv_w"],
+                             offsets, pixels, row_start, buf.get("next_pixel", (fb.width * fb.height,), np.int64),
+                             *scene["bands"], scene["see"], scene["attrs"], scene["chain"], scene["lod"],
+                             *scene["textures"])
         if frame_samples is None:
             sums = buf.get(name + "_rgb", (m, 3)), buf.get(name + "_cover", (m,), np.int64)
             frame = np.zeros((0, 3)), np.zeros(0)

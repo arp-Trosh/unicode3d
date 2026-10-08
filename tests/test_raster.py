@@ -9,7 +9,8 @@ import numpy as np
 from numba import njit
 
 from unicode3d.raster import (LAYER_FRONT, LAYER_MERGE, ROW_BAND, SAMPLE_PATTERNS, _row_span, bin_bands, bit_count,
-                              count_bands, drawable, pixel_range, rasterize, rasterize_layers, texture_lod)
+                              count_bands, drawable, pixel_range, rasterize, rasterize_layers, rasterize_pixels,
+                              texture_lod)
 from unicode3d.texture import sample_alpha
 
 
@@ -255,11 +256,18 @@ def draw(kernel, xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, 
     depth = np.full((m, n_samples), 7.0)  # (anything: clear empties a whole frame's, others are filled here)
     tris = np.full((m, n_samples), 99, np.int32)
     whole = m == width * height
-    if not whole:
+    if not whole or kernel is rasterize_pixels:  # (which leaves emptying them to its caller)
         depth.fill(0.0)
         tris.fill(-1)
-    kernel(depth, tris, width, height, xs, ys, inv_w, np.array(SAMPLE_PATTERNS[n_samples], float), slots, band_start,
-           band_tris, see, attrs, chain, lod, *texture, whole)
+    offsets = np.array(SAMPLE_PATTERNS[n_samples], float)
+    if kernel is rasterize_pixels:  # (the pixels in order, with their rows: as Renderer._accumulate gives them)
+        pixels = np.flatnonzero(slots >= 0)
+        row_start = np.searchsorted(pixels, np.arange(height + 1) * width)
+        kernel(depth, tris, width, height, xs, ys, inv_w, offsets, pixels, row_start,
+               np.full(width * height, -99, np.int64), band_start, band_tris, see, attrs, chain, lod, *texture)
+    else:
+        kernel(depth, tris, width, height, xs, ys, inv_w, offsets, slots, band_start, band_tris, see, attrs, chain,
+               lod, *texture, whole)
     return depth, tris
 
 
@@ -324,7 +332,8 @@ class RasterizeTests(unittest.TestCase):
     def test_same_samples_as_testing_the_whole_box(self):
         """Walking spans covers exactly the samples testing every sample of the bounding box does: random,
         tiny, sliver, nearly flat, huge, on-the-grid, mesh and broken triangles, cut-outs among them, at every
-        sample count, for whole frames and for scattered pixels (as the edge pass and mirrors draw)."""
+        sample count, for whole frames and for scattered pixels (as the edge pass and mirrors draw, through
+        rasterize_pixels, which the whole frames check too: every pixel listed)."""
         rng = np.random.default_rng(26)
         size = 8
         alpha = rng.random((size, size))
@@ -345,7 +354,7 @@ class RasterizeTests(unittest.TestCase):
             for n_samples in (1, 4, 8, 16):
                 for scattered in (False, True):
                     if scattered:
-                        pixels = np.flatnonzero(rng.random(width * height) < 0.3)
+                        pixels = np.flatnonzero(rng.random(width * height) < rng.choice([0.02, 0.3, 0.9]))
                         if not len(pixels):
                             continue
                         slots = np.full(width * height, -1, np.int64)
@@ -354,10 +363,11 @@ class RasterizeTests(unittest.TestCase):
                         slots = np.arange(width * height, dtype=np.int64)
                     args = (xs, ys, inv_w, see, attrs, chain, lod, texture, width, height, n_samples, slots)
                     want_depth, want_tris = draw(reference_rasterize, *args)
-                    got_depth, got_tris = draw(rasterize, *args)
-                    where = f"{kind}, {width}x{height}, {n_samples} samples, scattered {scattered}"
-                    np.testing.assert_array_equal(got_tris, want_tris, err_msg=where)
-                    np.testing.assert_array_equal(got_depth, want_depth, err_msg=where)
+                    for kernel in (rasterize, rasterize_pixels):
+                        got_depth, got_tris = draw(kernel, *args)
+                        where = f"{kind}, {width}x{height}, {n_samples} samples, scattered {scattered}, {kernel}"
+                        np.testing.assert_array_equal(got_tris, want_tris, err_msg=where)
+                        np.testing.assert_array_equal(got_depth, want_depth, err_msg=where)
                     checked += int((want_tris >= 0).sum())
         self.assertGreater(checked, 100000)  # (the cases do cover samples)
 
