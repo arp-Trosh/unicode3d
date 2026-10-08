@@ -808,17 +808,39 @@ def project(faces, uvs, colors, face_chain, face_kind, mesh_vertex, inst_mesh, i
 SURFACE = 7  # per corner of a shadow map's triangle: linear rgb | alpha | u / w, v / w, 1 / w (for its texture)
 
 
+NO_TEXEL = 3  # the kind (`see`) of a shadow map's triangle that covers no texel (see project_depth): in no bin
+
+
 @njit(cache=True, error_model="numpy")
-def _emit_depth(corners, k, width, height, perspective, xs, ys, depth, surf):
-    """Store triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) as screen triangle k of a shadow map
-    (see project_depth)."""
+def _shadow_corner(corners, j, width, height, perspective):
+    """Corner j of triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) in a width x height shadow map: x, y
+    and its depth (see project_depth)."""
+    iw = 1.0 / corners[j, 3]
+    return ((corners[j, 0] * iw + 1.0) * 0.5 * width, (1.0 - corners[j, 1] * iw) * 0.5 * height,
+            iw if perspective else (1.0 - corners[j, 2] * iw) * 0.5)
+
+
+@njit(cache=True, error_model="numpy")
+def _emit_surface(corners, k, surf):
+    """What the surface of triangle `corners` does to light, as triangle k's surf (see project_depth)."""
     for j in range(3):
         iw = 1.0 / corners[j, 3]
-        xs[k, j] = (corners[j, 0] * iw + 1.0) * 0.5 * width
-        ys[k, j] = (1.0 - corners[j, 1] * iw) * 0.5 * height
-        depth[k, j] = iw if perspective else (1.0 - corners[j, 2] * iw) * 0.5
         surf[k, j, 0:4] = corners[j, 4:8]
         surf[k, j, 4], surf[k, j, 5], surf[k, j, 6] = corners[j, 8] * iw, corners[j, 9] * iw, iw
+
+
+@njit(cache=True, error_model="numpy")
+def _covers_texel(x0, x1, x2, y0, y1, y2, width, height):
+    """Whether a triangle of a width x height shadow map, corners (x0, y0), (x1, y1), (x2, y2), may cover a texel's
+    centre. rasterize_depth() and rasterize_tint() only write texels whose centre is inside the triangle, widened
+    by their slack at the edges (barycentric weights down to -1e-4, which widens its bounding box by under 2e-4 of
+    its size), so one whose box, widened by more than that, holds no centre (as most triangles far smaller than a
+    texel do), or that lies off the map, writes nothing. False for NaN corners, which they don't draw either."""
+    x_lo, x_hi, y_lo, y_hi = min(x0, x1, x2), max(x0, x1, x2), min(y0, y1, y2), max(y0, y1, y2)
+    mx, my = 1e-3 * (x_hi - x_lo) + 1e-3, 1e-3 * (y_hi - y_lo) + 1e-3
+    x_lo, x_hi, y_lo, y_hi = max(x_lo - mx, 0.0), min(x_hi + mx, width), max(y_lo - my, 0.0), min(y_hi + my, height)
+    # Centres are at i + 0.5: is there one from x_lo to x_hi, and one from y_lo to y_hi?
+    return np.floor(x_hi - 0.5) >= np.ceil(x_lo - 0.5) and np.floor(y_hi - 0.5) >= np.ceil(y_lo - 0.5)
 
 
 @njit(cache=True, error_model="numpy")
@@ -858,6 +880,34 @@ def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, s
 
 
 @njit(cache=True, error_model="numpy")
+def _shadow_triangle(corners, k, f, kind, width, height, perspective, colors, uvs, inst_rgb, inst_alpha, face_kind,
+                     inst, face_chain, face_texels, xs, ys, depth, surf, see, chain, lod):
+    """Store triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) from face f of instance inst as triangle k of
+    a width x height shadow map (see project_depth). kind: the face's (see _face_kind), its corners' rgb, alpha and
+    uv filled in unless it is 0; or -1, not known yet (corners holding only xyzw). Stores only see = NO_TEXEL for a
+    triangle that covers no texel, and only positions, depth and see for a solid one."""
+    x0, y0, d0 = _shadow_corner(corners, 0, width, height, perspective)
+    x1, y1, d1 = _shadow_corner(corners, 1, width, height, perspective)
+    x2, y2, d2 = _shadow_corner(corners, 2, width, height, perspective)
+    if not _covers_texel(x0, x1, x2, y0, y1, y2, width, height):
+        see[k] = NO_TEXEL
+        return
+    xs[k, 0], xs[k, 1], xs[k, 2] = x0, x1, x2
+    ys[k, 0], ys[k, 1], ys[k, 2] = y0, y1, y2
+    depth[k, 0], depth[k, 1], depth[k, 2] = d0, d1, d2
+    if kind < 0:
+        kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
+        if kind != 0:
+            for j in range(3):
+                _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
+    if kind == 0:
+        see[k] = 0
+    else:
+        _emit_surface(corners, k, surf)
+        _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod)
+
+
+@njit(cache=True, error_model="numpy")
 def _clip_near(corners, near, poly):
     """The part of triangle `corners` (3, N: clip xyzw | attributes) in front of the near plane w = near,
     into poly (4, N); returns its number of corners (0, 3 or 4)."""
@@ -887,6 +937,10 @@ def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_v
     SURFACE) is what each corner's surface does to light (colour and alpha, from `colors` (F, 3, 4) and
     the instance's, and its uv, for its texture); see (T,) is each triangle's kind as in project() (0
     solid, 1 see-through, 2 cut-out), chain its mipmap chain (-1 if untextured) and lod its mip level.
+
+    A triangle that covers no texel's centre (in a map of a whole scene, most of them: far smaller than a texel)
+    is of kind NO_TEXEL, which no bin takes, and the rest of it isn't stored; nor are a solid one's surf, chain and
+    lod, which only see-through ones and cut-outs need.
     """
     for c in prange(chunk_inst.shape[0]):
         if whole[c] + cut[c] == 0:
@@ -904,19 +958,21 @@ def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_v
                 ahead += corners[j, 3] > near
             if ahead == 0:
                 continue
-            for j in range(3):
-                _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
-            kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
-            if ahead == 3:
-                _emit_depth(corners, k_whole, width, height, perspective, xs, ys, depth, surf)
-                _finish_shadow_triangle(xs, ys, surf, k_whole, f, kind, face_chain, face_texels, see, chain, lod)
+            if ahead == 3:  # (its kind and surface only once it covers a texel)
+                _shadow_triangle(corners, k_whole, f, -1, width, height, perspective, colors, uvs, inst_rgb,
+                                 inst_alpha, face_kind, inst, face_chain, face_texels, xs, ys, depth, surf, see, chain,
+                                 lod)
                 k_whole += 1
                 continue
+            kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
+            if kind != 0:  # (clipping carries the surface along)
+                for j in range(3):
+                    _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
             n_poly = _clip_near(corners, near, poly)
             for j in range(1, n_poly - 1):
                 tri[0], tri[1], tri[2] = poly[0], poly[j], poly[j + 1]
-                _emit_depth(tri, k_cut, width, height, perspective, xs, ys, depth, surf)
-                _finish_shadow_triangle(xs, ys, surf, k_cut, f, kind, face_chain, face_texels, see, chain, lod)
+                _shadow_triangle(tri, k_cut, f, kind, width, height, perspective, colors, uvs, inst_rgb, inst_alpha,
+                                 face_kind, inst, face_chain, face_texels, xs, ys, depth, surf, see, chain, lod)
                 k_cut += 1
 
 
@@ -962,8 +1018,8 @@ def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_ve
     """The faces as screen triangles in a cube shadow map: its six faces (+x, -x, +y, -y, +z, -z, each
     size x size texels) stacked one above the other in one tall map, a triangle for each cube face it
     may show in, clipped against that face's near plane and carrying 1/w as its depth (see
-    project_depth, as are surf, see, chain and lod). World positions come from transform(); chunk c
-    writes its triangles in cube face `side` from row offsets[c, side] (count_cube()'s counts, summed
+    project_depth, as are surf, see, chain and lod, and triangles covering no texel). World positions come
+    from transform(); chunk c writes its triangles in cube face `side` from row offsets[c, side] (count_cube()'s counts, summed
     up), and tri_side[k] is triangle k's cube face, which rasterize_depth() keeps it inside.
     """
     for i in prange(chunk_inst.shape[0] * 6):
@@ -978,20 +1034,22 @@ def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_ve
             ahead = _cube_face_corners(world, faces, f, base, mats[side], near, corners)
             if ahead == 0:
                 continue
-            for j in range(3):
-                _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
-            kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
-            n_poly = 3
+            n_poly, kind = 3, -1  # (a whole face's kind and surface only once it covers a texel)
             if ahead == 3:
                 poly[:3] = corners
             else:
+                kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
+                if kind != 0:  # (clipping carries the surface along)
+                    for j in range(3):
+                        _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
                 n_poly = _clip_near(corners, near, poly)
             for j in range(1, n_poly - 1):
                 tri[0], tri[1], tri[2] = poly[0], poly[j], poly[j + 1]
-                _emit_depth(tri, k, size, size, True, xs, ys, depth, surf)
-                _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod)
-                for m in range(3):
-                    ys[k, m] += side * size
+                _shadow_triangle(tri, k, f, kind, size, size, True, colors, uvs, inst_rgb, inst_alpha, face_kind, inst,
+                                 face_chain, face_texels, xs, ys, depth, surf, see, chain, lod)
+                if see[k] != NO_TEXEL:
+                    for m in range(3):
+                        ys[k, m] += side * size
                 tri_side[k] = side
                 k += 1
 
