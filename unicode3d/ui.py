@@ -25,7 +25,7 @@ DisplayControls is the panel of display settings every program can offer
 from .color import COLOR_MODES, Color
 from .glyphs import GLYPH_MODES
 from .keys import Key, MouseEvent
-from .quality import ALIASES as QUALITY_ALIASES, MODES as QUALITY_MODES, AutoQuality
+from .quality import MODES as QUALITY_MODES, AutoQuality
 
 ACTIVATE = (Key.ENTER, 10, ord(" "))
 FPS_STEPS = (30, 60, 120, 144)
@@ -422,7 +422,7 @@ class DisplayControls(Panel):
     as the other settings say (the default); "mid" takes the first steps down (edge samples off, detail 2 px),
     keeping the shading; "low" takes every step (coarse shading, the picture drawn smaller too); "auto" draws
     "high" while frames come at 27 a second or more (AutoQuality.high_fps), "mid" at 20 or more (min_fps) and
-    "low" below that (shown as "auto mid", say). Settings saved with the old name "fast" are taken as "low". Shadows and reflections are left as they are set. Frames are timed by run()
+    "low" below that (shown as "auto mid", say). Shadows and reflections are left as they are set. Frames are timed by run()
     (screen.frame_time), once a frame when the controls are drawn or handled. quality: the mode to start in (None:
     the renderer's as it is; DisplayControls on one renderer share its AutoQuality.of()).
 
@@ -497,8 +497,6 @@ class DisplayControls(Panel):
         take (sextant glyphs on a terminal without Unicode, say). Before the screen is known (the first draw()
         or handle()), they wait for it."""
         for name, value in dict(values).items():
-            if name == "quality" and isinstance(value, str):
-                value = QUALITY_ALIASES.get(value, value)
             w = self._named.get(name)
             options = GLYPH_MODES if name == "glyphs" and self.screen is None else w.options if w else ()
             if not any(value == o and type(value) is type(o) for o in options):

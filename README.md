@@ -1060,8 +1060,7 @@ judges about a second of frames at a time (`run()` times each frame, `screen.fra
 the frame rate) and moves down at once; as frames drawn in one preset say little of another's, it learns how
 much dearer each preset is than the next one down from the frames either side of each move, and moves up when
 the better one is expected to clear its frame rate by 10% for 3 s, waiting longer each time a move up doesn't
-hold, so it settles instead of flickering. ("fast", the old name of "low", still works, in code and in saved
-settings.) The same works without `DisplayControls`:
+hold, so it settles instead of flickering. The same works without `DisplayControls`:
 `AutoQuality.of(renderer).update(frame_seconds, 1 / fps)` once a frame (`unicode3d.quality`).
 
 ```python

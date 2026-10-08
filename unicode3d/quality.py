@@ -5,7 +5,6 @@ machines (no kernels)."""
 import statistics
 
 MODES = ("high", "mid", "low", "auto")
-ALIASES = {"fast": "low"}  # (the lowest mode's name before "mid" and "low")
 STEPS = ("edge samples off", "detail 2 px", "coarse shading", "render scale 85%", "render scale 70%")
 MID = STEPS[:2]  # the steps "mid" takes: the picture's shading kept, its edges and small things made cheaper
 SIMPLIFY = 2.0  # Renderer.simplify at the "detail" step (pixels)
@@ -37,8 +36,7 @@ class AutoQuality:
 
     mode: "high" leaves the renderer as it is; "mid" takes the first steps (MID: edge samples off, detail 2 px),
     keeping the shading; "low" takes them all; "auto" draws "high" while frames come at high_fps (27) a second or
-    more, "mid" while they come at min_fps (20) or more, and "low" below that. ("fast", the old name of "low", is
-    taken as "low".) `preset` is the one in effect.
+    more, "mid" while they come at min_fps (20) or more, and "low" below that. `preset` is the one in effect.
 
     The renderer's settings as they were, or as anything other than this sets them later (a settings key, the
     program), are the ceiling: steps only ever go below them. user(name) gives those values (edge_samples,
@@ -86,7 +84,6 @@ class AutoQuality:
 
     @mode.setter
     def mode(self, value):
-        value = ALIASES.get(value, value) if isinstance(value, str) else value
         if value not in MODES:
             raise ValueError(f"quality mode must be one of {MODES}, not {value!r}")
         self._mode = value

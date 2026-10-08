@@ -51,8 +51,8 @@ class AutoQualityTests(unittest.TestCase):
         self.assertTrue(r.shadows and r.reflections)
         play(q, 20, lambda preset: 0.5)  # only "auto" moves
         self.assertEqual(q.preset, "low")
-        q.mode = "fast"  # (the old name of "low")
-        self.assertEqual(q.mode, "low")
+        with self.assertRaises(ValueError):
+            q.mode = "fast"  # (the lowest preset's name before 0.17: "low")
         q.mode = "high"
         self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
                          (8, 1.0, "cell", Renderer(1, 1).max_pixels))
@@ -177,8 +177,8 @@ class DisplayControlsQualityTests(unittest.TestCase):
         self.assertEqual(r.simplify, 2.0)  # (still stepped down)
         controls.apply({"quality": "high"})
         self.assertEqual((r.simplify, r.edge_samples), (0.0, 8))
-        controls.apply({"quality": "fast"})  # saved under the old name of "low"
-        self.assertEqual(controls.settings()["quality"], "low")
+        controls.apply({"quality": "fast"})  # not a preset (settings saved before 0.17 are the program's to convert)
+        self.assertEqual(controls.settings()["quality"], "high")
 
 
 if __name__ == "__main__":
