@@ -1049,8 +1049,9 @@ program.
 
 <a id="automatic-quality"></a>**Quality presets and automatic quality.** F8 (or `DisplayControls(renderer=renderer, quality=...)`,
 or `controls.apply({"quality": ...})`) picks a preset. "high", the default, leaves the renderer as set
-(benchmarks and tests stay repeatable). "mid" turns edge samples off (edges stay smoothed, more coarsely) and
-draws levels of detail at 2 pixels, keeping the shading. "low" also shades coarsely (everything once per
+(benchmarks and tests stay repeatable). "mid" turns edge samples off (edges stay smoothed, more coarsely),
+draws levels of detail at 2 pixels and fits sun shadow maps to the whole scene rather than the view (coarser
+shadows, cheaper to draw: `Renderer.shadow_fit`), keeping the shading. "low" also shades coarsely (everything once per
 cell: texture detail inside a cell is lost) and draws the picture at 70% of its pixels, stretched (softer).
 Shadows and reflections are never turned off, and presets only ever go below the settings as the user (or the
 program) set them, which are what F7 and `settings()` show. "auto" chooses among them by the frame rate:

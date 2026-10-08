@@ -40,22 +40,22 @@ class AutoQualityTests(unittest.TestCase):
         r = renderer()
         q = AutoQuality(r)
         self.assertEqual((q.mode, q.preset, q.steps), ("high", "high", []))
-        q.mode = "mid"  # the picture's shading kept; edges and detail cheaper
-        self.assertEqual(q.steps, list(STEPS[:2]))
-        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
-                         (0, 2.0, "cell", Renderer(1, 1).max_pixels))
+        q.mode = "mid"  # the picture's shading kept; edges, detail and sun shadows cheaper
+        self.assertEqual(q.steps, list(STEPS[:3]))
+        self.assertEqual((r.edge_samples, r.simplify, r.shadow_fit, r.shading, r.max_pixels),
+                         (0, 2.0, "scene", "cell", Renderer(1, 1).max_pixels))
         q.mode = "low"
-        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[2], STEPS[4]])  # (70% replaces 85%)
-        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
-                         (0, 2.0, "coarse", int(0.7 * 200 * 120)))
+        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[2], STEPS[3], STEPS[5]])  # (70% replaces 85%)
+        self.assertEqual((r.edge_samples, r.simplify, r.shadow_fit, r.shading, r.max_pixels),
+                         (0, 2.0, "scene", "coarse", int(0.7 * 200 * 120)))
         self.assertTrue(r.shadows and r.reflections)
         play(q, 20, lambda preset: 0.5)  # only "auto" moves
         self.assertEqual(q.preset, "low")
         with self.assertRaises(ValueError):
             q.mode = "fast"  # (the lowest preset's name before 0.17: "low")
         q.mode = "high"
-        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
-                         (8, 1.0, "cell", Renderer(1, 1).max_pixels))
+        self.assertEqual((r.edge_samples, r.simplify, r.shadow_fit, r.shading, r.max_pixels),
+                         (8, 1.0, "view", "cell", Renderer(1, 1).max_pixels))
         with self.assertRaises(ValueError):
             q.mode = "medium"
 
@@ -65,7 +65,7 @@ class AutoQualityTests(unittest.TestCase):
         self.assertEqual(play(q, 20, rates(35, 50, 70)), ["high"])
         self.assertEqual(play(q, 20, rates(24, 32, 45)), ["high", "mid"])
         self.assertEqual(play(q, 20, rates(15, 18, 30)), ["mid", "low"])
-        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[2], STEPS[4]])
+        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[2], STEPS[3], STEPS[5]])
 
     def test_moves_up_when_the_better_preset_is_expected_to_keep_up(self):
         q = AutoQuality(renderer(), "auto")
@@ -126,12 +126,14 @@ class AutoQualityTests(unittest.TestCase):
         self.assertEqual(q.user("edge_samples"), 4)
         play(q, 60, lambda preset: 0.005)
         self.assertEqual((q.preset, r.edge_samples, r.simplify), ("high", 4, 1.0))
-        # A step that would change nothing is skipped: edge samples already off, high detail kept at 2 px, shading
-        # already coarse.
-        r.edge_samples, r.simplify, r.shading = 0, 3.0, "coarse"
+        # A step that would change nothing is skipped: edge samples already off, high detail kept at 2 px, shadows
+        # already fitted to the scene, shading already coarse.
+        r.edge_samples, r.simplify, r.shadow_fit, r.shading = 0, 3.0, "scene", "coarse"
         q.mode = "low"
-        self.assertEqual(q.steps, [STEPS[4]])
-        self.assertEqual((r.simplify, r.shading), (3.0, "coarse"))
+        self.assertEqual(q.steps, [STEPS[5]])
+        self.assertEqual((r.simplify, r.shadow_fit, r.shading), (3.0, "scene", "coarse"))
+        q.mode = "high"  # and the user's own "scene" is kept in high
+        self.assertEqual(r.shadow_fit, "scene")
 
     def test_render_scale_follows_the_framebuffer(self):
         r = renderer()
@@ -144,7 +146,7 @@ class AutoQualityTests(unittest.TestCase):
         q.mode = "high"
         r.max_pixels = 1000
         q.mode = "low"
-        self.assertEqual(q.steps, list(STEPS[:3]))
+        self.assertEqual(q.steps, list(STEPS[:4]))
         self.assertEqual(r.max_pixels, 1000)
 
 

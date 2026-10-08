@@ -419,8 +419,8 @@ class DisplayControls(Panel):
     renderer.shadows, renderer.reflections and renderer.simplify: "standard" detail draws objects small on screen
     from simpler copies of their meshes that differ by at most a pixel (levels of detail, Renderer.simplify 1),
     "high" every mesh as it is (simplify 0). Quality (quality.AutoQuality, as `self.auto_quality`): "high" draws
-    as the other settings say (the default); "mid" takes the first steps down (edge samples off, detail 2 px),
-    keeping the shading; "low" takes every step (coarse shading, the picture drawn smaller too); "auto" draws
+    as the other settings say (the default); "mid" takes the first steps down (edge samples off, detail 2 px,
+    sun shadows fitted to the whole scene: coarser), keeping the shading; "low" takes every step (coarse shading, the picture drawn smaller too); "auto" draws
     "high" while frames come at 27 a second or more (AutoQuality.high_fps), "mid" at 20 or more (min_fps) and
     "low" below that (shown as "auto mid", say). Shadows and reflections are left as they are set. Frames are timed by run()
     (screen.frame_time), once a frame when the controls are drawn or handled. quality: the mode to start in (None:

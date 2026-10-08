@@ -952,7 +952,7 @@ class RenderTests(unittest.TestCase):
             self.assertTrue(np.isfinite(fb.rgb).all())
             return renderer._shadows[1][3][0, 3] if renderer._shadows else None
 
-        whole = texel(Renderer(60, 30), [floor, box])
+        whole = texel(Renderer(60, 30, shadow_fit="scene"), [floor, box])
         view = Renderer(60, 30, shadow_fit="view")
         self.assertLess(texel(view, [floor, box]), whole / 4)
         self.assertEqual(texel(view, [floor, box, mirror]), whole)

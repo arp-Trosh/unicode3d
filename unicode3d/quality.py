@@ -5,8 +5,9 @@ machines (no kernels)."""
 import statistics
 
 MODES = ("high", "mid", "low", "auto")
-STEPS = ("edge samples off", "detail 2 px", "coarse shading", "render scale 85%", "render scale 70%")
-MID = STEPS[:2]  # the steps "mid" takes: the picture's shading kept, its edges and small things made cheaper
+STEPS = ("edge samples off", "detail 2 px", "shadows fitted to the scene", "coarse shading", "render scale 85%",
+         "render scale 70%")
+MID = STEPS[:3]  # the steps "mid" takes: the picture's shading kept, its edges, small things and shadows made cheaper
 SIMPLIFY = 2.0  # Renderer.simplify at the "detail" step (pixels)
 SCALES = (0.85, 0.70)  # parts of the framebuffer's pixels drawn at the "render scale" steps
 
@@ -29,18 +30,19 @@ class AutoQuality:
     """Quality presets for a Renderer, and "auto", which chooses among them by the frame rate.
 
     The presets lower the renderer's settings by steps, in order (STEPS): edge samples off (edges are still
-    smoothed by each pixel's samples, more coarsely); levels of detail at SIMPLIFY pixels; coarse shading
+    smoothed by each pixel's samples, more coarsely); levels of detail at SIMPLIFY pixels; sun shadows fitted to
+    the whole scene rather than the view (Renderer.shadow_fit "scene": coarser, cheaper to draw); coarse shading
     (Renderer.shading "coarse": everything once per cell, texture detail inside cells lost); the picture drawn at
     85%, then 70% of its pixels and stretched (softer). Shadows and reflections are never turned off. A step that
     would change nothing (edge samples already off, say) is skipped.
 
-    mode: "high" leaves the renderer as it is; "mid" takes the first steps (MID: edge samples off, detail 2 px),
-    keeping the shading; "low" takes them all; "auto" draws "high" while frames come at high_fps (27) a second or
+    mode: "high" leaves the renderer as it is; "mid" takes the first steps (MID: edge samples off, detail 2 px,
+    shadows fitted to the scene), keeping the shading; "low" takes them all; "auto" draws "high" while frames come at high_fps (27) a second or
     more, "mid" while they come at min_fps (20) or more, and "low" below that. `preset` is the one in effect.
 
     The renderer's settings as they were, or as anything other than this sets them later (a settings key, the
     program), are the ceiling: steps only ever go below them. user(name) gives those values (edge_samples,
-    simplify, shading, max_pixels), for showing and saving as the user's choice.
+    simplify, shading, shadow_fit, max_pixels), for showing and saving as the user's choice.
 
     Call update(frame_time, target) once a frame with how long the last frame took to make (seconds, without any
     wait for the frame rate: so the rate it could run at, whatever the program's cap). It judges the median of about
@@ -98,7 +100,8 @@ class AutoQuality:
         return len(self._taken())
 
     def user(self, name):
-        """The user's own value of a setting the steps change (edge_samples, simplify, shading or max_pixels)."""
+        """The user's own value of a setting the steps change (edge_samples, simplify, shading, shadow_fit or
+        max_pixels)."""
         self._take_user_changes()
         return self._user[name]
 
@@ -155,7 +158,7 @@ class AutoQuality:
 
     # ----- internals
 
-    SETTINGS = ("edge_samples", "simplify", "shading", "max_pixels")
+    SETTINGS = ("edge_samples", "simplify", "shading", "shadow_fit", "max_pixels")
 
     def _settings(self):
         return {name: getattr(self.renderer, name) for name in self.SETTINGS}
@@ -178,11 +181,13 @@ class AutoQuality:
             steps.append((STEPS[0], "edge_samples", 0))
         if not user["simplify"] >= SIMPLIFY:  # (0 or less: none)
             steps.append((STEPS[1], "simplify", SIMPLIFY))
+        if user["shadow_fit"] != "scene":
+            steps.append((STEPS[2], "shadow_fit", "scene"))
         if user["shading"] != "coarse":
-            steps.append((STEPS[2], "shading", "coarse"))
+            steps.append((STEPS[3], "shading", "coarse"))
         pixels = self._pixels()
         budget = user["max_pixels"] if user["max_pixels"] else pixels
-        for name, part in zip(STEPS[3:], SCALES):
+        for name, part in zip(STEPS[4:], SCALES):
             if pixels and part * pixels < min(budget, pixels):
                 steps.append((name, "max_pixels", max(int(part * pixels), 1)))
         return steps

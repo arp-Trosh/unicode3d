@@ -447,15 +447,16 @@ class Renderer(ShadowMaps, Mirrors):
     PointLight with shadows, which together see all round it.
     shadow_softness: how far shadow edges are blurred, in shadow-map texels either way (at
     least over a pixel on screen, so that they look as smooth as the edges of shapes).
-    shadow_fit: what each Light's shadow map covers. "scene" (the default): everything in the scene, so that
-    moving only the camera costs nothing, but shadows are as coarse as the scene is big. "view": only what the
-    camera can see of the scene (and a margin), so that shadows are sharper the less of the scene is seen (an
+    shadow_fit: what each Light's shadow map covers. "view" (the default): only what the camera can see of the
+    scene (and a margin), so that shadows are sharper the less of the scene is seen (an
     isometric game's view of a big level: about 4x), and casters whose shadows fall out of sight aren't drawn. Its
     box moves in whole texels and changes size in steps, so shadows keep still as the camera moves; the casters
     that keep still are drawn into a map up to 1024 texels wider, which stays put while the camera moves about in
     it (redrawn when the camera leaves it). More texels of the map are drawn into than with "scene", as it is
     finer. Scenes with mirrors (which show what the camera doesn't) get "scene"'s maps, as do views of most of the
-    scene. PointLights' shadows are the same either way.
+    scene. "scene": everything in the scene, so that moving only the camera costs nothing, but shadows are as
+    coarse as the scene is big; cheaper to draw (quality.AutoQuality's "mid" and "low" step down to it).
+    PointLights' shadows are the same either way.
     shadows: False draws no shadows whatever the lights say (a graphics setting, e.g. for
     slow machines); True draws those of the lights that have them.
     transparency_layers: how many see-through surfaces (Object3D.opacity, or alpha in mesh
@@ -487,7 +488,7 @@ class Renderer(ShadowMaps, Mirrors):
 
     def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
                  fog=0.3, outline=0.55, lod_bias=-0.5, background=None, shadow_size=1024, point_shadow_size=256,
-                 shadow_softness=1.5, shadow_fit="scene", shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
+                 shadow_softness=1.5, shadow_fit="view", shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
                  max_pixels=MAX_PIXELS, simplify=0.0, shading="cell"):
         for n in (samples, edge_samples):
             if n not in SAMPLE_PATTERNS and n != 0:
