@@ -12,8 +12,8 @@ import numpy as np
 from numba import njit
 
 from .lights import PointLight
-from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, project_depth, rasterize_depth,
-                     rasterize_tint)
+from .raster import (CLEAR, CUT, FACE_CHUNK, SOLID, SURFACE, VERTEX_CHUNK, count_cube, project_cube, project_depth,
+                     rasterize_depth, rasterize_tint, transform_depth)
 from .transforms import look_at, normalize, perspective
 
 MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for the lookups shading makes: see shading.MATH)
@@ -225,7 +225,7 @@ def _cube_views(position, reach, size):
     return mats, 2.0 * tan_half / size, near
 
 
-_EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform() that culls nothing (w = 1, no sides)
+_EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform_depth() that culls nothing (w = 1, no sides)
 _NO_BASE = np.zeros((0, 0), np.float32)  # rasterize_depth's base when there is none
 SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins the settled ones (see _shadow_maps)
 
@@ -413,11 +413,10 @@ class ShadowMaps:
         (see rasterize_depth), and, given trans, what the see-through ones let through into it from `offset`;
         returns whether it did that."""
         buf = self._buffers
-        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "flip", "pos", "rgb", "alpha")}
-        double = np.ones(len(casters), np.bool_)
+        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "pos", "rgb", "alpha")}
         if sides == 1:
             k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = \
-                self._transform(pack, sub_inst, double, view_mats[0], np.zeros(3), 0.5, "shadow_")
+                self._shadow_transform(pack, sub_inst, view_mats[0])
             xs, ys, dep, surf, see, chain, lod = self._shadow_triangles(k)
             project_depth(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
                           pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
@@ -427,8 +426,8 @@ class ShadowMaps:
             tri_side.fill(0)
         else:
             # The casters' vertices in the world, then their triangles in each cube face they reach.
-            _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._transform(
-                pack, sub_inst, double, _EVERYWHERE, np.zeros(3), 0.5, "shadow_")
+            _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._shadow_transform(
+                pack, sub_inst, _EVERYWHERE)
             counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
             count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
                        chunk_inst, chunk_first, chunk_end, counts)
@@ -450,6 +449,27 @@ class ShadowMaps:
         rasterize_tint(trans, offset, n, sides * n, xs, ys, dep, tri_side, n, band_start, band_tris, surf,
                        chain, lod, *pack["textures"])
         return True
+
+    def _shadow_transform(self, pack, inst, view_proj):
+        """raster.transform_depth() of the instances `inst` (as Renderer._transform, without normals, back faces
+        or a clipping plane): (triangle count, world, inst_vertex, the face chunks and their plan)."""
+        from .renderer import _chunks  # (renderer imports this module)
+        buf = self._buffers
+        n_inst = len(inst["mesh"])
+        vertex_counts = np.diff(pack["mesh_vertex"])[inst["mesh"]]
+        face_counts = np.diff(pack["mesh_face"])[inst["mesh"]]
+        inst_vertex = np.zeros(n_inst + 1, np.int64)
+        np.cumsum(vertex_counts, out=inst_vertex[1:])
+        vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
+        chunk_inst, chunk_first, chunk_end = _chunks(face_counts, pack["mesh_face"][inst["mesh"]], FACE_CHUNK)
+        n_chunks = len(chunk_inst)
+        plan = [buf.get("shadow_" + name, (n_chunks,), np.int64) for name in ("whole", "cut", "off_whole", "off_cut")]
+        world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
+        k = transform_depth(pack["vertices"], pack["faces"], pack["mesh_vertex"], pack["spheres"], inst["mesh"],
+                            inst["lin"], inst["pos"], inst_vertex, view_proj, 0.5, vchunk_inst, vchunk_first,
+                            vchunk_end, chunk_inst, chunk_first, chunk_end, world,
+                            buf.get("shadow_visible", (n_inst,), np.bool_), *plan)
+        return k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *plan)
 
     def _shadow_triangles(self, k):
         """Buffers for k triangles of a shadow map: pixel coordinates (xs, ys), depth and surface (see

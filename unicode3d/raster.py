@@ -926,6 +926,74 @@ def _clip_near(corners, near, poly):
     return n_poly
 
 
+@njit(cache=True, error_model="numpy")
+def _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut):
+    """Where each chunk of faces writes its whole[c] whole triangles and cut[c] clipped ones (off_whole[c] and
+    off_cut[c]), each instance's whole ones before its clipped ones, as in transform(); returns the total."""
+    k = c = 0
+    while c < chunk_inst.shape[0]:
+        e = c
+        while e < chunk_inst.shape[0] and chunk_inst[e] == chunk_inst[c]:
+            e += 1
+        for x in range(c, e):
+            off_whole[x] = k
+            k += whole[x]
+        for x in range(c, e):
+            off_cut[x] = k
+            k += cut[x]
+        c = e
+    return k
+
+
+@njit(cache=True, error_model="numpy", parallel=True)
+def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_vertex, view_proj, near,
+                    vchunk_inst, vchunk_first, vchunk_end, chunk_inst, chunk_first, chunk_end, world, visible, whole,
+                    cut, off_whole, off_cut):
+    """transform() for a shadow map: the instances' vertices in the world and in the light's clip space (world
+    columns 0:3 and 6:10; a shadow map has no use for normals, columns 3:6, which are left as they were), and the
+    plan of where each chunk of faces writes its triangles, for project_depth() (or, through a view that culls
+    nothing, count_cube()). Every face is drawn whatever way it faces, and the only clipping is against the near
+    plane, as project_depth() does it: a face with every corner in front of it is one whole triangle, one with one
+    or two leaves one or two."""
+    for inst in prange(inst_mesh.shape[0]):
+        m = inst_mesh[inst]
+        lin = inst_lin[inst]
+        position = inst_pos[inst]
+        sx, sy, sz = spheres[m, 0], spheres[m, 1], spheres[m, 2]
+        cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
+        cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
+        cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
+        visible[inst] = not _outside_view(view_proj, cx, cy, cz, spheres[m, 3] * stretch(lin), near)
+    for j in prange(vchunk_inst.shape[0]):
+        inst = vchunk_inst[j]
+        if not visible[inst]:
+            continue
+        m = inst_mesh[inst]
+        lin = inst_lin[inst]
+        position = inst_pos[inst]
+        v0, w0 = mesh_vertex[m], inst_vertex[inst]
+        for v in range(vchunk_first[j], vchunk_end[j]):
+            p, out = vertices[v0 + v], world[w0 + v]
+            for i in range(3):
+                out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
+            for i in range(4):
+                out[6 + i] = view_proj[i, 0] * out[0] + view_proj[i, 1] * out[1] + view_proj[i, 2] * out[2] + view_proj[i, 3]
+    for c in prange(chunk_inst.shape[0]):
+        inst = chunk_inst[c]
+        n_whole = n_cut = 0
+        if visible[inst]:
+            base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]
+            for f in range(chunk_first[c], chunk_end[c]):
+                ahead = ((world[base + faces[f, 0], 9] > near) + (world[base + faces[f, 1], 9] > near)
+                         + (world[base + faces[f, 2], 9] > near))
+                if ahead == 3:
+                    n_whole += 1
+                else:
+                    n_cut += ahead  # (one corner in front leaves a triangle, two a quad: two)
+        whole[c], cut[c] = n_whole, n_cut
+    return _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut)
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
 def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
                   inst_vertex, world, width, height, near, perspective, chunk_inst, chunk_first, chunk_end, whole, cut,
