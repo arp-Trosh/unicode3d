@@ -598,7 +598,9 @@ def texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain):
     return 0.5 * np.log2(max(along_x, along_y, 1e-18))
 
 
-@njit(cache=True, error_model="numpy")
+# The helpers transform() and project() call per face (and per instance and run) are inlined into them
+# (inline="always"), as shading's are: a call that passes arrays costs more than the work in it.
+@njit(cache=True, error_model="numpy", inline="always")
 def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
     """Store triangle `corners` (3, 4 + ATTRS: clip xyzw | attributes) as screen triangle k."""
     for j in range(3):
@@ -609,7 +611,7 @@ def _emit(corners, k, width, height, xs, ys, inv_w, attrs):
         attrs[k, j, :] = corners[j, 4:]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _outside_view(view_proj, cx, cy, cz, radius, near):
     """Whether a sphere lies wholly outside the view: beyond the left, right, top or bottom edge, or
     behind the near plane w = near."""
@@ -628,7 +630,7 @@ def _outside_view(view_proj, cx, cy, cz, radius, near):
     return False
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def stretch(lin):
     """At most how much the linear map lin (3, 3) lengthens any vector (at least its largest singular value,
     and exactly that for a rotation times a scale along each axis): how far a bounding sphere's radius grows."""
@@ -641,7 +643,7 @@ def stretch(lin):
     return np.sqrt(most)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _normal_matrix(lin, out):
     """What turns normals when lin (3, 3) turns and stretches points, into out (3, 3): the inverse transpose, up
     to a positive factor (the cofactors, times the sign of the determinant), which stays finite when lin is
@@ -658,7 +660,7 @@ def _normal_matrix(lin, out):
                 out[i, j] = -out[i, j]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _face_ahead(world, faces, f, v0, near):
     """How many corners of face f are in front of the near plane."""
     ahead = 0
@@ -667,7 +669,7 @@ def _face_ahead(world, faces, f, v0, near):
     return ahead
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _facing(world, faces, f, v0, eye):
     """Whether face f (world positions in `world`) faces the eye."""
     a, b, c = world[v0 + faces[f, 0]], world[v0 + faces[f, 1]], world[v0 + faces[f, 2]]
@@ -680,13 +682,13 @@ def _facing(world, faces, f, v0, eye):
 NO_CLIP = np.array([0.0, 0.0, 0.0, 1.0])  # a clipping plane (a, b, c, d: keeps a x + b y + c z + d > 0) keeping all
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _plane_distance(world, v, clip):
     """How far in front of clipping plane `clip` vertex v of `world` is (positive: kept)."""
     return clip[0] * world[v, 0] + clip[1] * world[v, 1] + clip[2] * world[v, 2] + clip[3]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _near_clip_distances(w0, w1, w2, d0, d1, d2, near, out):
     """Clip a triangle whose corners have clip-space w (w0, w1, w2) and plane distances (d0, d1, d2)
     against the near plane w = near, into out (4,): the plane distances of the polygon left, which it
@@ -705,7 +707,7 @@ def _near_clip_distances(w0, w1, w2, d0, d1, d2, near, out):
     return n
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _plane_clipped_length(ds, n):
     """How many corners a polygon of n corners with plane distances ds keeps, clipped against the plane."""
     m = 0
@@ -716,13 +718,47 @@ def _plane_clipped_length(ds, n):
 
 
 FACE_CHUNK = 512     # faces projected as one piece of parallel work
-VERTEX_CHUNK = 1024  # vertices transformed as one piece
+VERTEX_CHUNK = 256   # vertices transformed as one piece
+RUN_CELLS = 8        # a mesh of more than FACE_CHUNK faces is cut into runs at most 1/RUN_CELLS of its size across,
+RUN_LEAST = 16       # of at least this many faces
+RUN_MOST = 256       # and into at most about this many runs (so that each is worth its test)
+
+
+@njit(cache=True, error_model="numpy")
+def face_runs(vertices, faces, limit, least, most, starts):
+    """Cut a mesh's faces, in their order, into runs for culling (see transform()): each run of at most `most`
+    faces, and growing while the box around its corners is at most `limit` across (or it has fewer than `least`
+    faces). Writes where each run starts into starts (F,), and returns how many there are. Faces stay in order, so
+    the triangles drawn are the same and in the same order, whichever runs are culled; a mesh whose faces come
+    in order of place (as a level put together room by room or object by object does) gets runs each in one
+    place. NaN corners make no box too big (a comparison with NaN is false)."""
+    n = 0
+    f = 0
+    while f < faces.shape[0]:
+        starts[n] = f
+        n += 1
+        lo0 = lo1 = lo2 = np.inf
+        hi0 = hi1 = hi2 = -np.inf
+        count = 0
+        while f < faces.shape[0] and count < most:
+            a0, a1, a2, b0, b1, b2 = lo0, lo1, lo2, hi0, hi1, hi2
+            for j in range(3):
+                v = vertices[faces[f, j]]
+                a0, a1, a2 = min(a0, v[0]), min(a1, v[1]), min(a2, v[2])
+                b0, b1, b2 = max(b0, v[0]), max(b1, v[1]), max(b2, v[2])
+            if count >= least and (b0 - a0 > limit or b1 - a1 > limit or b2 - a2 > limit):
+                break
+            lo0, lo1, lo2, hi0, hi1, hi2 = a0, a1, a2, b0, b1, b2
+            f += 1
+            count += 1
+    return n
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_double,
-              inst_flip, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, chunk_inst,
-              chunk_first, chunk_end, world, visible, whole, cut, off_whole, off_cut):
+              inst_flip, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
+              chunk_inst, chunk_run, chunk_first, chunk_end, mesh_run, run_spheres, run_vertex, world, visible, seen,
+              needed, whole, cut, off_whole, off_cut):
     """First pass of projecting instances (see project()): vertices in the world, and where each piece
     of work will write its triangles. Returns the number of triangles.
 
@@ -731,13 +767,18 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
     mirrors (a negative determinant), which turns faces inside out, so that which way they face flips too.
 
     visible[i]: whether instance i is at least partly in view (its bounding sphere, spheres[mesh]).
-    Vertex chunk j transforms vertices vchunk_first[j]:vchunk_end[j] (counted within the mesh) of
-    instance vchunk_inst[j] into world, from row inst_vertex[i] for instance i: world xyz | normal
-    xyz | clip xyzw. Face chunk c covers faces chunk_first[c]:chunk_end[c] of instance chunk_inst[c]
-    (chunks in instance order): whole[c] of them will be drawn whole and `cut` pieces will be left
+    Face chunk c covers faces chunk_first[c]:chunk_end[c] of instance chunk_inst[c] (chunks in instance order):
+    run chunk_run[c] of its mesh (mesh m has runs mesh_run[m]:mesh_run[m + 1], see face_runs), whose corners lie
+    in sphere run_spheres[r] and are vertices run_vertex[r, 0]:run_vertex[r, 1] (counted within the mesh).
+    seen[c]: whether chunk c is at least partly in view: its instance visible and, where its mesh has more
+    than one run, its own sphere not wholly out of view (a NaN sphere is seen). Vertex chunk j transforms
+    vertices vchunk_first[j]:vchunk_end[j] (counted within the mesh) of instance vchunk_inst[j] (whose vertex
+    chunks start at inst_vchunk[i]) into world, from row inst_vertex[i] for instance i: world xyz | normal xyz |
+    clip xyzw; only the chunks of vertices that seen face chunks use (needed[j]), the other rows are left as
+    they were. Seen chunk c's faces: whole[c] of them will be drawn whole and `cut` pieces will be left
     by clipping, written from rows off_whole[c] and off_cut[c], so that each instance's whole faces
     come before the pieces of its clipped ones.
-    
+
     Faces are also clipped against the plane `clip` (see NO_CLIP): a mirror's, when drawing what it shows.
     """
     for inst in prange(inst_mesh.shape[0]):
@@ -751,10 +792,36 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         radius = spheres[m, 3] * stretch(lin)
         visible[inst] = (not _outside_view(view_proj, cx, cy, cz, radius, near)
                          and clip[0] * cx + clip[1] * cy + clip[2] * cz + clip[3] > -radius)
+    for c in prange(chunk_inst.shape[0]):
+        inst = chunk_inst[c]
+        m = inst_mesh[inst]
+        seen[c] = visible[inst]
+        if visible[inst] and mesh_run[m + 1] - mesh_run[m] > 1:  # (one run: its sphere is the mesh's)
+            r = chunk_run[c]
+            lin = inst_lin[inst]
+            position = inst_pos[inst]
+            sx, sy, sz = run_spheres[r, 0], run_spheres[r, 1], run_spheres[r, 2]
+            cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
+            cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
+            cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
+            radius = run_spheres[r, 3] * stretch(lin)
+            # (NaN culls nothing here: a run is drawn whenever its instance is, unless surely out of view)
+            seen[c] = not (_outside_view(view_proj, cx, cy, cz, radius, near)
+                           or clip[0] * cx + clip[1] * cy + clip[2] * cz + clip[3] <= -radius)
+    # The vertex chunks the seen face chunks use (serially: chunks of one instance share vertex chunks).
+    for j in range(needed.shape[0]):
+        needed[j] = False
+    for c in range(chunk_inst.shape[0]):
+        if seen[c]:
+            inst, r = chunk_inst[c], chunk_run[c]
+            if run_vertex[r, 1] > run_vertex[r, 0]:
+                for j in range(inst_vchunk[inst] + run_vertex[r, 0] // VERTEX_CHUNK,
+                               inst_vchunk[inst] + (run_vertex[r, 1] - 1) // VERTEX_CHUNK + 1):
+                    needed[j] = True
     for j in prange(vchunk_inst.shape[0]):
-        inst = vchunk_inst[j]
-        if not visible[inst]:
+        if not needed[j]:
             continue
+        inst = vchunk_inst[j]
         m = inst_mesh[inst]
         lin = inst_lin[inst]
         normal = np.empty((3, 3))
@@ -775,7 +842,7 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         inst = chunk_inst[c]
         n_whole = n_cut = 0
         ds = np.empty(4)
-        if visible[inst]:
+        if seen[c]:
             base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]  # faces index the packed vertices
             for f in range(chunk_first[c], chunk_end[c]):
                 ahead = _face_ahead(world, faces, f, base, near)

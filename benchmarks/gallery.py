@@ -516,6 +516,33 @@ def detail():
     return Shot(objects, camera((0.0, 2.2, 5.0), (0.0, 0.4, -6.0)), sun, {"background": Sky(), "simplify": 1.0})
 
 
+def level():
+    """A level as one big mesh (as loaded from glTF it often is): rooms of textured walls and pillars on a tiled
+    floor, seen from inside, most of it out of view and left out in runs of its faces (raster.face_runs, added
+    after 0.17.0, which keeps the picture the same), with a lamp's shadows and a mirror on a wall."""
+    from unicode3d.shapes import merge_meshes
+    walls, floors = [], []
+    for x in range(-12, 13):
+        for z in range(-12, 13):
+            if x % 6 == 0 and z % 6 != 3 or z % 6 == 0 and x % 6 != 3 or (x % 6, z % 6) in ((2, 2), (4, 4)):
+                walls.append(block_mesh((1.5 * x, 1.25, 1.5 * z), (1.5, 2.5, 1.5)))
+            else:
+                floors.append(block_mesh((1.5 * x, -0.05, 1.5 * z), (1.5, 0.1, 1.5)))
+    brick, tile = checks(64, 8, (0.7, 0.45, 0.35), (0.5, 0.35, 0.3)), checks(64, 4)
+    mesh = merge_meshes(walls + floors)
+    n_walls = sum(len(w.faces) for w in walls)
+    mesh.textures = [brick, tile]
+    mesh.materials = (np.arange(len(mesh.faces)) >= n_walls).astype(np.int64)
+    corners = mesh.vertices[mesh.faces]  # (texture coordinates from where each corner is: walls x + z and y)
+    mesh.uvs = np.where(mesh.materials[:, None, None] == 0, np.stack([corners[..., 0] + corners[..., 2],
+                                                                     corners[..., 1]], axis=-1),
+                        corners[..., [0, 2]]) / 3.0
+    mirror = Object3D(panel(1.6, 1.4), np.array([1.5, 0.5, 0.76]), color=(160, 160, 160), reflectivity=0.8)
+    lights = [Light(ambient=0.3, diffuse=0.3), PointLight(np.array([3.0, 2.2, 4.5]), range=10.0, shadows=True)]
+    return Shot([Object3D(mesh, color=(255, 255, 255)), mirror],
+                camera((1.5, 1.4, 7.5), (4.5, 1.0, -4.5), fov=70.0), lights, {"background": (10, 10, 14)})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -543,6 +570,7 @@ SCENES = {
     "ortho": ortho,
     "lettering": lettering,
     "detail": detail,
+    "level": level,
 }
 
 

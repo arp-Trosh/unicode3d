@@ -356,6 +356,10 @@ class RenderTests(unittest.TestCase):
                   ([Object3D(make_box(), position=np.array([0.0, 0.0, 4.6]))], Light()),  # camera in front of its near face
                   (crowd, lights),
                   (crowd, shadowed)]
+        # A big mesh mostly out of view, culled in runs of its faces (see test_big_meshes_are_culled_in_runs).
+        level = merge_meshes([block_mesh((1.5 * x, -1.0, -1.5 * z), (1.0, 1.0, 1.0)) for x in range(-12, 13)
+                              for z in range(-2, 20)])
+        scenes.append(([Object3D(level, color=(200, 180, 150)), *crowd[:20]], shadowed))
         ortho = Camera(position=np.array([3.0, 3.0, 4.0]), target=np.zeros(3), projection="ortho", size=4.0)
 
         def draw(threads):
@@ -1329,6 +1333,59 @@ class RenderTests(unittest.TestCase):
     def test_back_faces_are_culled(self):
         fb = self.render([Object3D(make_box(), position=np.array([0.0, 0.0, 6.0]))])  # camera inside the box
         self.assertFalse(fb.drawn.any())
+
+    def test_big_meshes_are_culled_in_runs(self):
+        # A level as one big mesh (pillars on a floor, two textures, a colour per face), seen from inside it: the
+        # runs of its faces out of view are left out, and the picture is the same to the bit as with none left
+        # out (each run's sphere NaN, which culls nothing): with shadows (a sun and a lamp), a mirror and levels
+        # of detail, and after the render list gains an object (packed after the level).
+        from unicode3d import renderer as renderer_module
+        rng = np.random.default_rng(8)
+        level = merge_meshes([block_mesh((2.0 * x, 1.0, 2.0 * z), (1.2, 2.0, 1.2)) for x in range(-12, 13)
+                              for z in range(-12, 13) if (x + z) % 3 == 0]
+                             + [block_mesh((0.0, -0.05, 0.0), (52.0, 0.1, 52.0))])
+        self.assertGreater(len(level.faces), 4 * 512)
+        level.textures = [rng.uniform(0.3, 1.0, (8, 8, 3)), rng.uniform(0.3, 1.0, (8, 8))]
+        level.materials = np.arange(len(level.faces)) % 2
+        level.uvs = rng.uniform(0.0, 1.0, (len(level.faces), 3, 2))
+        level.face_colors = rng.integers(100, 256, (len(level.faces), 3))
+        crate = Object3D(make_box(), np.array([1.0, 0.5, 3.0]), color=Color.RED)
+        mirror = Object3D(flat_quad(3.0, 2.0), np.array([-1.0, 1.0, -3.0]), color=(150, 150, 150), reflectivity=0.8)
+        lights = [Light(direction=np.array([0.3, -1.0, 0.2]), shadows=True),
+                  PointLight(np.array([1.0, 1.6, 1.0]), range=6.0, shadows=True)]
+        cameras = [Camera(position=np.array([1.0, 1.0, 1.0]), target=np.array([x, 0.8, z]), fov=60.0)
+                   for x, z in ((8.0, 1.0), (-3.0, -9.0), (1.0, 12.0))]
+        uncut = renderer_module._runs
+
+        def nothing_culled(vertices, faces, centre, radius):
+            starts, spheres, run_vertex = uncut(vertices, faces, centre, radius)
+            return starts, np.full_like(spheres, np.nan) if len(starts) > 1 else spheres, run_vertex
+
+        def draw(cull):
+            Renderer(1, 1).invalidate()  # (the level's runs afresh)
+            frames, counts = [], []
+            with unittest.mock.patch.object(renderer_module, "_runs", uncut if cull else nothing_culled):
+                for simplify in (0.0, 1.0):
+                    renderer = Renderer(90, 30, simplify=simplify)
+                    for objects in ([Object3D(level, color=(255, 255, 255)), mirror],
+                                    [Object3D(level, color=(255, 255, 255)), mirror, crate]):
+                        for camera in cameras:
+                            frames.append(renderer.render(objects, camera, lights).copy())
+                            inst = renderer._instances(objects, camera)
+                            k, *_ = renderer._transform(inst["pack"], inst, inst["double"], renderer.view_proj,
+                                                        camera.position, camera.near, "test_")
+                            counts.append(k)
+            Renderer(1, 1).invalidate()
+            return frames, counts
+
+        culled, fewer = draw(True)
+        every, counts = draw(False)
+        for a, b in zip(culled, every):
+            for name in ("rgb", "alpha", "depth", "ids"):
+                np.testing.assert_array_equal(getattr(a, name), getattr(b, name))
+        self.assertTrue(all(a <= b for a, b in zip(fewer, counts)))
+        self.assertLess(sum(fewer), 0.7 * sum(counts))  # (triangles projected: most of the level is out of view)
+        self.assertTrue(all(fb.drawn.mean() > 0.4 for fb in culled))  # (the level below the horizon)
 
     def test_supersampling_matches_plain_render(self):
         plain = self.render([Object3D(make_box())], samples=1, fog=0, outline=0)
