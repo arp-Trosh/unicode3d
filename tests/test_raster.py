@@ -78,7 +78,8 @@ def reference_rasterize(depth, tris, width, height, xs, ys, inv_w, offsets, slot
 @njit(cache=False, error_model="numpy")
 def reference_rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, band_start, band_tris,
                                layer_depth, layer_tri, layer_cover, layer_count, offset):
-    """rasterize_layers() as it was before spans (9a52786), serial: each sample of each pixel in the box tested."""
+    """rasterize_layers() as it was before spans (9a52786), serial: each sample of each pixel in the box tested
+    (multiplying by 1 / area as the kernel now does, rather than dividing)."""
     n_samples, k_max = offsets.shape[0], layer_depth.shape[1]
     oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
     oymin, oymax = offsets[:, 1].min(), offsets[:, 1].max()
@@ -99,19 +100,20 @@ def reference_rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, of
                 continue
             bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+            per_area = 1.0 / area  # (as the kernel: multiplied, not divided, so the last bit agrees)
             for py in range(by0, by1 + 1):
                 for px in range(bx0, bx1 + 1):
                     c = py * width + px
                     cover, nearest = 0, 0.0
                     for s in range(n_samples):
                         cx, cy = px + offsets[s, 0], py + offsets[s, 1]
-                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) / area
+                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) * per_area
                         if b0 < -1e-4:
                             continue
-                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) / area
+                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) * per_area
                         if b1 < -1e-4:
                             continue
-                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) / area
+                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) * per_area
                         if b2 < -1e-4:
                             continue
                         z = b0 * w0 + b1 * w1 + b2 * w2

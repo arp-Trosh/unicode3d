@@ -475,7 +475,7 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
                 continue
             bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
-            per_area = 1.0 / area  # (for _row_span)
+            per_area = 1.0 / area  # (multiplying by it is several times quicker than dividing by area)
             for py in range(by0, by1 + 1):
                 # Only the pixels of this row whose samples might pass all three edge tests (as in rasterize()).
                 lo, hi = bx0 + oxmin, bx1 + oxmax
@@ -488,13 +488,13 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
                     cover, nearest = 0, 0.0
                     for s in range(n_samples):
                         cx, cy = px + offsets[s, 0], py + offsets[s, 1]
-                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) / area
+                        b0 = ((x2 - x1) * (cy - y1) - (y2 - y1) * (cx - x1)) * per_area
                         if b0 < -1e-4:
                             continue
-                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) / area
+                        b1 = ((x0 - x2) * (cy - y2) - (y0 - y2) * (cx - x2)) * per_area
                         if b1 < -1e-4:
                             continue
-                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) / area
+                        b2 = ((x1 - x0) * (cy - y0) - (y1 - y0) * (cx - x0)) * per_area
                         if b2 < -1e-4:
                             continue
                         z = b0 * w0 + b1 * w1 + b2 * w2
