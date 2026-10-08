@@ -17,8 +17,9 @@ from .background import SKYBOX_FACES, background_args, fill_background, fog_args
 from .color import cached_linear_rgb
 from .lights import LIGHT_COLUMNS, as_lights, light_rows
 from .mirrors import Mirrors
-from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, SAMPLE_PATTERNS, SOLID, VERTEX_CHUNK, FrameBuffer,
-                     bin_bands, count_bands, project, rasterize, rasterize_layers, transform, upscale, NO_CLIP)
+from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEAST, RUN_MOST, SAMPLE_PATTERNS, SOLID,
+                     VERTEX_CHUNK, FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
+                     transform, upscale, NO_CLIP)
 from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
@@ -134,6 +135,9 @@ class _Piece:
     tinted: bool          # whether any of its corner colours is see-through
     sphere: tuple         # (centre x, y, z, radius)
     plane: tuple          # (normal x, y, z, d), NaN if not flat (see _flat_plane)
+    runs: np.ndarray      # (R,) where each run of faces starts, culled as one (see _runs)
+    run_spheres: np.ndarray  # (R, 4) a sphere around each run's corners (NaN: never culled)
+    run_vertex: np.ndarray   # (R, 2) the vertices each run's faces use: first, end
 
 
 _edits = 0  # how many times Renderer.invalidate() was called: pieces made before the last call are made afresh
@@ -167,7 +171,40 @@ def _piece(mesh):
     return _Piece(vertices, mesh.vertex_normals(), faces, uvs,
                   np.ones((n_faces, 3, 4)) if corner is None else corner, materials, chains, texels,
                   np.unique(materials), corner is not None and bool((corner[:, :, 3] < 1.0).any()),
-                  (*centre, radius), _flat_plane(vertices, faces, radius))
+                  (*centre, radius), _flat_plane(vertices, faces, radius), *_runs(vertices, faces, centre, radius))
+
+
+def _runs(vertices, faces, centre, radius):
+    """A mesh's faces cut into runs, each culled as one when it is out of view (raster.transform): (where each
+    starts (R,), a sphere around each (R, 4), the vertices each uses (R, 2)). A mesh of up to FACE_CHUNK faces is
+    one run, in the mesh's own sphere; a bigger one (a level, say) is cut where its runs would grow beyond
+    1/RUN_CELLS of its size across (raster.face_runs), into runs of at least RUN_LEAST faces and at most about
+    RUN_MOST runs, so that most of it can be left out where most of it is out of view. Faces keep their order, so
+    what is drawn doesn't change."""
+    n = len(faces)
+    limit, least = np.inf, max(RUN_LEAST, -(-n // RUN_MOST))
+    if n > FACE_CHUNK:
+        used = vertices[np.unique(faces)]
+        extent = float((used.max(axis=0) - used.min(axis=0)).max())
+        if math.isfinite(extent):
+            limit = extent / RUN_CELLS
+    starts = np.empty(n, np.int64)
+    starts = starts[:face_runs(vertices, faces, limit, least, FACE_CHUNK, starts)].copy()
+    if not n:
+        return starts, np.zeros((0, 4)), np.zeros((0, 2), np.int64)
+    run_vertex = np.stack([np.minimum.reduceat(faces.min(axis=1), starts),
+                           np.maximum.reduceat(faces.max(axis=1), starts) + 1], axis=1)
+    if len(starts) == 1:
+        return starts, np.array([(*centre, radius)], np.float64), run_vertex
+    corners = vertices[faces]  # (F, 3, 3)
+    lo = np.minimum.reduceat(corners.min(axis=1), starts)
+    hi = np.maximum.reduceat(corners.max(axis=1), starts)
+    middle = (lo + hi) / 2
+    run_of = np.repeat(np.arange(len(starts)), np.diff(np.append(starts, n)))
+    reach = np.sqrt(((corners - middle[run_of][:, None, :]) ** 2).sum(axis=2)).max(axis=1)
+    spheres = np.concatenate([middle, np.maximum.reduceat(reach, starts)[:, None]], axis=1)
+    spheres[~np.isfinite(spheres).all(axis=1)] = np.nan
+    return starts, spheres, run_vertex
 
 
 class _Packer:
@@ -215,7 +252,8 @@ class _Packer:
                 if self._textures[4] is not room:  # (the textures were packed afresh: their places moved)
                     packed = None
                 else:
-                    added = _arrays(more, index_of, kinds, len(arrays["vertices"]), len(arrays["faces"]))
+                    added = _arrays(more, index_of, kinds, len(arrays["vertices"]), len(arrays["faces"]),
+                                    len(arrays["run_first"]))
                     arrays = _joined(arrays, added, self._textures[3], self._room)
                     index = {**index, **{id(mesh): len(held) + k for k, mesh in enumerate(new)}}
                     self._packed = (held + new, held_keys + new_keys, index, pieces + more, arrays, room)
@@ -231,7 +269,7 @@ class _Packer:
                 unique_keys.append(key)
         pieces = [_mesh_piece(mesh, key) for mesh, key in zip(unique, unique_keys)]
         chains, index_of, kinds = self._pack_textures(pieces)
-        arrays = _arrays(pieces, index_of, kinds, 0, 0)
+        arrays = _arrays(pieces, index_of, kinds, 0, 0, 0)
         arrays["textures"] = self._textures[3]
         self._packed = (unique, unique_keys, index, pieces, arrays, self._textures[4])
         return arrays, np.array([index[id(mesh)] for mesh in meshes], np.int64), unique_keys
@@ -273,14 +311,18 @@ class _Packer:
         return self._textures[0], self._textures[1], self._textures[2]
 
 
-def _arrays(pieces, index, kinds, first_vertex, first_face):
-    """The pieces' arrays packed together (as _Packer.pack gives them, without the textures), their vertices and
-    faces numbered from first_vertex and first_face: to go after a pack of that many. index, kinds: the texture
-    pack's {id(chain): index} and alpha kinds."""
+def _arrays(pieces, index, kinds, first_vertex, first_face, first_run):
+    """The pieces' arrays packed together (as _Packer.pack gives them, without the textures), their vertices,
+    faces and runs numbered from first_vertex, first_face and first_run: to go after a pack of that many. index,
+    kinds: the texture pack's {id(chain): index} and alpha kinds."""
     n_vertices = np.array([len(p.vertices) for p in pieces], np.int64)
     n_faces = np.array([len(p.faces) for p in pieces], np.int64)
     mesh_vertex = np.concatenate([[0], np.cumsum(n_vertices)])
     mesh_face = np.concatenate([[0], np.cumsum(n_faces)])
+    n_runs = np.array([len(p.runs) for p in pieces], np.int64)
+    run_first = np.concatenate([p.runs for p in pieces]).astype(np.int64) + np.repeat(mesh_face[:-1], n_runs)
+    run_end = np.concatenate([np.append(p.runs[1:], len(p.faces)) if len(p.runs) else p.runs
+                              for p in pieces]).astype(np.int64) + np.repeat(mesh_face[:-1], n_runs)
     # Every mesh's materials in one table: the chain each shows (-1: none) and its texture's size.
     table = np.array([-1 if c is None else index[id(c)] for p in pieces for c in p.chains], np.int64)
     first = np.concatenate([[0], np.cumsum([len(p.chains) for p in pieces])])
@@ -308,6 +350,10 @@ def _arrays(pieces, index, kinds, first_vertex, first_face):
             "mesh_vertex": (first_vertex + mesh_vertex).astype(np.int64),
             "mesh_face": (first_face + mesh_face).astype(np.int64),
             "spheres": np.array([p.sphere for p in pieces], np.float64).reshape(-1, 4),
+            "mesh_run": (first_run + np.concatenate([[0], np.cumsum(n_runs)])).astype(np.int64),
+            "run_first": c(first_face + run_first, np.int64), "run_end": c(first_face + run_end, np.int64),
+            "run_spheres": c(np.concatenate([p.run_spheres for p in pieces]).reshape(-1, 4), np.float64),
+            "run_vertex": c(np.concatenate([p.run_vertex for p in pieces]).reshape(-1, 2), np.int64),
             "clear": np.array(clear, np.bool_), "tints": np.array(tints, np.bool_),
             "planes": np.array([p.plane for p in pieces], np.float64).reshape(-1, 4)}
 
@@ -319,8 +365,9 @@ def _joined(arrays, added, textures, room):
     were. Otherwise into new arrays with as much space again."""
     joined = {}
     for name, more in added.items():
-        old = arrays[name][:-1] if name in ("mesh_vertex", "mesh_face") else arrays[name]  # (the end of one is the
-        end = len(old) + len(more)                                                          # start of the next)
+        offsets = name in ("mesh_vertex", "mesh_face", "mesh_run")  # (the end of one is the start of the next)
+        old = arrays[name][:-1] if offsets else arrays[name]
+        end = len(old) + len(more)
         whole = room.get(name)
         if whole is None or whole.base is not None or len(whole) < end or not _starts(whole, old):
             whole = np.empty((2 * end + 64,) + more.shape[1:], more.dtype)
@@ -1063,12 +1110,19 @@ class Renderer(ShadowMaps, Mirrors):
         buf = self._buffers
         n_inst = len(inst["mesh"])
         vertex_counts = np.diff(pack["mesh_vertex"])[inst["mesh"]]
-        face_counts = np.diff(pack["mesh_face"])[inst["mesh"]]
         inst_vertex = np.zeros(n_inst + 1, np.int64)
         np.cumsum(vertex_counts, out=inst_vertex[1:])
-        # The work, in pieces that run in parallel: chunks of each instance's vertices, then of its faces.
+        # The work, in pieces that run in parallel: chunks of each instance's vertices, then its mesh's runs of faces
+        # (see _runs), each left out when out of view, with the vertex chunks only they use.
         vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
-        chunk_inst, chunk_first, chunk_end = _chunks(face_counts, pack["mesh_face"][inst["mesh"]], FACE_CHUNK)
+        inst_vchunk = np.zeros(n_inst + 1, np.int64)
+        np.cumsum((vertex_counts + VERTEX_CHUNK - 1) // VERTEX_CHUNK, out=inst_vchunk[1:])
+        mesh_run = pack["mesh_run"]
+        first_run = mesh_run[inst["mesh"]]
+        runs = mesh_run[inst["mesh"] + 1] - first_run
+        chunk_inst = np.repeat(np.arange(n_inst, dtype=np.int64), runs)
+        chunk_run = np.arange(len(chunk_inst), dtype=np.int64) + np.repeat(first_run - (np.cumsum(runs) - runs), runs)
+        chunk_first, chunk_end = pack["run_first"][chunk_run], pack["run_end"][chunk_run]
         n_chunks = len(chunk_inst)
         whole, cut = buf.get(prefix + "whole", (n_chunks,), np.int64), buf.get(prefix + "cut", (n_chunks,), np.int64)
         off_whole = buf.get(prefix + "off_whole", (n_chunks,), np.int64)
@@ -1076,8 +1130,11 @@ class Renderer(ShadowMaps, Mirrors):
         world = buf.get(prefix + "world", (int(inst_vertex[-1]), 10))
         k = transform(pack["vertices"], pack["normals"], pack["faces"], pack["mesh_vertex"], pack["spheres"],
                       inst["mesh"], inst["lin"], inst["pos"], double, inst["flip"], inst_vertex,
-                      view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end,
-                      chunk_inst, chunk_first, chunk_end, world, buf.get(prefix + "visible", (n_inst,), np.bool_),
+                      view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
+                      chunk_inst, chunk_run, chunk_first, chunk_end, mesh_run, pack["run_spheres"], pack["run_vertex"],
+                      world, buf.get(prefix + "visible", (n_inst,), np.bool_),
+                      buf.get(prefix + "seen", (n_chunks,), np.bool_),
+                      buf.get(prefix + "needed", (len(vchunk_inst),), np.bool_),
                       whole, cut, off_whole, off_cut)
         return k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut)
 
