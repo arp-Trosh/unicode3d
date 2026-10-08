@@ -18,7 +18,9 @@ MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}
 # The helpers resolve() and resolve_cells() call per pixel are inlined into them (inline="always"): a call passes
 # each of its many arrays as a structure of several words, which cost more than the shading itself (inlined, a
 # pixel's shading took a third less time). They compile into each kernel calling them, so the kernels take longer
-# to compile (seconds, once: Numba's cache keeps them).
+# to compile (seconds, once: Numba's cache keeps them). So are the texture sampler's (texture.sample and the helpers
+# it calls) and raster's barycentric and texture_lod: called, a textured pixel's sampling cost about a tenth of
+# resolve_cells's time more.
 
 
 def _decode_exact(level):
@@ -140,6 +142,13 @@ def _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, fi
     """The colour (r, g, b) and alpha of triangle t's surface at barycentric weights b, before lighting: interpolated
     from its corners, times its texture if it has a mipmap chain (at the mip level raster.texture_lod gives for this
     pixel, from the triangle's corners on screen, xs and ys, plus its bias lod[t])."""
+    level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t]) + lod[t] if chain[t] >= 0 else 0.0
+    return _surface_at(t, b0, b1, b2, inv_w, attrs, chain, texels, levels, first, level)
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _surface_at(t, b0, b1, b2, inv_w, attrs, chain, texels, levels, first, level):
+    """_surface with the texture's mip level given (resolve_cells works it out once per block and triangle)."""
     w0, w1, w2 = b0 * inv_w[t, 0], b1 * inv_w[t, 1], b2 * inv_w[t, 2]
     ws = w0 + w1 + w2
     at = attrs[t]
@@ -149,7 +158,6 @@ def _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, fi
 
     r, g, b, a = lerp(8), lerp(9), lerp(10), lerp(11)
     if chain[t] >= 0:
-        level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t]) + lod[t]
         tr, tg, tb, ta = sample_texture(texels, levels, first, chain[t], lerp(6), lerp(7), level)
         r, g, b, a = r * tr, g * tg, b * tb, a * ta
     return r, g, b, a
@@ -287,6 +295,21 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
                      more, frame_rgb, frame_alpha, frame_samples)
 
 
+@njit(cache=True, error_model="numpy")
+def _spread(n):
+    """A step for visiting n rows in a spread-out order, k * step % n for k = 0..n-1: about 0.618 n (the golden
+    ratio's, which spreads any run of k evenly over the rows), with no factor in common with n, so that every row
+    comes once."""
+    step = max(1, int(n * 0.6180339887))
+    while True:
+        a, b = step, n
+        while b:
+            a, b = b, a % b
+        if a <= 1:
+            return step
+        step += 1
+
+
 @njit(cache=True, error_model="numpy", parallel=True, fastmath=MATH)
 def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess,
                   shine, chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats,
@@ -300,11 +323,14 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
     Where a shadow's edge may cross the block (a shadow lookup smoothed over the whole block comes out neither fully
     lit nor fully dark, or tinted), the block's pixels are lit one by one, as resolve() lights them: shadows keep
     their edges, and fully lit or fully dark blocks, the most, are lit once. The surface's colour and texture are
-    still worked out per pixel; with `coarse`, they too are once per block and triangle (cheaper, and coarser:
-    texture detail inside a cell is lost), and shadow edges are not looked for.
+    still worked out per pixel, at a texture mip level worked out once per block and triangle (at the same point,
+    with how it changes along x and y, for each pixel's); with `coarse`, they too are once per block and triangle
+    (cheaper, and coarser: texture detail inside a cell is lost), and shadow edges are not looked for.
 
     Writes what resolve() writes. Blocks at the frame's right and bottom edges may be smaller. Loops in parallel
-    over rows of blocks, each writing only its own pixels.
+    over rows of blocks, each writing only its own pixels, taken in a spread-out order (_spread): prange gives each
+    thread a run of iterations, which then holds rows from all over the picture rather than a band of it (the sky,
+    say, cheaper than the ground).
     """
     m, n = tris.shape
     height = m // max(width, 1)
@@ -312,11 +338,14 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
     cols, rows = (width + cell_w - 1) // cell_w, (height + cell_h - 1) // cell_h
     span = 1.0 if coarse else np.sqrt(cell_w * cell_w + cell_h * cell_h) + 1.0  # (the block's diagonal, a pixel more)
     most = cell_w * cell_h * n  # the most different triangles a block can hold
-    for row in prange(rows):
-        # Each block's triangles: which, where they are (summed pixel centres, how many), their lighting (light
-        # levels, highlight, reflected view, whether shared: _light's) and, coarse, their surface colour.
+    step = _spread(rows)
+    for turn in prange(rows):
+        row = turn * step % rows
+        # Each block's triangles: which, where they are (summed pixel centres, how many; then their mean), their
+        # lighting (light levels, highlight, reflected view, whether shared: _light's), coarse, their surface colour,
+        # and their texture's mip level (and its change along x and y).
         block_tris = np.empty(most, np.int64)
-        block = np.empty((most, 15))
+        block = np.empty((most, 18))
         y0, y1 = row * cell_h, min(row * cell_h + cell_h, height)
         for col in range(cols):
             x0, x1 = col * cell_w, min(col * cell_w + cell_w, width)
@@ -347,11 +376,23 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                         block[j, 2] += 1.0
             for j in range(k):
                 t, inst = block_tris[j], tri_inst[block_tris[j]]
-                b0, b1, b2 = barycentric(xs, ys, t, block[j, 0] / block[j, 2], block[j, 1] / block[j, 2])
+                mx, my = block[j, 0] / block[j, 2], block[j, 1] / block[j, 2]
+                b0, b1, b2 = barycentric(xs, ys, t, mx, my)
                 (block[j, 3], block[j, 4], block[j, 5], block[j, 6], block[j, 7], block[j, 8], _, block[j, 9],
                  block[j, 10], block[j, 11], block[j, 2]) = _light(
                     t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
                     pixel_size, eye, emissive[inst], specular[inst], shininess[inst], span)
+                # The texture's mip level here, and how it changes a pixel to the right and a pixel down, for each
+                # pixel's own (three texture_lod calls instead of one per pixel; within a level of 8-bit colour).
+                block[j, 0], block[j, 1] = mx, my
+                block[j, 15] = block[j, 16] = block[j, 17] = 0.0
+                if chain[t] >= 0 and not coarse:
+                    level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t])
+                    block[j, 15] = level + lod[t]
+                    c0, c1, c2 = barycentric(xs, ys, t, mx + 1.0, my)
+                    block[j, 16] = texture_lod(xs, ys, inv_w, attrs, t, c0, c1, c2, levels, first, chain[t]) - level
+                    c0, c1, c2 = barycentric(xs, ys, t, mx, my + 1.0)
+                    block[j, 17] = texture_lod(xs, ys, inv_w, attrs, t, c0, c1, c2, levels, first, chain[t]) - level
                 if coarse:
                     block[j, 2] = 1.0
                     block[j, 12], block[j, 13], block[j, 14], _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain,
@@ -386,7 +427,9 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                                 kr, kg, kb, spec_r, spec_g, spec_b, _, rx, ry, rz, _ = _light(
                                     t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats,
                                     shadow_params, pixel_size, eye, emissive[inst], specular[inst], shininess[inst], 1.0)
-                            r, g, b, _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first)
+                            level = block[j, 15] + block[j, 16] * (x + 0.5 - block[j, 0]) + block[j, 17] * (
+                                y + 0.5 - block[j, 1])
+                            r, g, b, _ = _surface_at(t, b0, b1, b2, inv_w, attrs, chain, texels, levels, first, level)
                         else:
                             r, g, b = block[j, 12], block[j, 13], block[j, 14]
                         _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, sample_rgb[c, s], gloss > 0.0, spec_rgb[c])

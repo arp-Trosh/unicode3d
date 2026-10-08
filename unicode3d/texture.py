@@ -144,7 +144,7 @@ def pack(chains, out=None, offset=0):
     return texels, np.array(levels, dtype=np.int64).reshape(-1, 3), np.array(first, dtype=np.int64)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def clamp_index(v, n):
     """A whole number v (a float) as an index into n items: v kept within 0..n-1, and 0 for NaN.
 
@@ -158,7 +158,7 @@ def clamp_index(v, n):
     return 0
 
 
-@njit(cache=True, error_model="numpy", fastmath=MATH)
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
 def repeat(u):
     """A texture coordinate beyond 0..1 brought back into it, so that textures repeat (tile) over faces whose uv
     go further (a floor tiled ten times: u from 0 to 10). Coordinates within 0..1 are kept as they are, so
@@ -170,7 +170,7 @@ def repeat(u):
     return f if f >= 0.0 else 0.0  # (an infinity gives NaN, which fails the comparison too)
 
 
-@njit(cache=True, error_model="numpy", fastmath=MATH)
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
 def _bilinear(texels, levels, level, u, v):
     offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
     u, v = repeat(u), repeat(v)
@@ -180,16 +180,20 @@ def _bilinear(texels, levels, level, u, v):
     x0 = clamp_index(np.floor(x), w)
     y0 = clamp_index(np.floor(y), h)
     x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
-    a, b = texels[offset + y0 * w + x0], texels[offset + y0 * w + x1]
-    c, d = texels[offset + y1 * w + x0], texels[offset + y1 * w + x1]
-    r = (a[0] * (1 - fx) + b[0] * fx) * (1 - fy) + (c[0] * (1 - fx) + d[0] * fx) * fy
-    g = (a[1] * (1 - fx) + b[1] * fx) * (1 - fy) + (c[1] * (1 - fx) + d[1] * fx) * fy
-    bl = (a[2] * (1 - fx) + b[2] * fx) * (1 - fy) + (c[2] * (1 - fx) + d[2] * fx) * fy
-    al = (a[3] * (1 - fx) + b[3] * fx) * (1 - fy) + (c[3] * (1 - fx) + d[3] * fx) * fy
+    ka, kb = offset + y0 * w + x0, offset + y0 * w + x1
+    kc, kd = offset + y1 * w + x0, offset + y1 * w + x1
+    r = ((texels[ka, 0] * (1 - fx) + texels[kb, 0] * fx) * (1 - fy)
+        + (texels[kc, 0] * (1 - fx) + texels[kd, 0] * fx) * fy)
+    g = ((texels[ka, 1] * (1 - fx) + texels[kb, 1] * fx) * (1 - fy)
+        + (texels[kc, 1] * (1 - fx) + texels[kd, 1] * fx) * fy)
+    bl = ((texels[ka, 2] * (1 - fx) + texels[kb, 2] * fx) * (1 - fy)
+         + (texels[kc, 2] * (1 - fx) + texels[kd, 2] * fx) * fy)
+    al = ((texels[ka, 3] * (1 - fx) + texels[kb, 3] * fx) * (1 - fy)
+         + (texels[kc, 3] * (1 - fx) + texels[kd, 3] * fx) * fy)
     return r, g, bl, al
 
 
-@njit(cache=True, error_model="numpy", fastmath=MATH)
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
 def sample(texels, levels, first, chain, u, v, lod):
     """Trilinear sample of chain `chain` of pack()'s arrays: bilinear on the two mip levels around `lod`,
     blended. Returns (r, g, b, alpha), the colour not premultiplied (as it was painted)."""
