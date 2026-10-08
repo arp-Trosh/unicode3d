@@ -420,10 +420,9 @@ class DisplayControls(Panel):
     from simpler copies of their meshes that differ by at most a pixel (levels of detail, Renderer.simplify 1),
     "high" every mesh as it is (simplify 0). Quality (quality.AutoQuality, as `self.auto_quality`): "high" draws
     as the other settings say (the default); "mid" takes the first steps down (edge samples off, detail 2 px),
-    keeping the shading; "low" holds the lowest step (coarse shading, the picture drawn smaller too); "auto" steps the
-    picture down below the settings while frames take longer than the frame rate allows and run under
-    AutoQuality.min_fps (20), and back up when there is time (shown as "auto -n", n steps down). Settings saved
-    with the old name "fast" are taken as "low". Shadows and reflections are left as they are set. Frames are timed by run()
+    keeping the shading; "low" takes every step (coarse shading, the picture drawn smaller too); "auto" draws
+    "high" while frames come at 27 a second or more (AutoQuality.high_fps), "mid" at 20 or more (min_fps) and
+    "low" below that (shown as "auto mid", say). Settings saved with the old name "fast" are taken as "low". Shadows and reflections are left as they are set. Frames are timed by run()
     (screen.frame_time), once a frame when the controls are drawn or handled. quality: the mode to start in (None:
     the renderer's as it is; DisplayControls on one renderer share its AutoQuality.of()).
 
@@ -475,7 +474,7 @@ class DisplayControls(Panel):
             self.detail = Choice("F7", tuple(self.DETAIL), key=Key.F7, show=lambda v: {"standard": "std detail"}.get(v, f"{v} detail"),
                                  get=lambda: "high" if not self.auto_quality.user("simplify") > 0 else "standard",
                                  set=self._set_detail)
-            self.quality = Choice("F8", QUALITY_MODES, key=Key.F8, width=len("auto -5"), show=self._quality_text,
+            self.quality = Choice("F8", QUALITY_MODES, key=Key.F8, width=len("auto high"), show=self._quality_text,
                                   get=lambda: self.auto_quality.mode, set=self._set_quality)
             widgets += [self.shadows, self.reflections, self.detail, self.quality]
         self._named = {name: getattr(self, name) for name in self.SETTINGS if hasattr(self, name)}
@@ -540,8 +539,7 @@ class DisplayControls(Panel):
 
     def _quality_text(self, mode):
         auto = self.auto_quality
-        level = auto.level if auto is not None and mode == auto.mode == "auto" else 0
-        return f"auto -{level}" if level else mode
+        return f"auto {auto.preset}" if auto is not None and mode == auto.mode == "auto" else mode
 
     def _time_frame(self):
         """Give the quality the last frame's time, once a frame (run() times them)."""

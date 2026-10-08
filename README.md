@@ -1047,21 +1047,21 @@ others). `controls.settings()` gives the values as a dict ready for JSON, and `c
 puts them back on the next run, skipping any this terminal can't take; where to keep them is up to the
 program.
 
-<a id="automatic-quality"></a>**Automatic quality.** On a slow machine, quality "auto" (F8, `DisplayControls(renderer=renderer, quality="auto")`, or
-`controls.apply({"quality": "auto"})`) lowers the picture while frames take longer than the frame rate
-allows, and raises it again when there is time to spare. The steps, in order: edge samples off (edges
-stay smoothed, more coarsely), levels of detail at 2 pixels, coarse shading (everything worked out once per
-cell: texture detail inside a cell is lost), then the picture drawn at 85% and 70% of its pixels and stretched
-(softer). Shadows and reflections are never turned off. It only ever goes below the
-settings as the user (or the program) set them, and those are what F7 and `settings()` show; the bar shows
-"auto -2" while two steps down. It judges about a second of frames at a time (`run()` times each frame,
-`screen.frame_time`, without the wait for the frame rate), steps down when they take over 10% longer than
-allowed and run under 20 fps (`AutoQuality.min_fps`: a game aiming at 30 plays well at 20, so the picture is
-kept until frames get that slow; 0 for the frame rate alone) and back up after 3 s with a quarter to spare,
-waiting longer each time a step up doesn't hold, so it settles instead of flickering. The other modes hold
-still: "high", the default, leaves the renderer as it is (benchmarks and tests stay repeatable); "mid" takes
-the first two steps (edge samples off, detail 2 px), keeping the shading; "low" holds the lowest step
-("fast", its old name, still works, in code and in saved settings). The same works without `DisplayControls`:
+<a id="automatic-quality"></a>**Quality presets and automatic quality.** F8 (or `DisplayControls(renderer=renderer, quality=...)`,
+or `controls.apply({"quality": ...})`) picks a preset. "high", the default, leaves the renderer as set
+(benchmarks and tests stay repeatable). "mid" turns edge samples off (edges stay smoothed, more coarsely) and
+draws levels of detail at 2 pixels, keeping the shading. "low" also shades coarsely (everything once per
+cell: texture detail inside a cell is lost) and draws the picture at 70% of its pixels, stretched (softer).
+Shadows and reflections are never turned off, and presets only ever go below the settings as the user (or the
+program) set them, which are what F7 and `settings()` show. "auto" chooses among them by the frame rate:
+"high" while frames come at 27 a second or more (`AutoQuality.high_fps`), "mid" at 20 or more (`min_fps`: a
+game aiming at 30 plays well at 20) and "low" below that; the bar shows "auto mid" while it is on mid. It
+judges about a second of frames at a time (`run()` times each frame, `screen.frame_time`, without the wait for
+the frame rate) and moves down at once; as frames drawn in one preset say little of another's, it learns how
+much dearer each preset is than the next one down from the frames either side of each move, and moves up when
+the better one is expected to clear its frame rate by 10% for 3 s, waiting longer each time a move up doesn't
+hold, so it settles instead of flickering. ("fast", the old name of "low", still works, in code and in saved
+settings.) The same works without `DisplayControls`:
 `AutoQuality.of(renderer).update(frame_seconds, 1 / fps)` once a frame (`unicode3d.quality`).
 
 ```python
