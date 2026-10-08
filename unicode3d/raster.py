@@ -361,7 +361,8 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
     twice where they meet.
 
     band_start, band_tris: the see-through triangles touching each band of rows, as for rasterize().
-    Bands are rasterized in parallel, each clearing and filling only its own pixels' lists.
+    Bands are rasterized in parallel, each clearing and filling only its own pixels' lists. As in rasterize(), each
+    row of a triangle is walked only over its span (_row_span), with the same tests deciding inside.
     """
     n_samples, k_max = offsets.shape[0], layer_depth.shape[1]
     oxmin, oxmax = offsets[:, 0].min(), offsets[:, 0].max()
@@ -384,8 +385,15 @@ def rasterize_layers(solid, width, height, xs, ys, inv_w, tri_inst, offsets, ban
                 continue
             bx0, bx1 = pixel_range(min(x0, x1, x2) - oxmax, max(x0, x1, x2) - oxmin, 0, width - 1)
             w0, w1, w2 = inv_w[t, 0], inv_w[t, 1], inv_w[t, 2]
+            per_area = 1.0 / area  # (for _row_span)
             for py in range(by0, by1 + 1):
-                for px in range(bx0, bx1 + 1):
+                # Only the pixels of this row whose samples might pass all three edge tests (as in rasterize()).
+                lo, hi = bx0 + oxmin, bx1 + oxmax
+                lo, hi = _row_span(lo, hi, x1, y1, x2 - x1, y2 - y1, per_area, py + oymin, py + oymax, width)
+                lo, hi = _row_span(lo, hi, x2, y2, x0 - x2, y0 - y2, per_area, py + oymin, py + oymax, width)
+                lo, hi = _row_span(lo, hi, x0, y0, x1 - x0, y1 - y0, per_area, py + oymin, py + oymax, width)
+                ax, bx = pixel_range(lo - oxmax, hi - oxmin, bx0, bx1)
+                for px in range(ax, bx + 1):
                     c = py * width + px
                     cover, nearest = 0, 0.0
                     for s in range(n_samples):
