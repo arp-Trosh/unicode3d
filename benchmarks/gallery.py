@@ -23,8 +23,8 @@ The scenes: a cube; a textured die in each glyph set and colour mode; overlappin
 cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor running to the horizon
 (mipmapping); many small balls; a finely divided sphere; the room demo's courtyard; and, added after 0.4.1,
 world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
-floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; and, after 0.7.1, the
-courtyard through an orthographic camera.
+floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; after 0.7.1, the
+courtyard through an orthographic camera; and, after 0.17.0, sun shadows fitted to the view in a big field.
 """
 import argparse
 import os
@@ -133,6 +133,17 @@ def sun_shadows():
     sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
     return Shot([Object3D(floor(5.0), color=(180, 175, 165)), *things], camera((0.5, 3.0, 5.0), (0, 0.5, 0)), sun,
                 {"background": Sky()})
+
+
+def view_shadows():
+    """sun_shadows' things in a field 60 units across, with the sun's map fitted to what the camera sees."""
+    shot = sun_shadows()
+    rng = np.random.default_rng(3)
+    posts = [Object3D(block_mesh((x, 0.6, z), (0.3, 1.2, 0.3)), color=(120, 150, 90))
+             for x, z in rng.uniform(-30.0, 30.0, (60, 2)) if abs(x) > 4.0 or abs(z) > 4.0]
+    shot.objects = [Object3D(floor(30.0), color=(180, 175, 165)), *shot.objects[1:], *posts]
+    shot.settings["shadow_fit"] = "view"
+    return shot
 
 
 def lamp_shadows():
@@ -554,6 +565,7 @@ SCENES = {
     "glass": glass,
     "sun-shadows": sun_shadows,
     "lamp-shadows": lamp_shadows,
+    "view-shadows": view_shadows,
     "cutouts": cutouts,
     "mirror": mirror,
     "facing-mirrors": facing_mirrors,

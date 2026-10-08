@@ -6,14 +6,15 @@ A Light's shadow map is one orthographic view along the light of a box around ev
 PointLight's is a cube of six perspective views out from it. Each texel holds the depth of the nearest thing
 blocking the light there, and see-through things add what they let through (tinted shadows).
 """
+import itertools
 import operator
 
 import numpy as np
 from numba import njit
 
 from .lights import PointLight
-from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, project_depth, rasterize_depth,
-                     rasterize_tint)
+from .raster import (CLEAR, CUT, FACE_CHUNK, SOLID, SURFACE, VERTEX_CHUNK, count_cube, project_cube, project_depth,
+                     rasterize_depth, rasterize_tint, transform_depth)
 from .transforms import look_at, normalize, perspective
 
 MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for the lookups shading makes: see shading.MATH)
@@ -167,6 +168,41 @@ def _world_spheres(spheres, linear, pos):
     return np.einsum("nij,nj->ni", linear, spheres[:, :3]) + pos, spheres[:, 3] * np.sqrt(gram)
 
 
+def _light_frame(direction, centres, radii):
+    """The axes of a Light travelling in `direction` (basis (3, 3): rows right and up across the light, and towards
+    where it comes from) and the box around the spheres (centres, radii) in them (lo, hi)."""
+    d = normalize(direction)
+    up = np.array([0.0, 1.0, 0.0]) if abs(d[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    right = normalize(np.cross(d, up))
+    basis = np.stack([right, np.cross(right, d), -d])  # x, y across the light; z towards where it comes from
+    p = centres @ basis.T
+    return basis, (p - radii[:, None]).min(axis=0), (p + radii[:, None]).max(axis=0)
+
+
+def _box_half(reach):
+    """Half the width of a Light's map reaching `reach` either way of its centre: that, up to a step of about 9%."""
+    return 2.0 ** (np.ceil(8.0 * np.log2(max(reach, 1e-9))) / 8)
+
+
+def _depth_range(lo, hi, texel):
+    """Where a Light's map's depth starts along its z axis (z_lo) and how far it runs (span), for things from
+    lo[2] to hi[2]: depth runs from 0 (empty) to 1 (nearest the light), with room at the far end so nothing sits at
+    0."""
+    margin = 0.01 * (hi[2] - lo[2]) + texel
+    return lo[2] - margin, hi[2] - lo[2] + 2 * margin
+
+
+def _box_view(basis, cx, cy, half, z_lo, span):
+    """World to normalized device coordinates (4, 4) of a Light's map: across the light, half either way of (cx,
+    cy); along it, from z_lo over span."""
+    mat = np.zeros((4, 4))
+    mat[0, :3], mat[0, 3] = basis[0] / half, -cx / half
+    mat[1, :3], mat[1, 3] = basis[1] / half, -cy / half
+    mat[2, :3], mat[2, 3] = -2.0 * basis[2] / span, 1.0 + 2.0 * z_lo / span
+    mat[3, 3] = 1.0
+    return mat
+
+
 def _light_view(direction, centres, radii, size):
     """The view of a Light travelling in `direction` for its shadow map of size x size texels: an
     orthographic projection of a box around the spheres (centres, radii), looking along the light.
@@ -176,24 +212,45 @@ def _light_view(direction, centres, radii, size):
     The box moves in steps of whole texels and grows in steps of about 9%, so that shadows keep still as
     the objects in it move, rather than crawling as the texels shift under them.
     """
-    d = normalize(direction)
-    up = np.array([0.0, 1.0, 0.0]) if abs(d[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
-    right = normalize(np.cross(d, up))
-    basis = np.stack([right, np.cross(right, d), -d])  # x, y across the light; z towards where it comes from
-    p = centres @ basis.T
-    lo, hi = (p - radii[:, None]).min(axis=0), (p + radii[:, None]).max(axis=0)
-    half = 2.0 ** (np.ceil(8.0 * np.log2(max((hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, 1e-9))) / 8)
+    basis, lo, hi = _light_frame(direction, centres, radii)
+    half = _box_half(max((hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2))
     texel = 2.0 * half / size
     cx, cy = (np.round((lo[:2] + hi[:2]) / 2 / texel) * texel).tolist()
-    # Depth runs from 0 (empty) to 1 (nearest the light), with room at the far end so nothing sits at 0.
-    margin = 0.01 * (hi[2] - lo[2]) + texel
-    z_lo, span = lo[2] - margin, hi[2] - lo[2] + 2 * margin
-    mat = np.zeros((4, 4))
-    mat[0, :3], mat[0, 3] = basis[0] / half, -cx / half
-    mat[1, :3], mat[1, 3] = basis[1] / half, -cy / half
-    mat[2, :3], mat[2, 3] = -2.0 * basis[2] / span, 1.0 + 2.0 * z_lo / span
-    mat[3, 3] = 1.0
-    return mat, texel, 1.0 / span
+    z_lo, span = _depth_range(lo, hi, texel)
+    return _box_view(basis, cx, cy, half, z_lo, span), texel, 1.0 / span
+
+
+SHADOW_FITS = ("scene", "view")  # what a Light's map is fitted to (Renderer.shadow_fit)
+VIEW_SHRINK = 2  # a view-fitted map's box shrinks only once what is seen fits this many steps (_box_half) smaller
+REGION_EXTRA = 1024  # texels a view-fitted map's settled map reaches beyond it (half each side; at most its width)
+_TRIPLES = np.array(list(itertools.combinations(range(12), 3)), np.int64)
+
+
+def _seen_region(view_proj, lo, hi):
+    """The corners (P, 3) of the part of the box lo..hi (the scene's) a camera (view_proj: world to clip space) can
+    see: where the planes of its view and of the box meet in threes, kept where inside all of them. None where
+    there is nothing (or the view is degenerate: NaN, or planes of no direction)."""
+    r = np.asarray(view_proj, float)
+    planes = np.empty((12, 4))
+    planes[:6] = (r[3] + r[0], r[3] - r[0], r[3] + r[1], r[3] - r[1], r[3] + r[2], r[3] - r[2])
+    for k in range(3):
+        planes[6 + 2 * k] = np.r_[np.eye(3)[k], -lo[k]]
+        planes[7 + 2 * k] = np.r_[-np.eye(3)[k], hi[k]]
+    length = np.linalg.norm(planes[:, :3], axis=1)
+    if not (np.isfinite(planes).all() and (length > 1e-12).all()):
+        return None
+    planes /= length[:, None]
+    n, d = planes[:, :3], planes[:, 3]
+    a, b, c = n[_TRIPLES[:, 0]], n[_TRIPLES[:, 1]], n[_TRIPLES[:, 2]]
+    bc, ca, ab = np.cross(b, c), np.cross(c, a), np.cross(a, b)
+    det = np.einsum("ij,ij->i", a, bc)
+    ok = np.abs(det) > 1e-9
+    p = -(d[_TRIPLES[ok, 0], None] * bc[ok] + d[_TRIPLES[ok, 1], None] * ca[ok]
+          + d[_TRIPLES[ok, 2], None] * ab[ok]) / det[ok, None]
+    scale = 1.0 + float(np.abs(np.r_[lo, hi]).max())
+    p = p[np.isfinite(p).all(axis=1)]
+    p = p[(p @ n.T + d >= -1e-7 * scale).all(axis=1)]
+    return p if len(p) else None
 
 
 # The faces of a cube map: the way each looks from the light, and its up.
@@ -225,7 +282,7 @@ def _cube_views(position, reach, size):
     return mats, 2.0 * tan_half / size, near
 
 
-_EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform() that culls nothing (w = 1, no sides)
+_EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform_depth() that culls nothing (w = 1, no sides)
 _NO_BASE = np.zeros((0, 0), np.float32)  # rasterize_depth's base when there is none
 SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins the settled ones (see _shadow_maps)
 
@@ -320,27 +377,48 @@ class ShadowMaps:
         size, cube_size = max(int(self.shadow_size), 1), max(int(self.point_shadow_size), 4 * CUBE_MARGIN)
         soft = max(0.5, float(self.shadow_softness))  # (in this order, NaN gives 0.5)
         # What the maps depend on: where the lights are (not how bright), and what is in the scene.
+        buf, pack = self._buffers, inst["pack"]
+        centres = radii = None
+        fits = [None] * len(shadowed)  # each Light's view-fitted map (see _fit_view), or None: fitted to the scene
+        if self._shadow_fit == "view" and not (self.reflections and self.mirror_bounces > 0
+                                              and self._mirrors(inst).any()):
+            seen = self._seen(inst)
+            if seen is not None:
+                centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
+                fits = [None if isinstance(light, PointLight) else
+                        self._fit_view(nth, np.asarray(light.direction, float), centres, radii, size, soft, seen)
+                        for nth, light in enumerate(shadowed)]
+        # What the maps depend on: where the lights are (not how bright), what is in the scene, and where
+        # view-fitted maps are.
         key = ([np.asarray(light.position, float).tobytes() + np.float64(light.range).tobytes()
                 if isinstance(light, PointLight) else np.asarray(light.direction, float).tobytes()
                 for light in shadowed] + [size, cube_size, soft]
-               + [inst[k].tobytes() for k in ("mesh", "pos", "lin", "cast", "rgb", "alpha")], inst["pack"])
+               + [inst[k].tobytes() for k in ("mesh", "pos", "lin", "cast", "rgb", "alpha")]
+               + [None if fit is None else fit[0].tobytes() + fit[1].tobytes() for fit in fits], inst["pack"])
         last = self._shadows
         if last is not None and last[0][0] == key[0] and last[0][1] is key[1]:
             return last[1]
-        buf, pack = self._buffers, inst["pack"]
-        centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
+        if centres is None:
+            centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
         cast = np.flatnonzero(inst["cast"])
-        # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters, a cube's near plane).
+        # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters, a cube's near plane, and for
+        # a view-fitted map, its region's (world to clip space (1, 4, 4), size, the map's column and row in it)).
         views = []
-        for light in shadowed:
+        for light, fit in zip(shadowed, fits):
             if isinstance(light, PointLight):
                 position, reach = np.asarray(light.position, float), float(light.range)
                 near_enough = cast[np.linalg.norm(centres[cast] - position, axis=1) - radii[cast] < reach]
                 face_mats, texel, near = _cube_views(position, reach, cube_size)
-                views.append((face_mats, [(1, 0, cube_size, texel, 1.0, soft, *position, 0)] * 6, near_enough, near))
+                views.append((face_mats, [(1, 0, cube_size, texel, 1.0, soft, *position, 0)] * 6, near_enough, near,
+                              None))
+            elif fit is not None:
+                mat, region_mat, region_size, column, row, texel, depth_scale = fit
+                views.append((mat[None], [(0, 0, size, texel, depth_scale * texel, soft, 0, 0, 0, 0)], cast, 0.0,
+                              (region_mat[None], region_size, column, row)))
             else:
                 mat, texel, depth_scale = _light_view(np.asarray(light.direction, float), centres, radii, size)
-                views.append((mat[None], [(0, 0, size, texel, depth_scale * texel, soft, 0, 0, 0, 0)], cast, 0.0))
+                views.append((mat[None], [(0, 0, size, texel, depth_scale * texel, soft, 0, 0, 0, 0)], cast, 0.0,
+                              None))
         mats = np.concatenate([view[0] for view in views])
         params = np.array([row for view in views for row in view[1]], dtype=float)
         areas = params[:, 2].astype(np.int64) ** 2
@@ -368,14 +446,17 @@ class ShadowMaps:
         self._shadow_draws += 1
         settled = self._settled
         m = 0
-        for nth, (view_mats, view_rows, casters, near) in enumerate(views):
+        for nth, (view_mats, view_rows, casters, near, region) in enumerate(views):
             offset, n, sides, first = int(params[m, 1]), int(params[m, 2]), len(view_rows), m
             depth = texels[offset:offset + sides * n * n].reshape(sides * n, n)  # a cube's faces one above another
             m += sides
             if not len(casters):
                 depth.fill(0.0)
                 continue
-            view_key = (view_mats.tobytes(), n)
+            # A view-fitted map's settled casters are drawn into a larger map around it, its region, which stays
+            # put while the map moves inside it; the map starts from its part of that.
+            view_key = (view_mats.tobytes(), n) if region is None else (region[0].tobytes(), region[1])
+            at = (0, 0) if region is None else region[2:]
             here = casters[~clear[casters]]
             entry = settled.get(nth)
             found = None if entry is None else entry.rows.find(rows[here], hashes[here])
@@ -387,9 +468,15 @@ class ShadowMaps:
                 entry = None
                 still = here[age[here] >= SETTLE_DRAWS]
                 if len(still):  # draw the settled casters' map afresh
-                    self._draw_casters(pack, inst, still, view_mats, near, n, sides, depth, _NO_BASE, None, offset)
+                    if region is None:
+                        self._draw_casters(pack, inst, still, view_mats, near, n, sides, depth, _NO_BASE, None, offset)
+                        base = depth.copy()
+                    else:
+                        base = np.empty((region[1], region[1]), np.float32)
+                        self._draw_casters(pack, inst, still, region[0], near, region[1], 1, base, _NO_BASE, None, 0)
+                    self._settled_draws += 1
                     used = {id(mesh_keys[i][0]): mesh_keys[i] for i in np.unique(inst["mesh"][still]).tolist()}
-                    entry = _Settled(view_key, mesh_keys, used, _Rows(rows[still], hashes[still]), depth.copy(),
+                    entry = _Settled(view_key, mesh_keys, used, _Rows(rows[still], hashes[still]), base,
                                      self._shadow_draws)
                     found = entry.rows.find(rows[here], hashes[here])
                 settled[nth] = entry
@@ -398,26 +485,25 @@ class ShadowMaps:
                 kept[here[found >= 0]] = True
                 casters = casters[~kept[casters]]
                 if not len(casters):
-                    depth[:] = entry.base
+                    depth[:] = entry.base[at[1]:at[1] + sides * n, at[0]:at[0] + n]
                     continue
             if self._draw_casters(pack, inst, casters, view_mats, near, n, sides, depth,
                                   _NO_BASE if entry is None else entry.base, trans if clear[casters].any() else None,
-                                  offset):
+                                  offset, at):
                 params[first:first + sides, 9] = 1
         shadows = (texels, trans, mats, params)
         self._shadows = (key, shadows)
         return shadows
 
-    def _draw_casters(self, pack, inst, casters, view_mats, near, n, sides, depth, base, trans, offset):
+    def _draw_casters(self, pack, inst, casters, view_mats, near, n, sides, depth, base, trans, offset, base_at=(0, 0)):
         """Draw instances `casters` into one light's shadow map: depth (sides * n rows of n texels), over `base`
-        (see rasterize_depth), and, given trans, what the see-through ones let through into it from `offset`;
-        returns whether it did that."""
+        (see rasterize_depth: its part from column base_at[0], row base_at[1]), and, given trans, what the
+        see-through ones let through into it from `offset`; returns whether it did that."""
         buf = self._buffers
-        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "flip", "pos", "rgb", "alpha")}
-        double = np.ones(len(casters), np.bool_)
+        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "pos", "rgb", "alpha")}
         if sides == 1:
             k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = \
-                self._transform(pack, sub_inst, double, view_mats[0], np.zeros(3), 0.5, "shadow_")
+                self._shadow_transform(pack, sub_inst, view_mats[0])
             xs, ys, dep, surf, see, chain, lod = self._shadow_triangles(k)
             project_depth(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
                           pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
@@ -427,8 +513,8 @@ class ShadowMaps:
             tri_side.fill(0)
         else:
             # The casters' vertices in the world, then their triangles in each cube face they reach.
-            _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._transform(
-                pack, sub_inst, double, _EVERYWHERE, np.zeros(3), 0.5, "shadow_")
+            _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._shadow_transform(
+                pack, sub_inst, _EVERYWHERE)
             counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
             count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
                        chunk_inst, chunk_first, chunk_end, counts)
@@ -442,14 +528,107 @@ class ShadowMaps:
                          sub_inst["alpha"], inst_vertex, world, view_mats, near, n, chunk_inst, chunk_first,
                          chunk_end, offsets, xs, ys, dep, surf, see, chain, lod, tri_side)
         band_start, band_tris = self._bins(xs, ys, see, SOLID | CUT, sides * n, "shadow_")
-        rasterize_depth(depth, base, xs, ys, dep, tri_side, n, band_start, band_tris, see, surf, chain, lod,
-                        *pack["textures"])
+        rasterize_depth(depth, base, int(base_at[0]), int(base_at[1]), xs, ys, dep, tri_side, n, band_start, band_tris,
+                        see, surf, chain, lod, *pack["textures"])
         if trans is None:
             return False
         band_start, band_tris = self._bins(xs, ys, see, CLEAR, sides * n, "shadow_")
         rasterize_tint(trans, offset, n, sides * n, xs, ys, dep, tri_side, n, band_start, band_tris, surf,
                        chain, lod, *pack["textures"])
         return True
+
+    def _seen(self, inst):
+        """The corners (P, 3) of what the camera can see of the scene (see _seen_region), the box around every
+        instance (each one's mesh's box, turned and moved); None if nothing, or if that can't be told."""
+        pack = inst["pack"]
+        memo = self._mesh_boxes
+        if memo is None or memo[0] is not pack:  # each mesh's box in its own space, once per pack
+            vertices, starts = pack["vertices"], pack["mesh_vertex"]
+            spheres = pack["spheres"]
+            lo, hi = spheres[:, :3] - spheres[:, 3:], spheres[:, :3] + spheres[:, 3:]
+            some = np.flatnonzero(np.diff(starts) > 0)
+            if len(some):
+                lo[some] = np.minimum.reduceat(vertices, starts[some], axis=0)
+                hi[some] = np.maximum.reduceat(vertices, starts[some], axis=0)
+            memo = self._mesh_boxes = (pack, (lo + hi) / 2, (hi - lo) / 2)
+        _, middles, halves = memo
+        lin, mesh = inst["lin"], inst["mesh"]
+        centres = np.einsum("nij,nj->ni", lin, middles[mesh]) + inst["pos"]
+        reach = np.einsum("nij,nj->ni", np.abs(lin), halves[mesh])
+        lo, hi = (centres - reach).min(axis=0), (centres + reach).max(axis=0)
+        if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
+            return None
+        return _seen_region(self.view_proj, lo, hi)
+
+    def _fit_view(self, nth, direction, centres, radii, size, soft, seen):
+        """A Light's map fitted to what the camera can see (seen: _seen()'s corners), for shadow_fit "view": (world
+        to its clip space (4, 4), its region's (4, 4), the region's size in texels, the map's column and row in it,
+        a texel's width, depth per unit of distance along the light); None where it would be no smaller than the
+        map of the whole scene (which is then drawn instead).
+
+        The map reaches what is seen and a margin beyond (the shadow filter, the cell or pixel each lookup is made
+        for, and how far shading moves points off surfaces): its half-width in steps of about 9%, as the whole
+        scene's, shrinking only once what is seen fits VIEW_SHRINK steps smaller, so that it doesn't flick between
+        two sizes; its centre in steps of whole texels, so that shadows keep still as the camera moves. Its depth
+        runs as the whole scene's map's. Its region, REGION_EXTRA texels wider (the settled casters are drawn into
+        it, see _shadow_maps), is on the same texels, and moves (onto the map) only when the map would leave it."""
+        basis, lo, hi = _light_frame(direction, centres, radii)
+        across = seen @ basis[:2].T
+        s_lo, s_hi = across.min(axis=0), across.max(axis=0)
+        whole = _box_half(max((hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2))
+        reach = max(float((s_hi - s_lo).max()) / 2, whole * 2.0 ** -12)  # (no sharper than that, for a view of nothing)
+        # The margin: the filter (softness, and a texel or two either side), and at the farthest point seen, a
+        # cell's and a pixel's width (what a lookup for one spans).
+        fb = self._fb
+        pixel = max(2.0 * self._view_tan[1] / max(fb.height, 1), 2.0 * self._view_tan[0] / max(fb.width, 1))
+        far = float(np.linalg.norm(seen - self._eye, axis=1).max())
+        texel = 2.0 * _box_half(reach) / size
+        reach += (soft + 3.0) * texel + pixel * far * (max(self.cell_pixels) + 1.0)
+        half = _box_half(reach)
+        if not half < whole:  # (also NaN)
+            self._view_fits.pop(nth, None)
+            return None
+        light_key = (direction.tobytes(), size, lo[2], hi[2])
+        last = self._view_fits.get(nth)
+        same = last is not None and last[0] == light_key
+        if same and reach <= last[1] <= half * 2.0 ** (VIEW_SHRINK / 8):
+            half = last[1]
+        texel = 2.0 * half / size
+        cx, cy = (np.round((s_lo + s_hi) / 2 / texel) * texel).tolist()
+        extra = 2 * (min(size, REGION_EXTRA) // 2)  # (even: the region's texels line up with the map's)
+        inside = 0.5 * extra * texel * (1.0 + 1e-9)
+        if same and last[1] == half and abs(cx - last[2]) <= inside and abs(cy - last[3]) <= inside:
+            rx, ry = last[2], last[3]
+        else:
+            rx, ry = cx, cy
+        self._view_fits[nth] = (light_key, half, rx, ry)
+        z_lo, span = _depth_range(lo, hi, texel)
+        region = size + extra
+        column = min(max(int(round((cx - rx) / texel)) + extra // 2, 0), extra)
+        row = min(max(int(round((ry - cy) / texel)) + extra // 2, 0), extra)
+        return (_box_view(basis, cx, cy, half, z_lo, span), _box_view(basis, rx, ry, half * region / size, z_lo, span),
+                region, column, row, texel, 1.0 / span)
+
+    def _shadow_transform(self, pack, inst, view_proj):
+        """raster.transform_depth() of the instances `inst` (as Renderer._transform, without normals, back faces
+        or a clipping plane): (triangle count, world, inst_vertex, the face chunks and their plan)."""
+        from .renderer import _chunks  # (renderer imports this module)
+        buf = self._buffers
+        n_inst = len(inst["mesh"])
+        vertex_counts = np.diff(pack["mesh_vertex"])[inst["mesh"]]
+        face_counts = np.diff(pack["mesh_face"])[inst["mesh"]]
+        inst_vertex = np.zeros(n_inst + 1, np.int64)
+        np.cumsum(vertex_counts, out=inst_vertex[1:])
+        vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
+        chunk_inst, chunk_first, chunk_end = _chunks(face_counts, pack["mesh_face"][inst["mesh"]], FACE_CHUNK)
+        n_chunks = len(chunk_inst)
+        plan = [buf.get("shadow_" + name, (n_chunks,), np.int64) for name in ("whole", "cut", "off_whole", "off_cut")]
+        world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
+        k = transform_depth(pack["vertices"], pack["faces"], pack["mesh_vertex"], pack["spheres"], inst["mesh"],
+                            inst["lin"], inst["pos"], inst_vertex, view_proj, 0.5, vchunk_inst, vchunk_first,
+                            vchunk_end, chunk_inst, chunk_first, chunk_end, world,
+                            buf.get("shadow_visible", (n_inst,), np.bool_), *plan)
+        return k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *plan)
 
     def _shadow_triangles(self, k):
         """Buffers for k triangles of a shadow map: pixel coordinates (xs, ys), depth and surface (see

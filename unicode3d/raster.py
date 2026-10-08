@@ -973,20 +973,45 @@ def project(faces, uvs, colors, face_chain, face_kind, mesh_vertex, inst_mesh, i
 SURFACE = 7  # per corner of a shadow map's triangle: linear rgb | alpha | u / w, v / w, 1 / w (for its texture)
 
 
-@njit(cache=True, error_model="numpy")
-def _emit_depth(corners, k, width, height, perspective, xs, ys, depth, surf):
-    """Store triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) as screen triangle k of a shadow map
-    (see project_depth)."""
+NO_TEXEL = 3  # the kind (`see`) of a shadow map's triangle that covers no texel (see project_depth): in no bin
+# The helpers project_depth(), count_cube() and project_cube() call per face are inlined into them (inline="always",
+# as shading's are): a call passes each of its arrays as a structure of several words, and with about a dozen arrays
+# that cost several times the work of projecting a face.
+
+
+@njit(cache=True, error_model="numpy", inline="always")
+def _shadow_corner(corners, j, width, height, perspective):
+    """Corner j of triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) in a width x height shadow map: x, y
+    and its depth (see project_depth)."""
+    iw = 1.0 / corners[j, 3]
+    return ((corners[j, 0] * iw + 1.0) * 0.5 * width, (1.0 - corners[j, 1] * iw) * 0.5 * height,
+            iw if perspective else (1.0 - corners[j, 2] * iw) * 0.5)
+
+
+@njit(cache=True, error_model="numpy", inline="always")
+def _emit_surface(corners, k, surf):
+    """What the surface of triangle `corners` does to light, as triangle k's surf (see project_depth)."""
     for j in range(3):
         iw = 1.0 / corners[j, 3]
-        xs[k, j] = (corners[j, 0] * iw + 1.0) * 0.5 * width
-        ys[k, j] = (1.0 - corners[j, 1] * iw) * 0.5 * height
-        depth[k, j] = iw if perspective else (1.0 - corners[j, 2] * iw) * 0.5
         surf[k, j, 0:4] = corners[j, 4:8]
         surf[k, j, 4], surf[k, j, 5], surf[k, j, 6] = corners[j, 8] * iw, corners[j, 9] * iw, iw
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
+def _covers_texel(x0, x1, x2, y0, y1, y2, width, height):
+    """Whether a triangle of a width x height shadow map, corners (x0, y0), (x1, y1), (x2, y2), may cover a texel's
+    centre. rasterize_depth() and rasterize_tint() only write texels whose centre is inside the triangle, widened
+    by their slack at the edges (barycentric weights down to -1e-4, which widens its bounding box by under 2e-4 of
+    its size), so one whose box, widened by more than that, holds no centre (as most triangles far smaller than a
+    texel do), or that lies off the map, writes nothing. False for NaN corners, which they don't draw either."""
+    x_lo, x_hi, y_lo, y_hi = min(x0, x1, x2), max(x0, x1, x2), min(y0, y1, y2), max(y0, y1, y2)
+    mx, my = 1e-3 * (x_hi - x_lo) + 1e-3, 1e-3 * (y_hi - y_lo) + 1e-3
+    x_lo, x_hi, y_lo, y_hi = max(x_lo - mx, 0.0), min(x_hi + mx, width), max(y_lo - my, 0.0), min(y_hi + my, height)
+    # Centres are at i + 0.5: is there one from x_lo to x_hi, and one from y_lo to y_hi?
+    return np.floor(x_hi - 0.5) >= np.ceil(x_lo - 0.5) and np.floor(y_hi - 0.5) >= np.ceil(y_lo - 0.5)
+
+
+@njit(cache=True, error_model="numpy", inline="always")
 def _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, out):
     """Corner j of face f of instance inst as a shadow map needs it: linear rgb into out[4:7], alpha into
     out[7] and uv into out[8:10]."""
@@ -996,7 +1021,7 @@ def _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, out):
     out[8], out[9] = uvs[f, j, 0], uvs[f, j, 1]
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _face_kind(colors, inst_alpha, face_kind, inst, f):
     """Kind of face f of instance inst, as project() gives triangles: 1 see-through, 2 cut-out, 0 solid."""
     if face_kind[f] == 2 or inst_alpha[inst] < 1.0:
@@ -1007,7 +1032,7 @@ def _face_kind(colors, inst_alpha, face_kind, inst, f):
     return 2 if face_kind[f] == 1 else 0
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod):
     """Triangle k of a shadow map, from face f: its kind, mipmap chain, and mip level for one texel of the
     map (log2 of how many texture texels span it)."""
@@ -1020,6 +1045,34 @@ def _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, s
     d1u, d1v = surf[k, 1, 4] / surf[k, 1, 6] - u0, surf[k, 1, 5] / surf[k, 1, 6] - v0
     d2u, d2v = surf[k, 2, 4] / surf[k, 2, 6] - u0, surf[k, 2, 5] / surf[k, 2, 6] - v0
     lod[k] = 0.5 * np.log2(max(abs(d1u * d2v - d1v * d2u) * face_texels[f] / max(px_area, 1e-9), 1e-9))
+
+
+@njit(cache=True, error_model="numpy", inline="always")
+def _shadow_triangle(corners, k, f, kind, width, height, perspective, colors, uvs, inst_rgb, inst_alpha, face_kind,
+                     inst, face_chain, face_texels, xs, ys, depth, surf, see, chain, lod):
+    """Store triangle `corners` (3, 10: clip xyzw | rgb | alpha | uv) from face f of instance inst as triangle k of
+    a width x height shadow map (see project_depth). kind: the face's (see _face_kind), its corners' rgb, alpha and
+    uv filled in unless it is 0; or -1, not known yet (corners holding only xyzw). Stores only see = NO_TEXEL for a
+    triangle that covers no texel, and only positions, depth and see for a solid one."""
+    x0, y0, d0 = _shadow_corner(corners, 0, width, height, perspective)
+    x1, y1, d1 = _shadow_corner(corners, 1, width, height, perspective)
+    x2, y2, d2 = _shadow_corner(corners, 2, width, height, perspective)
+    if not _covers_texel(x0, x1, x2, y0, y1, y2, width, height):
+        see[k] = NO_TEXEL
+        return
+    xs[k, 0], xs[k, 1], xs[k, 2] = x0, x1, x2
+    ys[k, 0], ys[k, 1], ys[k, 2] = y0, y1, y2
+    depth[k, 0], depth[k, 1], depth[k, 2] = d0, d1, d2
+    if kind < 0:
+        kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
+        if kind != 0:
+            for j in range(3):
+                _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
+    if kind == 0:
+        see[k] = 0
+    else:
+        _emit_surface(corners, k, surf)
+        _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod)
 
 
 @njit(cache=True, error_model="numpy")
@@ -1038,6 +1091,74 @@ def _clip_near(corners, near, poly):
     return n_poly
 
 
+@njit(cache=True, error_model="numpy")
+def _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut):
+    """Where each chunk of faces writes its whole[c] whole triangles and cut[c] clipped ones (off_whole[c] and
+    off_cut[c]), each instance's whole ones before its clipped ones, as in transform(); returns the total."""
+    k = c = 0
+    while c < chunk_inst.shape[0]:
+        e = c
+        while e < chunk_inst.shape[0] and chunk_inst[e] == chunk_inst[c]:
+            e += 1
+        for x in range(c, e):
+            off_whole[x] = k
+            k += whole[x]
+        for x in range(c, e):
+            off_cut[x] = k
+            k += cut[x]
+        c = e
+    return k
+
+
+@njit(cache=True, error_model="numpy", parallel=True)
+def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_vertex, view_proj, near,
+                    vchunk_inst, vchunk_first, vchunk_end, chunk_inst, chunk_first, chunk_end, world, visible, whole,
+                    cut, off_whole, off_cut):
+    """transform() for a shadow map: the instances' vertices in the world and in the light's clip space (world
+    columns 0:3 and 6:10; a shadow map has no use for normals, columns 3:6, which are left as they were), and the
+    plan of where each chunk of faces writes its triangles, for project_depth() (or, through a view that culls
+    nothing, count_cube()). Every face is drawn whatever way it faces, and the only clipping is against the near
+    plane, as project_depth() does it: a face with every corner in front of it is one whole triangle, one with one
+    or two leaves one or two."""
+    for inst in prange(inst_mesh.shape[0]):
+        m = inst_mesh[inst]
+        lin = inst_lin[inst]
+        position = inst_pos[inst]
+        sx, sy, sz = spheres[m, 0], spheres[m, 1], spheres[m, 2]
+        cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
+        cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
+        cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
+        visible[inst] = not _outside_view(view_proj, cx, cy, cz, spheres[m, 3] * stretch(lin), near)
+    for j in prange(vchunk_inst.shape[0]):
+        inst = vchunk_inst[j]
+        if not visible[inst]:
+            continue
+        m = inst_mesh[inst]
+        lin = inst_lin[inst]
+        position = inst_pos[inst]
+        v0, w0 = mesh_vertex[m], inst_vertex[inst]
+        for v in range(vchunk_first[j], vchunk_end[j]):
+            p, out = vertices[v0 + v], world[w0 + v]
+            for i in range(3):
+                out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
+            for i in range(4):
+                out[6 + i] = view_proj[i, 0] * out[0] + view_proj[i, 1] * out[1] + view_proj[i, 2] * out[2] + view_proj[i, 3]
+    for c in prange(chunk_inst.shape[0]):
+        inst = chunk_inst[c]
+        n_whole = n_cut = 0
+        if visible[inst]:
+            base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]
+            for f in range(chunk_first[c], chunk_end[c]):
+                ahead = ((world[base + faces[f, 0], 9] > near) + (world[base + faces[f, 1], 9] > near)
+                         + (world[base + faces[f, 2], 9] > near))
+                if ahead == 3:
+                    n_whole += 1
+                else:
+                    n_cut += ahead  # (one corner in front leaves a triangle, two a quad: two)
+        whole[c], cut[c] = n_whole, n_cut
+    return _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut)
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
 def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
                   inst_vertex, world, width, height, near, perspective, chunk_inst, chunk_first, chunk_end, whole, cut,
@@ -1052,6 +1173,10 @@ def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_v
     SURFACE) is what each corner's surface does to light (colour and alpha, from `colors` (F, 3, 4) and
     the instance's, and its uv, for its texture); see (T,) is each triangle's kind as in project() (0
     solid, 1 see-through, 2 cut-out), chain its mipmap chain (-1 if untextured) and lod its mip level.
+
+    A triangle that covers no texel's centre (in a map of a whole scene, most of them: far smaller than a texel)
+    is of kind NO_TEXEL, which no bin takes, and the rest of it isn't stored; nor are a solid one's surf, chain and
+    lod, which only see-through ones and cut-outs need.
     """
     for c in prange(chunk_inst.shape[0]):
         if whole[c] + cut[c] == 0:
@@ -1069,23 +1194,25 @@ def project_depth(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_v
                 ahead += corners[j, 3] > near
             if ahead == 0:
                 continue
-            for j in range(3):
-                _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
-            kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
-            if ahead == 3:
-                _emit_depth(corners, k_whole, width, height, perspective, xs, ys, depth, surf)
-                _finish_shadow_triangle(xs, ys, surf, k_whole, f, kind, face_chain, face_texels, see, chain, lod)
+            if ahead == 3:  # (its kind and surface only once it covers a texel)
+                _shadow_triangle(corners, k_whole, f, -1, width, height, perspective, colors, uvs, inst_rgb,
+                                 inst_alpha, face_kind, inst, face_chain, face_texels, xs, ys, depth, surf, see, chain,
+                                 lod)
                 k_whole += 1
                 continue
+            kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
+            if kind != 0:  # (clipping carries the surface along)
+                for j in range(3):
+                    _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
             n_poly = _clip_near(corners, near, poly)
             for j in range(1, n_poly - 1):
                 tri[0], tri[1], tri[2] = poly[0], poly[j], poly[j + 1]
-                _emit_depth(tri, k_cut, width, height, perspective, xs, ys, depth, surf)
-                _finish_shadow_triangle(xs, ys, surf, k_cut, f, kind, face_chain, face_texels, see, chain, lod)
+                _shadow_triangle(tri, k_cut, f, kind, width, height, perspective, colors, uvs, inst_rgb, inst_alpha,
+                                 face_kind, inst, face_chain, face_texels, xs, ys, depth, surf, see, chain, lod)
                 k_cut += 1
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", inline="always")
 def _cube_face_corners(world, faces, f, base, mat, near, corners):
     """Face f's corners in the clip space of one face of a cube map (`mat`), into corners[:, 0:4], and how
     many of them are in front of its near plane: 0 if none, or if all lie beyond one of its sides."""
@@ -1127,8 +1254,8 @@ def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_ve
     """The faces as screen triangles in a cube shadow map: its six faces (+x, -x, +y, -y, +z, -z, each
     size x size texels) stacked one above the other in one tall map, a triangle for each cube face it
     may show in, clipped against that face's near plane and carrying 1/w as its depth (see
-    project_depth, as are surf, see, chain and lod). World positions come from transform(); chunk c
-    writes its triangles in cube face `side` from row offsets[c, side] (count_cube()'s counts, summed
+    project_depth, as are surf, see, chain and lod, and triangles covering no texel). World positions come
+    from transform(); chunk c writes its triangles in cube face `side` from row offsets[c, side] (count_cube()'s counts, summed
     up), and tri_side[k] is triangle k's cube face, which rasterize_depth() keeps it inside.
     """
     for i in prange(chunk_inst.shape[0] * 6):
@@ -1143,20 +1270,22 @@ def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_ve
             ahead = _cube_face_corners(world, faces, f, base, mats[side], near, corners)
             if ahead == 0:
                 continue
-            for j in range(3):
-                _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
-            kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
-            n_poly = 3
+            n_poly, kind = 3, -1  # (a whole face's kind and surface only once it covers a texel)
             if ahead == 3:
                 poly[:3] = corners
             else:
+                kind = _face_kind(colors, inst_alpha, face_kind, inst, f)
+                if kind != 0:  # (clipping carries the surface along)
+                    for j in range(3):
+                        _corner_surface(colors, uvs, inst_rgb, inst_alpha, inst, f, j, corners[j])
                 n_poly = _clip_near(corners, near, poly)
             for j in range(1, n_poly - 1):
                 tri[0], tri[1], tri[2] = poly[0], poly[j], poly[j + 1]
-                _emit_depth(tri, k, size, size, True, xs, ys, depth, surf)
-                _finish_shadow_triangle(xs, ys, surf, k, f, kind, face_chain, face_texels, see, chain, lod)
-                for m in range(3):
-                    ys[k, m] += side * size
+                _shadow_triangle(tri, k, f, kind, size, size, True, colors, uvs, inst_rgb, inst_alpha, face_kind, inst,
+                                 face_chain, face_texels, xs, ys, depth, surf, see, chain, lod)
+                if see[k] != NO_TEXEL:
+                    for m in range(3):
+                        ys[k, m] += side * size
                 tri_side[k] = side
                 k += 1
 
@@ -1170,11 +1299,12 @@ def _surface_uv(surf, t, b0, b1, b2):
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def rasterize_depth(depth, base, xs, ys, dep, tri_side, side_rows, band_start, band_tris, see, surf, chain, lod,
-                    texels, levels, first):
+def rasterize_depth(depth, base, base_x, base_y, xs, ys, dep, tri_side, side_rows, band_start, band_tris, see, surf,
+                    chain, lod, texels, levels, first):
     """A shadow map: the largest `dep` (nearest the light) of any triangle covering each texel's centre,
     into depth (height, width), which it clears first (to `base`, a map of other triangles drawn before, if that
-    has rows; else to 0, where there is none). Triangle t is kept to rows
+    has rows; else to 0, where there is none). base may be larger than depth: depth is then cleared to its part from
+    row base_y and column base_x (the caller keeps that inside it). Triangle t is kept to rows
     tri_side[t] * side_rows to (tri_side[t] + 1) * side_rows - 1 (one face of a cube map, see
     project_cube; for any other map, tri_side is 0 and side_rows the height). Cut-outs (see[t] == 2)
     cover only texels where their texture's alpha is at least a half, so light shines through their holes.
@@ -1191,7 +1321,7 @@ def rasterize_depth(depth, base, xs, ys, dep, tri_side, side_rows, band_start, b
         band_y0 = band * ROW_BAND
         band_y1 = min(band_y0 + ROW_BAND, height) - 1
         if base.shape[0]:
-            depth[band_y0:band_y1 + 1, :] = base[band_y0:band_y1 + 1, :]
+            depth[band_y0:band_y1 + 1, :] = base[base_y + band_y0:base_y + band_y1 + 1, base_x:base_x + width]
         else:
             depth[band_y0:band_y1 + 1, :] = 0.0
         for i in range(band_start[band], band_start[band + 1]):
