@@ -295,6 +295,21 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
                      more, frame_rgb, frame_alpha, frame_samples)
 
 
+@njit(cache=True, error_model="numpy")
+def _spread(n):
+    """A step for visiting n rows in a spread-out order, k * step % n for k = 0..n-1: about 0.618 n (the golden
+    ratio's, which spreads any run of k evenly over the rows), with no factor in common with n, so that every row
+    comes once."""
+    step = max(1, int(n * 0.6180339887))
+    while True:
+        a, b = step, n
+        while b:
+            a, b = b, a % b
+        if a <= 1:
+            return step
+        step += 1
+
+
 @njit(cache=True, error_model="numpy", parallel=True, fastmath=MATH)
 def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess,
                   shine, chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats,
@@ -313,7 +328,9 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
     (cheaper, and coarser: texture detail inside a cell is lost), and shadow edges are not looked for.
 
     Writes what resolve() writes. Blocks at the frame's right and bottom edges may be smaller. Loops in parallel
-    over rows of blocks, each writing only its own pixels.
+    over rows of blocks, each writing only its own pixels, taken in a spread-out order (_spread): prange gives each
+    thread a run of iterations, which then holds rows from all over the picture rather than a band of it (the sky,
+    say, cheaper than the ground).
     """
     m, n = tris.shape
     height = m // max(width, 1)
@@ -321,7 +338,9 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
     cols, rows = (width + cell_w - 1) // cell_w, (height + cell_h - 1) // cell_h
     span = 1.0 if coarse else np.sqrt(cell_w * cell_w + cell_h * cell_h) + 1.0  # (the block's diagonal, a pixel more)
     most = cell_w * cell_h * n  # the most different triangles a block can hold
-    for row in prange(rows):
+    step = _spread(rows)
+    for turn in prange(rows):
+        row = turn * step % rows
         # Each block's triangles: which, where they are (summed pixel centres, how many; then their mean), their
         # lighting (light levels, highlight, reflected view, whether shared: _light's), coarse, their surface colour,
         # and their texture's mip level (and its change along x and y).
