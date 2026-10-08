@@ -34,13 +34,15 @@ class AutoQualityTests(unittest.TestCase):
     def test_steps_down_in_order_while_slow_and_never_touches_shadows(self):
         r = renderer()
         q = AutoQuality(r, "auto", min_fps=0)
-        self.assertEqual(play(q, 30, lambda level: 0.1), [0, 1, 2, 3, 4])
-        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[3]])  # (70% replaces 85%)
-        self.assertEqual((r.edge_samples, r.simplify, r.max_pixels), (0, 2.0, int(0.7 * 200 * 120)))
+        self.assertEqual(play(q, 30, lambda level: 0.1), [0, 1, 2, 3, 4, 5])
+        self.assertEqual(q.steps, [STEPS[0], STEPS[1], STEPS[2], STEPS[4]])  # (70% replaces 85%)
+        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
+                         (0, 2.0, "coarse", int(0.7 * 200 * 120)))
         self.assertTrue(r.shadows and r.reflections)
         # Plenty of time again: back up, step by step, to the settings it started from.
-        self.assertEqual(play(q, 60, lambda level: 0.005), [4, 3, 2, 1, 0])
-        self.assertEqual((r.edge_samples, r.simplify, r.max_pixels), (8, 1.0, Renderer(1, 1).max_pixels))
+        self.assertEqual(play(q, 60, lambda level: 0.005), [5, 4, 3, 2, 1, 0])
+        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
+                         (8, 1.0, "cell", Renderer(1, 1).max_pixels))
 
     def test_stops_where_frames_keep_up(self):
         q = AutoQuality(renderer(), "auto", min_fps=0)
@@ -77,16 +79,17 @@ class AutoQualityTests(unittest.TestCase):
         r = renderer()
         q = AutoQuality(r, "auto", min_fps=0)
         play(q, 10, lambda level: 0.1)
-        self.assertEqual(q.level, 4)
+        self.assertEqual(q.level, 5)
         r.edge_samples = 4  # the program changes a setting itself: that is the user's choice now
         self.assertEqual(q.user("edge_samples"), 4)
         play(q, 60, lambda level: 0.005)
         self.assertEqual((q.level, r.edge_samples, r.simplify), (0, 4, 1.0))
-        # A step that would change nothing is skipped: edge samples already off, high detail kept at 2 px.
-        r.edge_samples, r.simplify = 0, 3.0
+        # A step that would change nothing is skipped: edge samples already off, high detail kept at 2 px, shading
+        # already coarse.
+        r.edge_samples, r.simplify, r.shading = 0, 3.0, "coarse"
         self.assertEqual(play(q, 30, lambda level: 0.1)[-1], 2)
-        self.assertEqual((q.level, q.steps), (2, [STEPS[3]]))
-        self.assertEqual(r.simplify, 3.0)
+        self.assertEqual((q.level, q.steps), (2, [STEPS[4]]))
+        self.assertEqual((r.simplify, r.shading), (3.0, "coarse"))
 
     def test_steps_down_only_below_min_fps(self):
         # Aiming at 30 fps, frames at 22-29 fps are left as they are (the game plays well there); below 20 it steps.
@@ -112,7 +115,7 @@ class AutoQualityTests(unittest.TestCase):
         q.mode = "high"
         r.max_pixels = 1000
         q.mode = "fast"
-        self.assertEqual(q.steps, list(STEPS[:2]))
+        self.assertEqual(q.steps, list(STEPS[:3]))
         self.assertEqual(r.max_pixels, 1000)
 
     def test_modes(self):
@@ -121,10 +124,17 @@ class AutoQualityTests(unittest.TestCase):
         self.assertEqual(q.mode, "high")
         play(q, 20, lambda level: 0.5)  # "high" never steps
         self.assertEqual((q.level, r.edge_samples), (0, 8))
-        q.mode = "fast"
-        self.assertEqual(q.level, 4)
+        q.mode = "fast"  # (the old name of "low")
+        self.assertEqual((q.mode, q.level), ("low", 5))
+        q.mode = "mid"  # the picture's shading kept; edges and detail cheaper
+        self.assertEqual((q.level, q.steps), (2, list(STEPS[:2])))
+        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
+                         (0, 2.0, "cell", Renderer(1, 1).max_pixels))
+        play(q, 20, lambda level: 0.5)  # "mid" never steps further
+        self.assertEqual(q.level, 2)
         q.mode = "high"
-        self.assertEqual((r.edge_samples, r.simplify, r.max_pixels), (8, 1.0, Renderer(1, 1).max_pixels))
+        self.assertEqual((r.edge_samples, r.simplify, r.shading, r.max_pixels),
+                         (8, 1.0, "cell", Renderer(1, 1).max_pixels))
         with self.assertRaises(ValueError):
             q.mode = "medium"
 
@@ -148,16 +158,18 @@ class DisplayControlsQualityTests(unittest.TestCase):
             r.draws += 1
             controls.handle([], screen)
             controls.handle([], screen)  # (twice in one frame counts once)
-        self.assertEqual(controls.auto_quality.level, 4)
+        self.assertEqual(controls.auto_quality.level, 5)
         self.assertEqual(r.simplify, 2.0)
         # What is shown and saved is the user's choice, not the step it is on.
         self.assertEqual(controls.settings()["detail"], "standard")
-        self.assertEqual(controls.quality.text(True), "F8 auto -4")
+        self.assertEqual(controls.quality.text(True), "F8 auto -5")
         controls.apply({"detail": "high"})
         self.assertEqual(controls.auto_quality.user("simplify"), 0.0)
         self.assertEqual(r.simplify, 2.0)  # (still stepped down)
         controls.apply({"quality": "high"})
         self.assertEqual((r.simplify, r.edge_samples), (0.0, 8))
+        controls.apply({"quality": "fast"})  # saved under the old name of "low"
+        self.assertEqual(controls.settings()["quality"], "low")
 
 
 if __name__ == "__main__":

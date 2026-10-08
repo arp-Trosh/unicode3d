@@ -4,8 +4,10 @@
 target, and back up when there is time to spare (no kernels)."""
 import statistics
 
-MODES = ("high", "auto", "fast")
-STEPS = ("edge samples off", "detail 2 px", "render scale 85%", "render scale 70%")
+MODES = ("high", "mid", "low", "auto")
+ALIASES = {"fast": "low"}  # (the lowest mode's name before "mid" and "low")
+STEPS = ("edge samples off", "detail 2 px", "coarse shading", "render scale 85%", "render scale 70%")
+MID = STEPS[:2]  # the steps "mid" takes: the picture's shading kept, its edges and small things made cheaper
 SIMPLIFY = 2.0  # Renderer.simplify at the "detail" step (pixels)
 SCALES = (0.85, 0.70)  # parts of the framebuffer's pixels drawn at the "render scale" steps
 
@@ -24,11 +26,14 @@ class AutoQuality:
     """Steps a Renderer's quality down while frames run long, and back up when there is headroom.
 
     The steps, in order (STEPS): edge samples off (edges are still smoothed by each pixel's samples, more
-    coarsely); levels of detail at SIMPLIFY pixels; the picture drawn at 85%, then 70% of its pixels and stretched
-    (softer). Shadows and reflections are never touched. A step that would change nothing (edge samples already off,
-    say) is skipped.
+    coarsely); levels of detail at SIMPLIFY pixels; coarse shading (Renderer.shading "coarse": everything once per
+    cell, texture detail inside cells lost); the picture drawn at 85%, then 70% of its pixels and stretched
+    (softer). Shadows and reflections are never turned off. A step that would change nothing (edge samples already
+    off, say) is skipped.
 
-    mode: "high" leaves the renderer as it is; "fast" holds the lowest step; "auto" moves between them.
+    mode: "high" leaves the renderer as it is; "mid" takes the first steps (MID: edge samples off, detail 2 px),
+    keeping the shading; "low" holds the lowest step; "auto" moves between high and low as frames need ("fast", the
+    old name of "low", is taken as "low").
 
     The renderer's settings as they were, or as anything other than this sets them later (a settings key, the
     program), are the ceiling: steps only ever go below them. user(name) gives those values (edge_samples,
@@ -73,6 +78,7 @@ class AutoQuality:
 
     @mode.setter
     def mode(self, value):
+        value = ALIASES.get(value, value) if isinstance(value, str) else value
         if value not in MODES:
             raise ValueError(f"quality mode must be one of {MODES}, not {value!r}")
         self._mode = value
@@ -81,7 +87,7 @@ class AutoQuality:
         self._reapply()
 
     def user(self, name):
-        """The user's own value of a setting the steps change (edge_samples, simplify or max_pixels)."""
+        """The user's own value of a setting the steps change (edge_samples, simplify, shading or max_pixels)."""
         self._take_user_changes()
         return self._user[name]
 
@@ -133,7 +139,7 @@ class AutoQuality:
 
     # ----- internals
 
-    SETTINGS = ("edge_samples", "simplify", "max_pixels")
+    SETTINGS = ("edge_samples", "simplify", "shading", "max_pixels")
 
     def _settings(self):
         return {name: getattr(self.renderer, name) for name in self.SETTINGS}
@@ -156,9 +162,11 @@ class AutoQuality:
             steps.append((STEPS[0], "edge_samples", 0))
         if not user["simplify"] >= SIMPLIFY:  # (0 or less: none)
             steps.append((STEPS[1], "simplify", SIMPLIFY))
+        if user["shading"] != "coarse":
+            steps.append((STEPS[2], "shading", "coarse"))
         pixels = self._pixels()
         budget = user["max_pixels"] if user["max_pixels"] else pixels
-        for name, part in zip(STEPS[2:], SCALES):
+        for name, part in zip(STEPS[3:], SCALES):
             if pixels and part * pixels < min(budget, pixels):
                 steps.append((name, "max_pixels", max(int(part * pixels), 1)))
         return steps
@@ -166,7 +174,13 @@ class AutoQuality:
     def _reapply(self):
         """The settings for the mode and level, worked out again (the steps depend on the user's settings and
         the framebuffer's size)."""
-        self._set_level(len(self._steps()) if self._mode == "fast" else self.level)
+        steps = self._steps()
+        if self._mode == "low":
+            self._set_level(len(steps))
+        elif self._mode == "mid":
+            self._set_level(sum(name in MID for name, _, _ in steps))
+        else:
+            self._set_level(self.level)
 
     def _set_level(self, level):
         steps = self._steps()

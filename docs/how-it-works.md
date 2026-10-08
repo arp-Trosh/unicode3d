@@ -164,6 +164,13 @@ silhouettes, creases and overlaps.
 As with GPU multisampling, each pixel is shaded once per triangle covering it, at the pixel centre;
 the samples only measure coverage. Shading is the expensive part, so this keeps antialiasing cheap.
 
+Lighting goes further: a cell's pixels end up as two colours anyway, so by default (`Renderer.shading`
+"cell") each triangle in a cell is lit once, at the middle of the pixels it covers there, and only its
+colour and texture are worked out per pixel. Cells a shadow's edge may cross are lit pixel by pixel: the
+cell's shadow lookup is made over a square widened to cover the whole cell, and anything between fully lit
+and fully dark sends its pixels to be lit one by one. Shadows keep their soft edges; highlights and light
+falloff step from cell to cell instead of pixel to pixel, a difference the glyphs mostly hide.
+
 ![One sample a pixel against four, plus eight more at edges](images/antialiasing.png)
 
 *A cube's edges in pixels, before characters are chosen: one sample a pixel (left) and the default

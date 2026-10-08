@@ -25,7 +25,7 @@ DisplayControls is the panel of display settings every program can offer
 from .color import COLOR_MODES, Color
 from .glyphs import GLYPH_MODES
 from .keys import Key, MouseEvent
-from .quality import MODES as QUALITY_MODES, AutoQuality
+from .quality import ALIASES as QUALITY_ALIASES, MODES as QUALITY_MODES, AutoQuality
 
 ACTIVATE = (Key.ENTER, 10, ord(" "))
 FPS_STEPS = (30, 60, 120, 144)
@@ -419,9 +419,11 @@ class DisplayControls(Panel):
     renderer.shadows, renderer.reflections and renderer.simplify: "standard" detail draws objects small on screen
     from simpler copies of their meshes that differ by at most a pixel (levels of detail, Renderer.simplify 1),
     "high" every mesh as it is (simplify 0). Quality (quality.AutoQuality, as `self.auto_quality`): "high" draws
-    as the other settings say (the default); "auto" steps the picture down below them while frames take longer
-    than the frame rate allows and run under AutoQuality.min_fps (20), and back up when there is time (shown as "auto -n", n steps down); "fast" holds
-    the lowest step. Shadows and reflections are left as they are set. Frames are timed by run()
+    as the other settings say (the default); "mid" takes the first steps down (edge samples off, detail 2 px),
+    keeping the shading; "low" holds the lowest step (coarse shading, the picture drawn smaller too); "auto" steps the
+    picture down below the settings while frames take longer than the frame rate allows and run under
+    AutoQuality.min_fps (20), and back up when there is time (shown as "auto -n", n steps down). Settings saved
+    with the old name "fast" are taken as "low". Shadows and reflections are left as they are set. Frames are timed by run()
     (screen.frame_time), once a frame when the controls are drawn or handled. quality: the mode to start in (None:
     the renderer's as it is; DisplayControls on one renderer share its AutoQuality.of()).
 
@@ -473,7 +475,7 @@ class DisplayControls(Panel):
             self.detail = Choice("F7", tuple(self.DETAIL), key=Key.F7, show=lambda v: {"standard": "std detail"}.get(v, f"{v} detail"),
                                  get=lambda: "high" if not self.auto_quality.user("simplify") > 0 else "standard",
                                  set=self._set_detail)
-            self.quality = Choice("F8", QUALITY_MODES, key=Key.F8, width=len("auto -4"), show=self._quality_text,
+            self.quality = Choice("F8", QUALITY_MODES, key=Key.F8, width=len("auto -5"), show=self._quality_text,
                                   get=lambda: self.auto_quality.mode, set=self._set_quality)
             widgets += [self.shadows, self.reflections, self.detail, self.quality]
         self._named = {name: getattr(self, name) for name in self.SETTINGS if hasattr(self, name)}
@@ -496,6 +498,8 @@ class DisplayControls(Panel):
         take (sextant glyphs on a terminal without Unicode, say). Before the screen is known (the first draw()
         or handle()), they wait for it."""
         for name, value in dict(values).items():
+            if name == "quality" and isinstance(value, str):
+                value = QUALITY_ALIASES.get(value, value)
             w = self._named.get(name)
             options = GLYPH_MODES if name == "glyphs" and self.screen is None else w.options if w else ()
             if not any(value == o and type(value) is type(o) for o in options):

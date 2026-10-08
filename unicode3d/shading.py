@@ -10,6 +10,16 @@ from .raster import barycentric, bit_count, texture_lod
 from .shadows import shadow_lookup
 from .texture import sample as sample_texture
 
+# Relaxed floating-point rules for shading (Numba's fastmath, less the flags that assume no NaN or infinity, which
+# the clamping relies on: min(1, max(0, x)) turning NaN into 0, comparisons false for NaN): sums reordered and fused,
+# divisions and powers a little rounder. About a tenth less shading time; colours move by rounding errors, and each
+# pixel's arithmetic is the same whichever thread does it. Not for rasterizing, whose coverage is tested exactly.
+MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}
+# The helpers resolve() and resolve_cells() call per pixel are inlined into them (inline="always"): a call passes
+# each of its many arrays as a structure of several words, which cost more than the shading itself (inlined, a
+# pixel's shading took a third less time). They compile into each kernel calling them, so the kernels take longer
+# to compile (seconds, once: Numba's cache keeps them).
+
 
 def _decode_exact(level):
     """A perceived light level (0..1, like an sRGB value) as linear light."""
@@ -21,9 +31,11 @@ _DECODE = _decode_exact(np.linspace(0.0, 1.0, DECODE_STEPS + 1))
 # A highlight x ** power (x the cosine at the half vector) is at most exp(-power (1 - x)), as ln x <= x - 1: where
 # power (1 - x) is past this, it is below 1/65,536 and not worked out.
 SPEC_CUTOFF = float(np.log(65536.0))
+# A shadow lookup this near fully dark or fully lit counts as that, for sharing a cell's lighting (resolve_cells).
+SHADOW_EDGE = 1e-9
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", fastmath=MATH)
 def _decode(level):
     """A perceived light level as linear light (_decode_exact), from a table with straight lines between its entries:
     under 1e-6 off, a fraction of an 8-bit level, and much cheaper than the power. Clamped to 0..1 first
@@ -33,24 +45,20 @@ def _decode(level):
     return _DECODE[i] + (x - i) * (_DECODE[i + 1] - _DECODE[i])
 
 
-@njit(cache=True, error_model="numpy")
-def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first, lights, shadow_texels,
-           shadow_trans, shadow_mats, shadow_params, pixel_size, eye, emissive, specular, shininess, out, split,
-           spec_out):
-    """Linear RGB, into out (3,), of triangle t at barycentric weights b: Blinn-Phong lighting from
-    every light (rows of lights.light_rows()), plus `emissive`, on a surface of the colour interpolated
-    from its corners, textured if the triangle has a mipmap chain (at the mip level raster.texture_lod gives
-    for this pixel, from the triangle's corners on screen, xs and ys, plus its bias lod[t]). Highlights take
-    the light's colour, their strength times `specular` and their exponent `shininess` (the surface's
-    material; 0: the light's own).
-    Lights with a shadow map light only what they reach (see shadows.shadow_lookup), tinted by see-through things in
-    the way; their ambient light is everywhere. pixel_size is the width of a pixel one unit from the
-    eye, in the world. With split, out gets the surface's own lit colour and spec_out (3,) the
-    highlight, apart (for see-through and shiny surfaces, see _reflect_sky).
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _light(t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size,
+           eye, emissive, specular, shininess, span):
+    """The lighting of triangle t at barycentric weights b: Blinn-Phong from every light (rows of
+    lights.light_rows()), plus `emissive`. Highlights take the light's colour, their strength times `specular` and
+    their exponent `shininess` (the surface's material; 0: the light's own). Lights with a shadow map light only what
+    they reach (see shadows.shadow_lookup), tinted by see-through things in the way; their ambient light is
+    everywhere. pixel_size is the width of a pixel one unit from the eye, in the world; each shadow lookup's square
+    is widened by span - 1 pixels (0 for a pixel of its own; more to answer for a whole cell).
 
-    Returns the surface's alpha there (its texture's included), how squarely it faces the eye (the cosine
-    of the angle), and the direction a view from the eye is reflected in (rx, ry, rz)."""
-    # Perspective-correct interpolation of world position, normal, uv and colour.
+    Returns (the light levels decoded to linear light, r g b; the highlight, r g b, not clamped; how squarely the
+    surface faces the eye (the cosine of the angle); the direction a view from the eye is reflected in, x y z;
+    whether every shadow lookup came out fully lit or fully dark, untinted: 1.0, else 0.0)."""
+    # Perspective-correct interpolation of world position and normal.
     w0, w1, w2 = b0 * inv_w[t, 0], b1 * inv_w[t, 1], b2 * inv_w[t, 2]
     ws = w0 + w1 + w2
     at = attrs[t]
@@ -75,6 +83,7 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
     ex, ey, ez = ex / el, ey / el, ez / el
     level_r = level_g = level_b = emissive
     spec_r = spec_g = spec_b = 0.0
+    uniform = 1.0
     for i in range(lights.shape[0]):
         light = lights[i]
         lx, ly, lz, fade = light[1], light[2], light[3], 1.0
@@ -91,7 +100,11 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
         if light[15] >= 0:  # a surface facing away is in its own shadow
             if ndl > 0.0:
                 reach, tr, tg, tb = shadow_lookup(shadow_texels, shadow_trans, shadow_mats, shadow_params, int(light[15]),
-                                            px, py, pz, nx, ny, nz, ndl, pixel_size * el)
+                                            px, py, pz, nx, ny, nz, ndl, pixel_size * el,
+                                            pixel_size * el * (span - 1.0))
+                if not ((reach <= SHADOW_EDGE or reach >= 1.0 - SHADOW_EDGE) and tr == 1.0 and tg == 1.0
+                        and tb == 1.0):
+                    uniform = 0.0  # (NaN too)
             else:
                 reach = 0.0
         if tr == 1.0 and tg == 1.0 and tb == 1.0:
@@ -112,16 +125,58 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
                 spec = light[12] * specular * nh ** power * fade * reach
                 spec_r, spec_g, spec_b = (spec_r + light[7] * spec * tr, spec_g + light[8] * spec * tg,
                                           spec_b + light[9] * spec * tb)
-    r, g, b, a = lerp(8), lerp(9), lerp(10), lerp(11)
-    if chain[t] >= 0:
-        level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t]) + lod[t]
-        tr, tg, tb, ta = sample_texture(texels, levels, first, chain[t], lerp(6), lerp(7), level)
-        r, g, b, a = r * tr, g * tg, b * tb, a * ta
     # Light levels are perceived brightness (0.5 looks half as bright), as artists tune them, so they
     # are decoded like any sRGB value; everything after this point works in linear light.
     kr = _decode(level_r)
     kg = kr if level_g == level_r else _decode(level_g)
     kb = kr if level_b == level_r else _decode(level_b)
+    ne = nx * ex + ny * ey + nz * ez  # the view reflected about the surface: 2 (n . e) n - e
+    return (kr, kg, kb, spec_r, spec_g, spec_b, abs(ne), 2 * ne * nx - ex, 2 * ne * ny - ey, 2 * ne * nz - ez,
+            uniform)
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first):
+    """The colour (r, g, b) and alpha of triangle t's surface at barycentric weights b, before lighting: interpolated
+    from its corners, times its texture if it has a mipmap chain (at the mip level raster.texture_lod gives for this
+    pixel, from the triangle's corners on screen, xs and ys, plus its bias lod[t])."""
+    w0, w1, w2 = b0 * inv_w[t, 0], b1 * inv_w[t, 1], b2 * inv_w[t, 2]
+    ws = w0 + w1 + w2
+    at = attrs[t]
+
+    def lerp(k):
+        return (w0 * at[0, k] + w1 * at[1, k] + w2 * at[2, k]) / ws
+
+    r, g, b, a = lerp(8), lerp(9), lerp(10), lerp(11)
+    if chain[t] >= 0:
+        level = texture_lod(xs, ys, inv_w, attrs, t, b0, b1, b2, levels, first, chain[t]) + lod[t]
+        tr, tg, tb, ta = sample_texture(texels, levels, first, chain[t], lerp(6), lerp(7), level)
+        r, g, b, a = r * tr, g * tg, b * tb, a * ta
+    return r, g, b, a
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH)
+def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first, lights, shadow_texels,
+           shadow_trans, shadow_mats, shadow_params, pixel_size, eye, emissive, specular, shininess, out, split,
+           spec_out):
+    """Linear RGB, into out (3,), of triangle t at barycentric weights b: its surface (_surface) lit (_light).
+    With split, out gets the surface's own lit colour and spec_out (3,) the highlight, apart (for see-through and
+    shiny surfaces, see _reflect_sky).
+
+    Returns the surface's alpha there (its texture's included), how squarely it faces the eye (the cosine
+    of the angle), and the direction a view from the eye is reflected in (rx, ry, rz)."""
+    kr, kg, kb, spec_r, spec_g, spec_b, facing, rx, ry, rz, _ = _light(
+        t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size, eye,
+        emissive, specular, shininess, 1.0)
+    r, g, b, a = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first)
+    _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, out, split, spec_out)
+    return a, facing, rx, ry, rz
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, out, split, spec_out):
+    """A surface colour r g b under light levels k and highlight spec, into out (and spec_out, with split), as
+    _shade gives it."""
     # (Clamped as min(1, max(0, x)), which turns NaN into 0: Numba's max(a, NaN) is a.)
     if split:
         out[0], out[1], out[2] = min(1.0, max(0.0, r * kr)), min(1.0, max(0.0, g * kg)), min(1.0, max(0.0, b * kb))
@@ -130,11 +185,53 @@ def _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, firs
         out[0] = min(1.0, max(0.0, r * kr + spec_r))
         out[1] = min(1.0, max(0.0, g * kg + spec_g))
         out[2] = min(1.0, max(0.0, b * kb + spec_b))
-    ne = nx * ex + ny * ey + nz * ez  # the view reflected about the surface: 2 (n . e) n - e
-    return a, abs(ne), 2 * ne * nx - ex, 2 * ne * ny - ey, 2 * ne * nz - ez
 
 
-@njit(cache=True, error_model="numpy", parallel=True)
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _polish(c, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod,
+            sample_rgb, spec_rgb):
+    """A polished surface's sample (sample_rgb[c, s], with its highlight apart in spec_rgb[c]): part (gloss) the
+    background seen reflected in direction r, and its highlight on top."""
+    sr, sg, sb = sky_colour(sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, rx, ry, rz)
+    for k, reflected in ((0, sr), (1, sg), (2, sb)):
+        sample_rgb[c, s, k] = min(sample_rgb[c, s, k] * (1.0 - gloss) + gloss * reflected + spec_rgb[c, k], 1.0)
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover, near_depth, near_id,
+                 more, frame_rgb, frame_alpha, frame_samples):
+    """Pixel c's samples, shaded into sample_rgb[c], summed up as resolve() describes."""
+    r = g = b = 0.0
+    lr = lg = lb = np.inf
+    hr = hg = hb = -np.inf
+    covered, mixed, best, best_id = 0, False, -1.0, 0
+    first_id = ident[tri_inst[tris[c, 0]]] if tris[c, 0] >= 0 else 0
+    for s in range(n):
+        t = tris[c, s]
+        sid = ident[tri_inst[t]] if t >= 0 else 0
+        covered += t >= 0
+        mixed |= sid != first_id
+        if depth[c, s] > best:
+            best, best_id = depth[c, s], sid
+        vr, vg, vb = sample_rgb[c, s, 0], sample_rgb[c, s, 1], sample_rgb[c, s, 2]
+        r, g, b = r + vr, g + vg, b + vb
+        lr, lg, lb = min(lr, vr), min(lg, vg), min(lb, vb)
+        hr, hg, hb = max(hr, vr), max(hg, vg), max(hb, vb)
+    if frame_rgb.shape[0] == 0:
+        rgb[c, 0], rgb[c, 1], rgb[c, 2] = r, g, b
+        cover[c] = covered
+    else:
+        p, total = pixels[c], n + frame_samples
+        had = frame_samples  # (0 for the first samples: then there is nothing to take back)
+        frame_rgb[p, 0] = (frame_rgb[p, 0] * had + r) / total if had else r / n
+        frame_rgb[p, 1] = (frame_rgb[p, 1] * had + g) / total if had else g / n
+        frame_rgb[p, 2] = (frame_rgb[p, 2] * had + b) / total if had else b / n
+        frame_alpha[p] = (frame_alpha[p] * had + covered) / total if had else covered / n
+    near_depth[c], near_id[c] = best, best_id
+    more[c] = 0 < covered < n or mixed or max(hr - lr, hg - lg, hb - lb) > contrast
+
+
+@njit(cache=True, error_model="numpy", parallel=True, fastmath=MATH)
 def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess, shine,
             chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
             pixel_size, eye, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, contrast,
@@ -176,48 +273,131 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
                 sample_rgb[c, s, :] = sample_rgb[c, prev, :]
             else:
                 b0, b1, b2 = barycentric(xs, ys, t, cx, cy)
-                gloss = shine[tri_inst[t]]
-                _, _, rx, ry, rz = _shade(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first,
-                                          lights, shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size,
-                                          eye, emissive[tri_inst[t]], specular[tri_inst[t]], shininess[tri_inst[t]],
-                                          sample_rgb[c, s], gloss > 0.0, spec_rgb[c])
+                inst = tri_inst[t]
+                gloss = shine[inst]
+                kr, kg, kb, spec_r, spec_g, spec_b, _, rx, ry, rz, _ = _light(
+                    t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
+                    pixel_size, eye, emissive[inst], specular[inst], shininess[inst], 1.0)
+                r, g, b, _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first)
+                _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, sample_rgb[c, s], gloss > 0.0, spec_rgb[c])
                 if gloss > 0.0:  # polished: part the background reflected in it, and its highlight on top
-                    sr, sg, sb = sky_colour(sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod,
-                                            rx, ry, rz)
-                    for k, reflected in ((0, sr), (1, sg), (2, sb)):
-                        sample_rgb[c, s, k] = min(sample_rgb[c, s, k] * (1.0 - gloss) + gloss * reflected
-                                                  + spec_rgb[c, k], 1.0)
-        r = g = b = 0.0
-        lr = lg = lb = np.inf
-        hr = hg = hb = -np.inf
-        covered, mixed, best, best_id = 0, False, -1.0, 0
-        first_id = ident[tri_inst[tris[c, 0]]] if tris[c, 0] >= 0 else 0
-        for s in range(n):
-            t = tris[c, s]
-            sid = ident[tri_inst[t]] if t >= 0 else 0
-            covered += t >= 0
-            mixed |= sid != first_id
-            if depth[c, s] > best:
-                best, best_id = depth[c, s], sid
-            vr, vg, vb = sample_rgb[c, s, 0], sample_rgb[c, s, 1], sample_rgb[c, s, 2]
-            r, g, b = r + vr, g + vg, b + vb
-            lr, lg, lb = min(lr, vr), min(lg, vg), min(lb, vb)
-            hr, hg, hb = max(hr, vr), max(hg, vg), max(hb, vb)
-        if frame_rgb.shape[0] == 0:
-            rgb[c, 0], rgb[c, 1], rgb[c, 2] = r, g, b
-            cover[c] = covered
-        else:
-            p, total = pixels[c], n + frame_samples
-            had = frame_samples  # (0 for the first samples: then there is nothing to take back)
-            frame_rgb[p, 0] = (frame_rgb[p, 0] * had + r) / total if had else r / n
-            frame_rgb[p, 1] = (frame_rgb[p, 1] * had + g) / total if had else g / n
-            frame_rgb[p, 2] = (frame_rgb[p, 2] * had + b) / total if had else b / n
-            frame_alpha[p] = (frame_alpha[p] * had + covered) / total if had else covered / n
-        near_depth[c], near_id[c] = best, best_id
-        more[c] = 0 < covered < n or mixed or max(hr - lr, hg - lg, hb - lb) > contrast
+                    _polish(c, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first,
+                            sky_lod, sample_rgb, spec_rgb)
+        _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover, near_depth, near_id,
+                     more, frame_rgb, frame_alpha, frame_samples)
 
 
-@njit(cache=True, error_model="numpy", parallel=True)
+@njit(cache=True, error_model="numpy", parallel=True, fastmath=MATH)
+def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess,
+                  shine, chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats,
+                  shadow_params, pixel_size, eye, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first,
+                  sky_lod, contrast, sample_rgb, spec_rgb, rgb, cover, near_depth, near_id, more, frame_rgb,
+                  frame_alpha, frame_samples, cell_w, cell_h, coarse):
+    """resolve() for a whole frame (pixels: every pixel, in order; tris has a row for each), shading less often than
+    every pixel: in blocks of cell_w x cell_h pixels (a terminal cell's, whose pixels end up as two colours anyway),
+    each triangle in a block is lit once (_light), at the mean of the centres of the block's pixels it covers.
+
+    Where a shadow's edge may cross the block (a shadow lookup smoothed over the whole block comes out neither fully
+    lit nor fully dark, or tinted), the block's pixels are lit one by one, as resolve() lights them: shadows keep
+    their edges, and fully lit or fully dark blocks, the most, are lit once. The surface's colour and texture are
+    still worked out per pixel; with `coarse`, they too are once per block and triangle (cheaper, and coarser:
+    texture detail inside a cell is lost), and shadow edges are not looked for.
+
+    Writes what resolve() writes. Blocks at the frame's right and bottom edges may be smaller. Loops in parallel
+    over rows of blocks, each writing only its own pixels.
+    """
+    m, n = tris.shape
+    height = m // max(width, 1)
+    cell_w, cell_h = max(cell_w, 1), max(cell_h, 1)
+    cols, rows = (width + cell_w - 1) // cell_w, (height + cell_h - 1) // cell_h
+    span = 1.0 if coarse else np.sqrt(cell_w * cell_w + cell_h * cell_h) + 1.0  # (the block's diagonal, a pixel more)
+    most = cell_w * cell_h * n  # the most different triangles a block can hold
+    for row in prange(rows):
+        # Each block's triangles: which, where they are (summed pixel centres, how many), their lighting (light
+        # levels, highlight, reflected view, whether shared: _light's) and, coarse, their surface colour.
+        block_tris = np.empty(most, np.int64)
+        block = np.empty((most, 15))
+        y0, y1 = row * cell_h, min(row * cell_h + cell_h, height)
+        for col in range(cols):
+            x0, x1 = col * cell_w, min(col * cell_w + cell_w, width)
+            k = 0
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    c = y * width + x
+                    for s in range(n):
+                        t = tris[c, s]
+                        if t < 0:
+                            continue
+                        repeated = False
+                        for s2 in range(s):
+                            if tris[c, s2] == t:
+                                repeated = True
+                                break
+                        if repeated:
+                            continue
+                        j = 0
+                        while j < k and block_tris[j] != t:
+                            j += 1
+                        if j == k:
+                            block_tris[k] = t
+                            block[k, 0] = block[k, 1] = block[k, 2] = 0.0
+                            k += 1
+                        block[j, 0] += x + 0.5
+                        block[j, 1] += y + 0.5
+                        block[j, 2] += 1.0
+            for j in range(k):
+                t, inst = block_tris[j], tri_inst[block_tris[j]]
+                b0, b1, b2 = barycentric(xs, ys, t, block[j, 0] / block[j, 2], block[j, 1] / block[j, 2])
+                (block[j, 3], block[j, 4], block[j, 5], block[j, 6], block[j, 7], block[j, 8], _, block[j, 9],
+                 block[j, 10], block[j, 11], block[j, 2]) = _light(
+                    t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
+                    pixel_size, eye, emissive[inst], specular[inst], shininess[inst], span)
+                if coarse:
+                    block[j, 2] = 1.0
+                    block[j, 12], block[j, 13], block[j, 14], _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain,
+                                                                           lod, texels, levels, first)
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    c = y * width + x
+                    for s in range(n):
+                        t = tris[c, s]
+                        if t < 0:
+                            sample_rgb[c, s, :] = 0.0
+                            continue
+                        prev = s
+                        for s2 in range(s):
+                            if tris[c, s2] == t:
+                                prev = s2
+                                break
+                        if prev < s:
+                            sample_rgb[c, s, :] = sample_rgb[c, prev, :]
+                            continue
+                        j = 0
+                        while block_tris[j] != t:
+                            j += 1
+                        inst = tri_inst[t]
+                        gloss = shine[inst]
+                        kr, kg, kb, spec_r, spec_g, spec_b = (block[j, 3], block[j, 4], block[j, 5], block[j, 6],
+                                                              block[j, 7], block[j, 8])
+                        rx, ry, rz = block[j, 9], block[j, 10], block[j, 11]
+                        if not coarse:
+                            b0, b1, b2 = barycentric(xs, ys, t, x + 0.5, y + 0.5)
+                            if block[j, 2] == 0.0:  # a shadow's edge may be here: lit at this pixel, as resolve() does
+                                kr, kg, kb, spec_r, spec_g, spec_b, _, rx, ry, rz, _ = _light(
+                                    t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats,
+                                    shadow_params, pixel_size, eye, emissive[inst], specular[inst], shininess[inst], 1.0)
+                            r, g, b, _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first)
+                        else:
+                            r, g, b = block[j, 12], block[j, 13], block[j, 14]
+                        _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, sample_rgb[c, s], gloss > 0.0, spec_rgb[c])
+                        if gloss > 0.0:
+                            _polish(c, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels,
+                                    sky_first, sky_lod, sample_rgb, spec_rgb)
+                    _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover,
+                                 near_depth, near_id, more, frame_rgb, frame_alpha, frame_samples)
+
+
+@njit(cache=True, error_model="numpy", parallel=True, fastmath=MATH)
 def blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, layer_cover, n_samples, width, xs, ys,
           inv_w, attrs, tri_inst, ident, emissive, specular, shininess, shine, chain, lod, texels, levels, first, lights,
           shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size, eye, sky, sky_colors, sky_faces,

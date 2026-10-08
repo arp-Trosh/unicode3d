@@ -176,6 +176,16 @@ class BadNumberTests(unittest.TestCase):
             module = importlib.import_module(f"unicode3d.{name}")
             self.assertEqual(getattr(module, k).targetoptions.get("error_model"), "numpy", f"{name}.{k}")
 
+    def test_no_kernel_assumes_numbers_are_finite(self):
+        # Clamping relies on NaN: min(1, max(0, x)) turns it into 0, and comparisons are false for it. fastmath=True,
+        # or its nnan and ninf flags, would let the compiler assume there is none and drop those (shading.MATH).
+        for name in (m.name for m in pkgutil.iter_modules(unicode3d.__path__) if not m.ispkg and m.name != "__main__"):
+            module = importlib.import_module(f"unicode3d.{name}")
+            for k, v in vars(module).items():
+                if isinstance(v, CPUDispatcher) and v.__module__ == module.__name__:
+                    flags = v.targetoptions.get("fastmath", False)
+                    self.assertFalse(flags is True or {"fast", "nnan", "ninf"} & set(flags or ()), f"{name}.{k}")
+
     def test_see_through_surface_fading_to_nothing_with_fog(self):
         # It used to leave pixels covered but without a depth, and fog divided by that depth.
         def quad(z, s, alphas):

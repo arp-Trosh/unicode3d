@@ -20,6 +20,8 @@ from PIL import Image
 
 from .color import srgb_to_linear
 
+MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for sampling, as shading does: see shading.MATH)
+
 
 CUTOUT, BLEND = 1, 2  # kinds of alpha in a texture (see alpha_kind); 0 is none (solid)
 MAX_TEXTURE = 1024     # load_image's default limit on a texture's width and height, in texels
@@ -156,7 +158,7 @@ def clamp_index(v, n):
     return 0
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", fastmath=MATH)
 def repeat(u):
     """A texture coordinate beyond 0..1 brought back into it, so that textures repeat (tile) over faces whose uv
     go further (a floor tiled ten times: u from 0 to 10). Coordinates within 0..1 are kept as they are, so
@@ -168,7 +170,7 @@ def repeat(u):
     return f if f >= 0.0 else 0.0  # (an infinity gives NaN, which fails the comparison too)
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", fastmath=MATH)
 def _bilinear(texels, levels, level, u, v):
     offset, h, w = levels[level, 0], levels[level, 1], levels[level, 2]
     u, v = repeat(u), repeat(v)
@@ -187,7 +189,7 @@ def _bilinear(texels, levels, level, u, v):
     return r, g, bl, al
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", fastmath=MATH)
 def sample(texels, levels, first, chain, u, v, lod):
     """Trilinear sample of chain `chain` of pack()'s arrays: bilinear on the two mip levels around `lod`,
     blended. Returns (r, g, b, alpha), the colour not premultiplied (as it was painted)."""

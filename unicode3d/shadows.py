@@ -16,6 +16,8 @@ from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, proje
                      rasterize_tint)
 from .transforms import look_at, normalize, perspective
 
+MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for the lookups shading makes: see shading.MATH)
+
 
 SHADOW_COLUMNS = 10  # per shadow map: kind (0: a Light's, 1: a face of a PointLight's cube), offset of its texels,
                      # size, texel width (a Light's: in the world; a face's: per unit of distance from the light),
@@ -28,14 +30,14 @@ _NO_SHADOWS = (np.zeros(0, np.float32), np.zeros((4, 0), np.float32), np.zeros((
                np.zeros((0, SHADOW_COLUMNS)))  # when no light has any
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", fastmath=MATH)
 def _lit_texel(texels, offset, size, x, y, d):
     """Whether texel (x, y) of a shadow map (size x size texels from texels[offset]) lets light through to
     depth d: nothing nearer the light is there (outside the map there is nothing to cast a shadow)."""
     return x < 0 or y < 0 or x >= size or y >= size or texels[offset + y * size + x] <= d
 
 
-@njit(cache=True, error_model="numpy")
+@njit(cache=True, error_model="numpy", fastmath=MATH)
 def _through(trans, offset, size, x, y, d):
     """The light (rgb) that see-through things let through to depth d at texel (x, y) of a shadow map: what
     trans holds there if the nearest of them is nearer the light than d, else all of it."""
@@ -47,12 +49,14 @@ def _through(trans, offset, size, x, y, d):
     return trans[1, k], trans[2, k], trans[3, k]
 
 
-@njit(cache=True, error_model="numpy")
-def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, ndl, footprint):
+@njit(cache=True, error_model="numpy", fastmath=MATH)
+def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, ndl, footprint, widen):
     """How much of a light reaches point p on a surface with normal n, 0 (in shadow) to 1 (lit), from its
     shadow map `first`, or for a PointLight the face of its cube (maps first to first + 5: +x, -x, +y, -y,
     +z, -z) that p lies in (see Renderer._shadow_maps). ndl is the cosine of the angle between n and the
-    light, and footprint the width in the world of the screen pixel being shaded.
+    light, and footprint the width in the world of the screen pixel being shaded. widen (in the world) widens the
+    square by that much more, without moving the point further off the surface: to answer for a whole terminal cell
+    at once (shading.resolve_cells), 0 for a pixel.
 
     The map is averaged over a square around the point (percentage-closer filtering): softness texels
     either way, or half the pixel's footprint if that is more, so that shadow edges are smoothed at
@@ -83,6 +87,10 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
     if cube:
         radius = min(radius, CUBE_MARGIN - 1.0)
     shift = (radius + 1.0) * texel * np.sqrt(max(1.0 - ndl * ndl, 0.0))
+    if widen > 0.0:
+        radius += 0.5 * widen / texel
+        if cube:
+            radius = min(radius, CUBE_MARGIN - 1.0)
     qx, qy, qz = px + nx * shift, py + ny * shift, pz + nz * shift
     mat = mats[m]
     cx = mat[0, 0] * qx + mat[0, 1] * qy + mat[0, 2] * qz + mat[0, 3]

@@ -77,7 +77,7 @@ Every demo takes the [display options](#display-options), `--fps` included, and 
 settings at the bottom right: F2 cycles the glyph set, F3 the colours, F4 the target frame rate
 (shown as achieved/target), F5 switches shadows on and off, F6 reflections, and F7 the detail between
 high (every model as it is, the default) and standard (levels of detail: objects small on screen drawn
-from simpler copies, see `Renderer.simplify`), and F8 the quality (high as set, auto, or fast: see
+from simpler copies, see `Renderer.simplify`), and F8 the quality (high as set, mid, low, or auto: see
 [automatic quality](#automatic-quality)), and each can be clicked too (where the status line is short of room, detail
 and quality aren't drawn there, but F7 and F8 still work). A small font and a large terminal give the most detail.
 
@@ -348,6 +348,7 @@ between frames:
 | `reflections` | `True` | `False` draws no reflections whatever the objects' reflectivity (see [Reflections](#reflections)) |
 | `mirror_bounces` | `1` | how deep mirrors show each other, at most 4 |
 | `max_pixels` | `1920 * 1080` | the most pixels drawn; a bigger view is drawn at a lower resolution and stretched to fit (see [Performance](#performance)); `None` for no limit |
+| `shading` | `"cell"` | how often surfaces are lit: `"cell"` once per terminal cell for each surface in it (a cell's pixels end up as two colours anyway), but pixel by pixel in cells a shadow's edge crosses, colours and textures still per pixel; `"pixel"` every pixel on its own (exact); `"coarse"` everything once per cell, textures too (fastest, texture detail inside cells lost; see [Performance](#performance)) |
 | `simplify` | `0` | how many pixels a simpler copy of a mesh (a level of detail) may differ by where it is drawn in the mesh's place, for objects small on screen (see [Performance](#performance)); 0 draws every mesh as it is |
 
 `render(objects, camera, lights)` takes one light or a list of them. It returns the renderer's own
@@ -1049,15 +1050,18 @@ program.
 <a id="automatic-quality"></a>**Automatic quality.** On a slow machine, quality "auto" (F8, `DisplayControls(renderer=renderer, quality="auto")`, or
 `controls.apply({"quality": "auto"})`) lowers the picture while frames take longer than the frame rate
 allows, and raises it again when there is time to spare. The steps, in order: edge samples off (edges
-stay smoothed, more coarsely), levels of detail at 2 pixels, then the picture drawn at 85% and 70% of its
-pixels and stretched (softer). Shadows and reflections are never changed. It only ever goes below the
+stay smoothed, more coarsely), levels of detail at 2 pixels, coarse shading (everything worked out once per
+cell: texture detail inside a cell is lost), then the picture drawn at 85% and 70% of its pixels and stretched
+(softer). Shadows and reflections are never turned off. It only ever goes below the
 settings as the user (or the program) set them, and those are what F7 and `settings()` show; the bar shows
 "auto -2" while two steps down. It judges about a second of frames at a time (`run()` times each frame,
 `screen.frame_time`, without the wait for the frame rate), steps down when they take over 10% longer than
 allowed and run under 20 fps (`AutoQuality.min_fps`: a game aiming at 30 plays well at 20, so the picture is
 kept until frames get that slow; 0 for the frame rate alone) and back up after 3 s with a quarter to spare,
-waiting longer each time a step up doesn't hold, so it settles instead of flickering. "fast" holds the lowest step; "high", the default, leaves the renderer as it is
-(benchmarks and tests stay repeatable). The same works without `DisplayControls`:
+waiting longer each time a step up doesn't hold, so it settles instead of flickering. The other modes hold
+still: "high", the default, leaves the renderer as it is (benchmarks and tests stay repeatable); "mid" takes
+the first two steps (edge samples off, detail 2 px), keeping the shading; "low" holds the lowest step
+("fast", its old name, still works, in code and in saved settings). The same works without `DisplayControls`:
 `AutoQuality.of(renderer).update(frame_seconds, 1 / fps)` once a frame (`unicode3d.quality`).
 
 ```python
@@ -1137,6 +1141,15 @@ changed by a shade here and there. Moving a corner a pixel or two can close the 
 sink a thin plate laid on another part (a shield's painted face on its back) behind it, as each part's
 levels are made on their own. Give such parts `Object3D(..., simplify=False)`: they are always drawn as
 they are.
+
+**Shading per cell.** A terminal cell's pixels end up as two colours, so `Renderer.shading` works out
+lighting (every light, shadows, highlights) once per cell for each surface in it, by default, and pixel by
+pixel only in cells a shadow's edge may cross (a shadow lookup widened to the whole cell comes out neither
+fully lit nor fully dark): shadows keep their soft edges, and highlights and light falloff vary from cell to
+cell. Colours and textures are still worked out for every pixel. With several lights, shading takes a quarter
+to a third less time than `"pixel"` (exact, every pixel lit on its own); `"coarse"`, everything once per
+cell, about half again, but a brick's mortar or a board's grid lines go jagged. Automatic quality takes
+`"coarse"` as one of its steps.
 
 **Huge terminals.** A full-screen terminal with a tiny font can have a million cells or more: kitty
 at font size 2 on a 1080p screen is about 960x215 cells, 1920x645 pixels in `sextant` mode. Frames

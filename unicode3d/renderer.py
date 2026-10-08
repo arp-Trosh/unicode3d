@@ -19,7 +19,7 @@ from .lights import LIGHT_COLUMNS, as_lights, light_rows
 from .mirrors import Mirrors
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, SAMPLE_PATTERNS, SOLID, VERTEX_CHUNK, FrameBuffer,
                      bin_bands, count_bands, project, rasterize, rasterize_layers, transform, upscale, NO_CLIP)
-from .shading import blend, post_effects, resolve
+from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
@@ -27,6 +27,7 @@ from .transforms import normalize, perspective, scene_poses, view_axes
 from .detail import FINEST, allowed_errors, detail_levels, forget_levels, known_levels, pick_levels
 
 MAX_PIXELS = 1920 * 1080  # the default Renderer.max_pixels
+SHADINGS = ("cell", "pixel", "coarse")  # Renderer.shading
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
 DETAIL_BUDGET = 0.003  # seconds a frame spent making levels of detail (see Renderer._detail)
 HAZE_TEXELS = 4       # how many texels across a sky box face fog fades into (see shading.post_effects)
@@ -417,12 +418,21 @@ class Renderer(ShadowMaps, Mirrors):
     change to the picture of under a pixel. Levels are made for a mesh the first time it is small enough to use
     one, a few meshes a frame (detail.detail_levels makes them ahead of time). Objects with simplify=False
     (lettering, say) are always drawn as they are.
+    shading: how often surfaces are lit. "cell" (the default): once per terminal cell for each surface in it, as a
+    cell's pixels end up as two colours anyway, except in cells a shadow's edge crosses, which are lit pixel by
+    pixel; colours and textures are still worked out for every pixel (a quarter to a third less shading time than
+    "pixel", the picture all but the same: highlights and light falloff vary from cell to cell rather than pixel to
+    pixel). "pixel": every pixel lit on its own (exact, slowest). "coarse": everything once per cell and surface,
+    textures too, and shadow edges not looked for (about two thirds less shading time; texture detail inside a cell,
+    such as a brick's mortar, is lost, and shadow edges step from cell to cell): for slow machines (AutoQuality's
+    lowest steps). Pixels at the edges of shapes get more samples (edge_samples) shaded per pixel whatever the
+    setting.
     """
 
     def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
                  fog=0.3, outline=0.55, lod_bias=-0.5, background=None, shadow_size=1024, point_shadow_size=256,
                  shadow_softness=1.5, shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
-                 max_pixels=MAX_PIXELS, simplify=0.0):
+                 max_pixels=MAX_PIXELS, simplify=0.0, shading="cell"):
         for n in (samples, edge_samples):
             if n not in SAMPLE_PATTERNS and n != 0:
                 raise ValueError(f"sample counts must be one of {sorted(SAMPLE_PATTERNS)}, not {n}")
@@ -433,6 +443,7 @@ class Renderer(ShadowMaps, Mirrors):
         self.outline = outline
         self.lod_bias = lod_bias
         self.simplify = simplify
+        self.shading = shading
         self.background = background
         self.shadow_size = shadow_size
         self.point_shadow_size = point_shadow_size
@@ -467,6 +478,17 @@ class Renderer(ShadowMaps, Mirrors):
         self._caster_meshes = None  # (the pack's mesh keys, the id of each one's Mesh, the keys by those ids)
         self._shadow_draws = 0
         self.resize(width, height)
+
+    @property
+    def shading(self):
+        """How often surfaces are lit: "cell", "pixel" or "coarse" (see the class)."""
+        return self._shading
+
+    @shading.setter
+    def shading(self, value):
+        if value not in SHADINGS:
+            raise ValueError(f"shading must be one of {SHADINGS}, not {value!r}")
+        self._shading = value
 
     def resize(self, width, height, cell_pixels=None):
         """Set the size in cells, and optionally the pixels per cell (e.g. Screen.cell_pixels)."""
@@ -815,7 +837,7 @@ class Renderer(ShadowMaps, Mirrors):
         values = [self.width, self.height, self.cell_pixels, self.max_pixels, self.cell_aspect, self.samples,
                   self.edge_samples, self.transparency_layers, self.reflections, self.mirror_bounces,
                   fog[:3] + (fog[3].tobytes(), fog[4]), self.outline, self.lod_bias, self.shadow_size,
-                  self.point_shadow_size, self.shadow_softness,
+                  self.point_shadow_size, self.shadow_softness, self._shading,
                   np.asarray(camera.position, float).tobytes(), np.asarray(camera.target, float).tobytes(),
                   np.asarray(camera.up, float).tobytes(), camera.fov, camera.near, camera.far,
                   self._light_rows.tobytes()]
@@ -1099,10 +1121,15 @@ class Renderer(ShadowMaps, Mirrors):
                "sample_rgb": buf.get(name + "_sample_rgb", (m, n, 3))}
         depth = buf.get("near_depth", (m,)) if depth is None else depth
         ids = buf.get("near_id", (m,), np.int32) if ids is None else ids
-        resolve(tris, sample_depth, pixels, fb.width, scene["xs"], scene["ys"], scene["inv_w"], scene["attrs"],
+        args = (tris, sample_depth, pixels, fb.width, scene["xs"], scene["ys"], scene["inv_w"], scene["attrs"],
                 scene["tri_inst"], scene["ident"], scene["emissive"], scene["specular"], scene["shininess"],
                 scene["shine"], scene["chain"], scene["lod"], *scene["textures"], scene["lights"], *scene["shadows"],
                 scene["pixel_size"], scene["eye"], *scene["sky"], EDGE_CONTRAST, out["sample_rgb"],
                 buf.get(name + "_spec", (m, 3)), out["rgb"], out["cover"], depth, ids, out["more"], *frame,
                 frame_samples or 0)
+        cell_w, cell_h = (max(int(v), 1) for v in fb.cell_pixels)
+        if whole and self._shading != "pixel" and cell_w * cell_h > 1:  # (blocks of the frame's own cells)
+            resolve_cells(*args, cell_w, cell_h, self._shading == "coarse")
+        else:
+            resolve(*args)
         return out

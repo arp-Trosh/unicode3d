@@ -368,7 +368,13 @@ class RenderTests(unittest.TestCase):
                 screen.draw_frame(fb)
                 frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy(), screen.chars.copy(),
                           screen.fg.copy(), screen.bg.copy(), screen.render_updates()]
-            # Drawn smaller than the screen needs (Renderer.max_pixels) and stretched to fit.
+            # Lit pixel by pixel, and everything once per cell (the scenes above: lit once per cell, but at shadow
+            # edges); then once per cell drawn smaller than the screen needs (Renderer.max_pixels: blocks cut short
+            # at the frame's edges) and stretched to fit.
+            for shading in ("pixel", "coarse"):
+                renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), shading=shading)
+                fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), shadowed)
+                frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
             renderer = Renderer(60, 30, screen.cell_pixels, background=Sky(), max_pixels=2000)
             fb = renderer.render(crowd, Camera(position=np.array([0.0, 0.5, 5.0])), shadowed)
             frame += [fb.rgb.copy(), fb.alpha.copy(), fb.depth.copy(), fb.ids.copy()]
@@ -395,6 +401,51 @@ class RenderTests(unittest.TestCase):
                     np.testing.assert_array_equal(a, b)
         finally:
             numba.set_num_threads(most)
+
+    def test_lighting_once_per_cell_keeps_shadow_edges(self):
+        # A flat floor and a box under a sun, without highlights: every pixel of a face gets the same light but for
+        # the shadow, so lighting once per cell gives every pixel what lighting it on its own does, if the cells a
+        # shadow's edge crosses are lit pixel by pixel.
+        floor = Object3D(block_mesh((0.0, -0.55, 0.0), (6.0, 0.1, 6.0)), color=(200, 200, 200), specular=0.0)
+        box = Object3D(make_box(), rotation=quat_axis_angle((0, 1, 0), 0.5), color=(200, 80, 60), specular=0.0)
+        sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
+        camera = Camera(position=np.array([0.5, 3.0, 5.0]), target=np.zeros(3))
+        frames = {}
+        for shading in ("pixel", "cell", "coarse"):
+            r = Renderer(60, 24, (2, 3), shading=shading)
+            frames[shading] = r.render([floor, box], camera, sun).rgb.copy()
+        shadowed = frames["pixel"][..., 0] < 0.6 * frames["pixel"][..., 0].max()
+        self.assertGreater(shadowed.mean(), 0.05)  # (there is a shadow, with edges)
+        np.testing.assert_allclose(frames["cell"], frames["pixel"], atol=1e-9)
+        # Lit and coloured once per cell, its edges are a cell's steps: the picture differs along them.
+        self.assertGreater(np.abs(frames["coarse"] - frames["pixel"]).max(), 0.05)
+
+    def test_coarse_shading_gives_each_cell_one_colour_per_surface(self):
+        rng = np.random.default_rng(3)
+        wall = Object3D(textured_quad(4.0, 3.0, rng.uniform(0.0, 1.0, (64, 64, 3))), color=(255, 255, 255))
+        camera = Camera(position=np.array([0.0, 0.0, 2.2]))
+        uniform = {}
+        for shading in ("cell", "coarse"):
+            r = Renderer(40, 16, (2, 3), shading=shading, edge_samples=0)
+            rgb = r.render([wall], camera, Light()).rgb
+            cells = rgb.reshape(16, 3, 40, 2, 3).transpose(0, 2, 1, 3, 4).reshape(16, 40, 6, 3)
+            uniform[shading] = np.mean(np.ptp(cells, axis=2).max(axis=2) < 1e-9)
+        self.assertGreater(uniform["coarse"], 0.9)  # (all but the cells on the quad's diagonal and its edges)
+        self.assertLess(uniform["cell"], 0.1)  # the texture still varies inside cells
+
+    def test_shading_setting(self):
+        r = Renderer(20, 10, (2, 3))
+        self.assertEqual(r.shading, "cell")
+        with self.assertRaises(ValueError):
+            r.shading = "per pixel"
+        objects, camera = [Object3D(make_box())], Camera()
+        r.render(objects, camera, Light())
+        draws = r.draws
+        r.render(objects, camera, Light())
+        self.assertEqual(r.draws, draws)  # (unchanged: reused)
+        r.shading = "coarse"
+        r.render(objects, camera, Light())
+        self.assertEqual(r.draws, draws + 1)  # a different setting draws the frame again
 
     def test_world_bounds(self):
         group = Node(position=np.array([1.0, 2.0, 0.0]), rotation=quat_axis_angle((0, 0, 1), np.pi / 2), scale=2.0)
@@ -768,7 +819,9 @@ class RenderTests(unittest.TestCase):
         floor = Object3D(block_mesh((0.0, -0.05, 0.0), (6.0, 0.1, 6.0)), color=(255, 255, 255))
         box = Object3D(block_mesh((0.0, 1.0, 0.0), (0.6, 0.6, 0.6)), color=(255, 255, 255))
         camera = Camera(position=np.array([0.0, 6.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
-        renderer = Renderer(60, 30, fog=0, outline=0)
+        # (Lit pixel by pixel: lit once per cell, cells a shadow's edge may cross are lit pixel by pixel and the rest
+        # not, so a shadowed light and a plain one agree only to a highlight's change across a cell.)
+        renderer = Renderer(60, 30, fog=0, outline=0, shading="pixel")
         sun = Light(direction=np.array([1.0, -1.0, 0.0]), shadows=True)
 
         def at(fb, *point):
@@ -807,7 +860,7 @@ class RenderTests(unittest.TestCase):
         boxes = [Object3D(block_mesh((x, 0.3, z), (0.3, 0.3, 0.3)), color=(255, 255, 255))
                  for x, z in ((1.5, 0.0), (-1.5, 0.0), (0.0, 1.5), (0.0, -1.5))]
         camera = Camera(position=np.array([0.0, 12.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
-        renderer = Renderer(80, 40, fog=0, outline=0)
+        renderer = Renderer(80, 40, fog=0, outline=0, shading="pixel")  # (as in test_shadows)
         lamp = PointLight(np.array([0.0, 0.6, 0.0]), diffuse=1.0, specular=0.0, range=12.0, shadows=True)
 
         def at(fb, x, z):
@@ -1405,7 +1458,8 @@ class RenderTests(unittest.TestCase):
         # Object3D.specular scales each light's highlight; shininess sets how tight it is.
         ball = blob_mesh((1.0, 1.0, 1.0), rings=32, segments=48)
         light = Light(direction=np.array([0.0, 0.0, -1.0]), ambient=0.2, diffuse=0.4, specular=0.5, shininess=20.0)
-        renderer = Renderer(60, 30, fog=0, outline=0)
+        # (Lit pixel by pixel: a highlight lit once per cell peaks at a cell's middle, lower if it is tighter.)
+        renderer = Renderer(60, 30, fog=0, outline=0, shading="pixel")
         camera = Camera(position=np.array([0.0, 0.0, 5.0]))
         shots = {}
         for name, kwargs in (("plain", {}), ("matte", {"specular": 0.0}), ("strong", {"specular": 2.0}),
