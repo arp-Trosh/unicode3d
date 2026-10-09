@@ -384,6 +384,29 @@ def _starts(whole, part):
     return part.base is whole and part.__array_interface__["data"][0] == whole.__array_interface__["data"][0]
 
 
+def _work(pack, inst_mesh):
+    """How raster.transform() and transform_depth() split the instances showing meshes inst_mesh of `pack` into
+    pieces that run in parallel: (inst_vertex (where each instance's rows in `world` start, and their total), its
+    chunks of vertices (vchunk_inst, vchunk_first, vchunk_end, and where each instance's start: inst_vchunk), its
+    chunks of faces (chunk_inst, chunk_run, chunk_first, chunk_end): its mesh's runs (see _runs), each left out when
+    out of view, with the vertex chunks only they use)."""
+    n_inst = len(inst_mesh)
+    vertex_counts = np.diff(pack["mesh_vertex"])[inst_mesh]
+    inst_vertex = np.zeros(n_inst + 1, np.int64)
+    np.cumsum(vertex_counts, out=inst_vertex[1:])
+    vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
+    inst_vchunk = np.zeros(n_inst + 1, np.int64)
+    np.cumsum((vertex_counts + VERTEX_CHUNK - 1) // VERTEX_CHUNK, out=inst_vchunk[1:])
+    mesh_run = pack["mesh_run"]
+    first_run = mesh_run[inst_mesh]
+    runs = mesh_run[inst_mesh + 1] - first_run
+    chunk_inst = np.repeat(np.arange(n_inst, dtype=np.int64), runs)
+    chunk_run = np.arange(len(chunk_inst), dtype=np.int64) + np.repeat(first_run - (np.cumsum(runs) - runs), runs)
+    chunk_first, chunk_end = pack["run_first"][chunk_run], pack["run_end"][chunk_run]
+    return (inst_vertex, (vchunk_inst, vchunk_first, vchunk_end, inst_vchunk),
+            (chunk_inst, chunk_run, chunk_first, chunk_end))
+
+
 def _chunks(counts, starts, size):
     """Split each instance's run of counts[i] items, starting at starts[i], into chunks of at most `size`:
     (instance, first, end) arrays, in instance order."""
@@ -1134,20 +1157,8 @@ class Renderer(ShadowMaps, Mirrors):
         chunks and their plan (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut))."""
         buf = self._buffers
         n_inst = len(inst["mesh"])
-        vertex_counts = np.diff(pack["mesh_vertex"])[inst["mesh"]]
-        inst_vertex = np.zeros(n_inst + 1, np.int64)
-        np.cumsum(vertex_counts, out=inst_vertex[1:])
-        # The work, in pieces that run in parallel: chunks of each instance's vertices, then its mesh's runs of faces
-        # (see _runs), each left out when out of view, with the vertex chunks only they use.
-        vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
-        inst_vchunk = np.zeros(n_inst + 1, np.int64)
-        np.cumsum((vertex_counts + VERTEX_CHUNK - 1) // VERTEX_CHUNK, out=inst_vchunk[1:])
-        mesh_run = pack["mesh_run"]
-        first_run = mesh_run[inst["mesh"]]
-        runs = mesh_run[inst["mesh"] + 1] - first_run
-        chunk_inst = np.repeat(np.arange(n_inst, dtype=np.int64), runs)
-        chunk_run = np.arange(len(chunk_inst), dtype=np.int64) + np.repeat(first_run - (np.cumsum(runs) - runs), runs)
-        chunk_first, chunk_end = pack["run_first"][chunk_run], pack["run_end"][chunk_run]
+        inst_vertex, (vchunk_inst, vchunk_first, vchunk_end, inst_vchunk), (chunk_inst, chunk_run, chunk_first,
+                                                                            chunk_end) = _work(pack, inst["mesh"])
         n_chunks = len(chunk_inst)
         whole, cut = buf.get(prefix + "whole", (n_chunks,), np.int64), buf.get(prefix + "cut", (n_chunks,), np.int64)
         off_whole = buf.get(prefix + "off_whole", (n_chunks,), np.int64)
@@ -1156,7 +1167,8 @@ class Renderer(ShadowMaps, Mirrors):
         k = transform(pack["vertices"], pack["normals"], pack["faces"], pack["mesh_vertex"], pack["spheres"],
                       inst["mesh"], inst["lin"], inst["pos"], double, inst["flip"], inst_vertex,
                       view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
-                      chunk_inst, chunk_run, chunk_first, chunk_end, mesh_run, pack["run_spheres"], pack["run_vertex"],
+                      chunk_inst, chunk_run, chunk_first, chunk_end, pack["mesh_run"], pack["run_spheres"],
+                      pack["run_vertex"],
                       world, buf.get(prefix + "visible", (n_inst,), np.bool_),
                       buf.get(prefix + "seen", (n_chunks,), np.bool_),
                       buf.get(prefix + "needed", (len(vchunk_inst),), np.bool_),

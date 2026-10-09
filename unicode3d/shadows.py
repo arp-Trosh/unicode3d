@@ -13,7 +13,7 @@ import numpy as np
 from numba import njit
 
 from .lights import PointLight
-from .raster import (CLEAR, CUT, FACE_CHUNK, SOLID, SURFACE, VERTEX_CHUNK, count_cube, project_cube, project_depth,
+from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, project_depth,
                      rasterize_depth, rasterize_tint, transform_depth)
 from .transforms import look_at, normalize, perspective
 
@@ -611,23 +611,23 @@ class ShadowMaps:
 
     def _shadow_transform(self, pack, inst, view_proj):
         """raster.transform_depth() of the instances `inst` (as Renderer._transform, without normals, back faces
-        or a clipping plane): (triangle count, world, inst_vertex, the face chunks and their plan)."""
-        from .renderer import _chunks  # (renderer imports this module)
+        or a clipping plane; runs of faces out of the light's view left out as there): (triangle count, world,
+        inst_vertex, the face chunks and their plan)."""
+        from .renderer import _work  # (renderer imports this module)
         buf = self._buffers
         n_inst = len(inst["mesh"])
-        vertex_counts = np.diff(pack["mesh_vertex"])[inst["mesh"]]
-        face_counts = np.diff(pack["mesh_face"])[inst["mesh"]]
-        inst_vertex = np.zeros(n_inst + 1, np.int64)
-        np.cumsum(vertex_counts, out=inst_vertex[1:])
-        vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
-        chunk_inst, chunk_first, chunk_end = _chunks(face_counts, pack["mesh_face"][inst["mesh"]], FACE_CHUNK)
+        inst_vertex, (vchunk_inst, vchunk_first, vchunk_end, inst_vchunk), (chunk_inst, chunk_run, chunk_first,
+                                                                            chunk_end) = _work(pack, inst["mesh"])
         n_chunks = len(chunk_inst)
         plan = [buf.get("shadow_" + name, (n_chunks,), np.int64) for name in ("whole", "cut", "off_whole", "off_cut")]
         world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
         k = transform_depth(pack["vertices"], pack["faces"], pack["mesh_vertex"], pack["spheres"], inst["mesh"],
                             inst["lin"], inst["pos"], inst_vertex, view_proj, 0.5, vchunk_inst, vchunk_first,
-                            vchunk_end, chunk_inst, chunk_first, chunk_end, world,
-                            buf.get("shadow_visible", (n_inst,), np.bool_), *plan)
+                            vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first, chunk_end, pack["mesh_run"],
+                            pack["run_spheres"], pack["run_vertex"], world,
+                            buf.get("shadow_visible", (n_inst,), np.bool_),
+                            buf.get("shadow_seen", (n_chunks,), np.bool_),
+                            buf.get("shadow_needed", (len(vchunk_inst),), np.bool_), *plan)
         return k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *plan)
 
     def _shadow_triangles(self, k):

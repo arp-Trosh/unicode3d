@@ -1453,7 +1453,8 @@ class RenderTests(unittest.TestCase):
         # A level as one big mesh (pillars on a floor, two textures, a colour per face), seen from inside it: the
         # runs of its faces out of view are left out, and the picture is the same to the bit as with none left
         # out (each run's sphere NaN, which culls nothing): with shadows (a sun and a lamp), a mirror and levels
-        # of detail, and after the render list gains an object (packed after the level).
+        # of detail, and after the render list gains an object (packed after the level). The shadow pass leaves out
+        # runs out of a light's view too.
         from unicode3d import renderer as renderer_module
         rng = np.random.default_rng(8)
         level = merge_meshes([block_mesh((2.0 * x, 1.0, 2.0 * z), (1.2, 2.0, 1.2)) for x in range(-12, 13)
@@ -1489,7 +1490,9 @@ class RenderTests(unittest.TestCase):
                             inst = renderer._instances(objects, camera)
                             k, *_ = renderer._transform(inst["pack"], inst, inst["double"], renderer.view_proj,
                                                         camera.position, camera.near, "test_")
-                            counts.append(k)
+                            # (the shadow pass's, through the camera's view standing in for a light's)
+                            k_shadow, *_ = renderer._shadow_transform(inst["pack"], inst, renderer.view_proj)
+                            counts.append((k, k_shadow))
             Renderer(1, 1).invalidate()
             return frames, counts
 
@@ -1498,8 +1501,10 @@ class RenderTests(unittest.TestCase):
         for a, b in zip(culled, every):
             for name in ("rgb", "alpha", "depth", "ids"):
                 np.testing.assert_array_equal(getattr(a, name), getattr(b, name))
-        self.assertTrue(all(a <= b for a, b in zip(fewer, counts)))
-        self.assertLess(sum(fewer), 0.7 * sum(counts))  # (triangles projected: most of the level is out of view)
+        for pass_ in range(2):  # (triangles projected, in the main pass and the shadow pass: most of the level is out
+            fewer_k, every_k = [c[pass_] for c in fewer], [c[pass_] for c in counts]  # of view)
+            self.assertTrue(all(a <= b for a, b in zip(fewer_k, every_k)))
+            self.assertLess(sum(fewer_k), 0.7 * sum(every_k))
         self.assertTrue(all(fb.drawn.mean() > 0.4 for fb in culled))  # (the level below the horizon)
 
     def test_supersampling_matches_plain_render(self):

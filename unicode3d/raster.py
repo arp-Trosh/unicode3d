@@ -831,6 +831,35 @@ def face_runs(vertices, faces, limit, least, most, starts):
     return n
 
 
+@njit(cache=True, error_model="numpy", inline="always")
+def _run_seen(view_proj, near, clip, lin, position, run_spheres, r):
+    """Whether run r of a mesh (see face_runs), placed by lin and position, is at least partly in view and on the
+    kept side of the plane `clip`. NaN culls nothing here: a run is drawn whenever its instance is, unless surely
+    out of view."""
+    sx, sy, sz = run_spheres[r, 0], run_spheres[r, 1], run_spheres[r, 2]
+    cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
+    cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
+    cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
+    radius = run_spheres[r, 3] * stretch(lin)
+    return not (_outside_view(view_proj, cx, cy, cz, radius, near)
+                or clip[0] * cx + clip[1] * cy + clip[2] * cz + clip[3] <= -radius)
+
+
+@njit(cache=True, error_model="numpy")
+def _mark_needed(seen, chunk_inst, chunk_run, run_vertex, inst_vchunk, needed):
+    """needed[j]: whether vertex chunk j is used by a seen face chunk (see transform()). Serial: chunks of one
+    instance share vertex chunks."""
+    for j in range(needed.shape[0]):
+        needed[j] = False
+    for c in range(chunk_inst.shape[0]):
+        if seen[c]:
+            inst, r = chunk_inst[c], chunk_run[c]
+            if run_vertex[r, 1] > run_vertex[r, 0]:
+                for j in range(inst_vchunk[inst] + run_vertex[r, 0] // VERTEX_CHUNK,
+                               inst_vchunk[inst] + (run_vertex[r, 1] - 1) // VERTEX_CHUNK + 1):
+                    needed[j] = True
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
 def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_double,
               inst_flip, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
@@ -874,27 +903,8 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         m = inst_mesh[inst]
         seen[c] = visible[inst]
         if visible[inst] and mesh_run[m + 1] - mesh_run[m] > 1:  # (one run: its sphere is the mesh's)
-            r = chunk_run[c]
-            lin = inst_lin[inst]
-            position = inst_pos[inst]
-            sx, sy, sz = run_spheres[r, 0], run_spheres[r, 1], run_spheres[r, 2]
-            cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
-            cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
-            cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
-            radius = run_spheres[r, 3] * stretch(lin)
-            # (NaN culls nothing here: a run is drawn whenever its instance is, unless surely out of view)
-            seen[c] = not (_outside_view(view_proj, cx, cy, cz, radius, near)
-                           or clip[0] * cx + clip[1] * cy + clip[2] * cz + clip[3] <= -radius)
-    # The vertex chunks the seen face chunks use (serially: chunks of one instance share vertex chunks).
-    for j in range(needed.shape[0]):
-        needed[j] = False
-    for c in range(chunk_inst.shape[0]):
-        if seen[c]:
-            inst, r = chunk_inst[c], chunk_run[c]
-            if run_vertex[r, 1] > run_vertex[r, 0]:
-                for j in range(inst_vchunk[inst] + run_vertex[r, 0] // VERTEX_CHUNK,
-                               inst_vchunk[inst] + (run_vertex[r, 1] - 1) // VERTEX_CHUNK + 1):
-                    needed[j] = True
+            seen[c] = _run_seen(view_proj, near, clip, inst_lin[inst], inst_pos[inst], run_spheres, chunk_run[c])
+    _mark_needed(seen, chunk_inst, chunk_run, run_vertex, inst_vchunk, needed)
     for j in prange(vchunk_inst.shape[0]):
         if not needed[j]:
             continue
@@ -1189,14 +1199,15 @@ def _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut):
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_vertex, view_proj, near,
-                    vchunk_inst, vchunk_first, vchunk_end, chunk_inst, chunk_first, chunk_end, world, visible, whole,
-                    cut, off_whole, off_cut):
+                    vchunk_inst, vchunk_first, vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first, chunk_end,
+                    mesh_run, run_spheres, run_vertex, world, visible, seen, needed, whole, cut, off_whole, off_cut):
     """transform() for a shadow map: the instances' vertices in the world and in the light's clip space (world
     columns 0:3 and 6:10; a shadow map has no use for normals, columns 3:6, which are left as they were), and the
     plan of where each chunk of faces writes its triangles, for project_depth() (or, through a view that culls
-    nothing, count_cube()). Every face is drawn whatever way it faces, and the only clipping is against the near
-    plane, as project_depth() does it: a face with every corner in front of it is one whole triangle, one with one
-    or two leaves one or two."""
+    nothing, count_cube()). Face chunks are the meshes' runs, left out when out of the light's view as in
+    transform() (seen, needed), with the vertex chunks only they use. Every face is drawn whatever way it faces,
+    and the only clipping is against the near plane, as project_depth() does it: a face with every corner in front
+    of it is one whole triangle, one with one or two leaves one or two."""
     for inst in prange(inst_mesh.shape[0]):
         m = inst_mesh[inst]
         lin = inst_lin[inst]
@@ -1206,10 +1217,17 @@ def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, 
         cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
         cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
         visible[inst] = not _outside_view(view_proj, cx, cy, cz, spheres[m, 3] * stretch(lin), near)
+    for c in prange(chunk_inst.shape[0]):
+        inst = chunk_inst[c]
+        m = inst_mesh[inst]
+        seen[c] = visible[inst]
+        if visible[inst] and mesh_run[m + 1] - mesh_run[m] > 1:  # (one run: its sphere is the mesh's)
+            seen[c] = _run_seen(view_proj, near, NO_CLIP, inst_lin[inst], inst_pos[inst], run_spheres, chunk_run[c])
+    _mark_needed(seen, chunk_inst, chunk_run, run_vertex, inst_vchunk, needed)
     for j in prange(vchunk_inst.shape[0]):
-        inst = vchunk_inst[j]
-        if not visible[inst]:
+        if not needed[j]:
             continue
+        inst = vchunk_inst[j]
         m = inst_mesh[inst]
         lin = inst_lin[inst]
         position = inst_pos[inst]
@@ -1223,7 +1241,7 @@ def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, 
     for c in prange(chunk_inst.shape[0]):
         inst = chunk_inst[c]
         n_whole = n_cut = 0
-        if visible[inst]:
+        if seen[c]:
             base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]
             for f in range(chunk_first[c], chunk_end[c]):
                 ahead = ((world[base + faces[f, 0], 9] > near) + (world[base + faces[f, 1], 9] > near)
