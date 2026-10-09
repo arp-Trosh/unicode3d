@@ -14,9 +14,13 @@ from .texture import sample_alpha, sample_level
 class FrameBuffer:
     """A rendered image, cell_pixels = (columns, rows) of pixels to each terminal cell.
 
-    rgb: linear-light colour premultiplied by coverage (0 where nothing was drawn).
-    alpha: how much of the pixel is covered, 0..1.
-    depth: 1/w of the nearest surface (larger is nearer, 0 is empty).
+    rgb: linear-light colour premultiplied by coverage (0 where nothing was drawn), float32.
+    alpha: how much of the pixel is covered, 0..1, float32.
+    depth: 1/w of the nearest surface (larger is nearer, 0 is empty), float64: an orthographic view is drawn from
+    far back (Camera.drawn_as), where depths differ in their eighth digit and beyond.
+
+    rgb and alpha are float32, half the memory of float64 (a big frame's passes are limited by memory traffic), and
+    far finer than the 8 bits a colour ends up as.
     ids: which object owns the pixel, as its index in the render list plus one (0 is empty).
     """
 
@@ -26,8 +30,8 @@ class FrameBuffer:
 
     def resize(self, width, height):
         self.width, self.height = width, height
-        self.rgb = np.zeros((height, width, 3))
-        self.alpha = np.zeros((height, width))
+        self.rgb = np.zeros((height, width, 3), np.float32)
+        self.alpha = np.zeros((height, width), np.float32)
         self.depth = np.zeros((height, width))
         self.ids = np.zeros((height, width), dtype=np.int32)
 

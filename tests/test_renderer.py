@@ -1191,8 +1191,8 @@ class RenderTests(unittest.TestCase):
         fb = renderer.render([mirror, *boxes], camera, flat).copy()
         # Each box's image is where it would be seen behind the glass: its mirror image in the plane.
         red, green = at(fb, (-1.0, 0.0, -1.5)), at(fb, (1.0, 0.0, -1.5))
-        self.assertTrue(red[0] > 0.1 and red[1] == 0.0)
-        self.assertTrue(green[1] > 0.1 and green[0] == 0.0)
+        self.assertTrue(red[0] > 0.1 and red[1] < 1e-6)  # (the frame's float32 rounding: not exactly 0)
+        self.assertTrue(green[1] > 0.1 and green[0] < 1e-6)
         in_mirror = fb.ids == 1
         self.assertTrue(in_mirror.any())
         seen = fb.colour()[in_mirror]

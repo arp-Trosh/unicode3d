@@ -91,7 +91,9 @@ def fog_args(fog):
     Renderer.fog: a Fog, or a number (depth cueing), or None."""
     if isinstance(fog, Fog):
         clear = fog.color is None
-        rgb = np.zeros(3) if clear else np.nan_to_num(np.asarray(to_linear_rgb(fog.color), np.float64))
+        rgb = np.asarray(to_linear_rgb(fog.color), np.float64) if not clear else np.zeros(3)
+        if not np.isfinite(rgb).all():  # (NaN as 0; infinities as 0 and 1: huge would be infinite in the float32 frame)
+            rgb = np.clip(np.nan_to_num(rgb), 0.0, 1.0)
         return 0.0, float(fog.start), max(float(fog.end), 1e-9), rgb, clear
     cue = float(fog or 0.0)
     return (cue if np.isfinite(cue) else 0.0), 0.0, 0.0, np.zeros(3), False
@@ -124,8 +126,8 @@ def background_args(background, camera, aspect, height):
         # A pixel at (nx, ny) in normalized device coordinates looks along forward + nx * right + ny * up (turned as
         # the scene's view is, also looking straight up or down).
         basis[:] = view_axes(camera.view_matrix(), np.radians(camera.fov), aspect)
-    if not np.isfinite(colors).all():  # (a NaN colour would reach the picture)
-        colors = np.nan_to_num(colors)
+    if not np.isfinite(colors).all():  # (a NaN colour would reach the picture; a huge one would be infinite in the
+        colors = np.clip(np.nan_to_num(colors), 0.0, 1.0)  # float32 frame)
     refs = ()
     if kind == SKYBOX:
         texels, levels, first = background.packed()

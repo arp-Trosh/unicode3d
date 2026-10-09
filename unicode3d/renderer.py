@@ -1212,7 +1212,7 @@ class Renderer(ShadowMaps, Mirrors):
                              *scene["textures"])
         if frame_samples is None:
             sums = buf.get(name + "_rgb", (m, 3)), buf.get(name + "_cover", (m,), np.int64)
-            frame = np.zeros((0, 3)), np.zeros(0)
+            frame = np.zeros((0, 3), np.float32), np.zeros(0, np.float32)
         else:
             sums = np.zeros((0, 3)), np.zeros(0, np.int64)
             frame = fb.rgb.reshape(-1, 3), fb.alpha.reshape(-1)

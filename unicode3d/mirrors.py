@@ -91,9 +91,11 @@ def _mix_mirror(target, pixels, rows, tris, sample_rgb, extra_rows, extra_tris, 
                     own_r, own_g, own_b = (own_r + extra_rgb[extra, s, 0], own_g + extra_rgb[extra, s, 1],
                                            own_b + extra_rgb[extra, s, 2])
         part = n / total
-        target[c, 0] += reflectivity * (part * seen[c, 0] - own_r / total)
-        target[c, 1] += reflectivity * (part * seen[c, 1] - own_g / total)
-        target[c, 2] += reflectivity * (part * seen[c, 2] - own_b / total)
+        # (At least 0: the frame's colours are float32, so taking the mirror's own share back out of them can leave
+        # a rounding error either way. max(0.0, NaN) is 0.0.)
+        target[c, 0] = max(0.0, target[c, 0] + reflectivity * (part * seen[c, 0] - own_r / total))
+        target[c, 1] = max(0.0, target[c, 1] + reflectivity * (part * seen[c, 1] - own_g / total))
+        target[c, 2] = max(0.0, target[c, 2] + reflectivity * (part * seen[c, 2] - own_b / total))
 
 
 class Mirrors:
@@ -176,8 +178,8 @@ class Mirrors:
             child = self._view(sub, view_proj, (mirror @ np.r_[eye, 1.0])[:3], scene["near"], np.r_[normal, d],
                                self._pass_shine(sub, level + 1), scene["shading"], prefix, axes)
             shown = pixels[on]
-            seen = (buf.get(prefix + "rgb_frame", (fb.width * fb.height, 3)),
-                    buf.get(prefix + "alpha_frame", (fb.width * fb.height,)),
+            seen = (buf.get(prefix + "rgb_frame", (fb.width * fb.height, 3), np.float32),  # (as the framebuffer's)
+                    buf.get(prefix + "alpha_frame", (fb.width * fb.height,), np.float32),
                     buf.get(prefix + "depth_frame", (fb.width * fb.height,)),
                     buf.get(prefix + "ids_frame", (fb.width * fb.height,), np.int32))
             if child is None:  # (else _gather_pass writes all of each pixel shown)
