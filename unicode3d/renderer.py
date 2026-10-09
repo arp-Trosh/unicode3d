@@ -15,7 +15,7 @@ import numpy as np
 
 from .background import SKYBOX_FACES, background_args, fill_background, fog_args
 from .color import cached_linear_rgb
-from .lights import LIGHT_COLUMNS, as_lights, light_rows
+from .lights import LIGHT_COLUMNS, PointLight, as_lights, light_rows
 from .mirrors import Mirrors
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEAST, RUN_MOST, SAMPLE_PATTERNS, SOLID,
                      VERTEX_CHUNK, FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
@@ -32,6 +32,7 @@ SHADINGS = ("cell", "pixel", "coarse")  # Renderer.shading
 EDGE_CONTRAST = 0.03  # linear-light spread among a pixel's first samples that marks it for more
 DETAIL_BUDGET = 0.003  # seconds a frame spent making levels of detail (see Renderer._detail)
 HAZE_TEXELS = 4       # how many texels across a sky box face fog fades into (see shading.post_effects)
+LIGHT_MARGIN = 1.01  # a PointLight counts as out of view where its range, times this, lies wholly outside it
 
 
 @dataclass
@@ -554,12 +555,12 @@ class Renderer(ShadowMaps, Mirrors):
         self._ortho = 0.0  # for an orthographic camera, how far behind it the eye it is drawn from is (Camera.drawn_as)
         self._buffers = _Buffers()
         self._shadows = None  # (what the shadow maps depend on, the maps as _shadow_maps() returns them)
-        self._settled = {}  # each shadowed light's map of its settled casters (shadows._Settled), by light
+        self._settled = {}  # each shadowed light's map of its settled casters (shadows._Settled), by the light's view
         self._caster_ages = None  # (shadows._Rows of the solid casters, shadow draws each has been unchanged for)
         self._caster_meshes = None  # (the pack's mesh keys, the id of each one's Mesh, the keys by those ids)
         self._shadow_draws = 0
         self._settled_draws = 0  # maps of settled casters drawn (shadows._Settled), for tests and benchmarks
-        self._view_fits = {}  # each view-fitted Light's map's (light, half-width, its region's centre), by light
+        self._view_fits = {}  # each view-fitted Light's map's (light, half-width, its region's centre), by its direction
         self._mesh_boxes = None  # (the pack, each mesh's box: middles and half-widths) for shadow_fit "view"
         self.resize(width, height)
 
@@ -994,6 +995,11 @@ class Renderer(ShadowMaps, Mirrors):
         # What fog fades into, behind a sky box: the sky blurred to about HAZE_TEXELS across a face.
         haze_lod = float(np.log2(max(levels[0, 1] / HAZE_TEXELS, 1.0)))
         self._haze = (int(kind), colors, basis, SKYBOX_FACES, texels, levels, first, haze_lod)
+        if inst is not None:
+            seen = self._lights_seen(inst, lights)
+            if len(seen) < len(lights):
+                lights = seen
+                self._light_rows = light_rows(lights, self.shadows)
         scene = self._geometry(inst, camera, lights) if inst is not None else None
         if scene is not None:
             self._shade_scene(scene)  # (which writes every pixel)
@@ -1107,6 +1113,20 @@ class Renderer(ShadowMaps, Mirrors):
               buf.get("layer_scratch", (len(pixels), 9)))
 
     # ----- geometry --------------------------------------------------------------------
+
+    def _lights_seen(self, inst, lights):
+        """The lights less the PointLights whose range lies wholly outside the camera's view (by LIGHT_MARGIN): they
+        light nothing seen, and would cost shading and shadow maps. All of them where mirrors show other views."""
+        if not any(isinstance(light, PointLight) for light in lights) or self._reflects(inst, 0):
+            return lights
+        m = self.view_proj
+        planes = np.array([m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1], m[3] + m[2], m[3] - m[2]])
+        planes /= np.linalg.norm(planes[:, :3], axis=1)[:, None]
+        # Out where the sphere is wholly behind one of the planes (never for NaN, which compares false).
+        return [light for light in lights
+                if not (isinstance(light, PointLight)
+                        and (planes[:, :3] @ np.asarray(light.position, float) + planes[:, 3]
+                             < -LIGHT_MARGIN * float(light.range)).any())]
 
     def _geometry(self, inst, camera, lights):
         """Every visible object's triangles in screen space, in one set of arrays in render-list order,

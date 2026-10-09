@@ -285,6 +285,7 @@ def _cube_views(position, reach, size):
 _EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform_depth() that culls nothing (w = 1, no sides)
 _NO_BASE = np.zeros((0, 0), np.float32)  # rasterize_depth's base when there is none
 SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins the settled ones (see _shadow_maps)
+KEEP_DRAWS = 30  # shadow draws a settled casters' map no light uses is kept for (a light left out for a while)
 
 
 _ROW_MIX = np.random.default_rng(1).integers(1, 2 ** 63, 17, dtype=np.uint64) * np.uint64(2) + np.uint64(1)  # odd
@@ -328,11 +329,11 @@ class _Settled:
     """A light's shadow map of its settled casters (base), the rows they were drawn from (a _Rows), what the map's
     view was then (key), their meshes' keys then (renderer._mesh_key, by id of the Mesh: replacing a mesh's arrays
     changes its key), the pack's list of keys they were last checked against (mesh_keys) and when it was made or last
-    looked over for casters newly settled (a shadow draw's number)."""
+    looked over for casters newly settled, and when a light last used it (shadow draws' numbers)."""
 
     def __init__(self, key, mesh_keys, meshes, rows, base, made):
         self.key, self.mesh_keys, self.meshes, self.rows = key, mesh_keys, meshes, rows
-        self.base, self.made = base, made
+        self.base, self.made, self.used = base, made, made
 
     def current(self, key, mesh_keys, meshes, found):
         """Whether it still holds: the same view, its meshes unchanged (mesh_keys: the pack's keys; meshes: by id of
@@ -368,7 +369,9 @@ class ShadowMaps:
         drawn, to the bit. The settled map is drawn again when one of them moves or goes, when one of their meshes
         has its arrays replaced, or when the light's view changes (a Light's box around everything grows or
         shifts), and at most once every SETTLE_DRAWS draws to take in casters that have settled since. See-through casters never join (what
-        they let through is multiplied in their order, and drawn each time).
+        they let through is multiplied in their order, and drawn each time). Settled maps are found by the light's
+        view (not its place among the lights, which games reorder, passing the nearest ones), and one no light uses
+        is kept for KEEP_DRAWS draws, at most as many such as there are lights.
         """
         shadowed = [light for light in lights if light.shadows and self.shadows]
         if not shadowed:
@@ -386,8 +389,12 @@ class ShadowMaps:
             if seen is not None:
                 centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
                 fits = [None if isinstance(light, PointLight) else
-                        self._fit_view(nth, np.asarray(light.direction, float), centres, radii, size, soft, seen)
-                        for nth, light in enumerate(shadowed)]
+                        self._fit_view(np.asarray(light.direction, float), centres, radii, size, soft, seen)
+                        for light in shadowed]
+                suns = {np.asarray(light.direction, float).tobytes() for light in shadowed
+                        if not isinstance(light, PointLight)}
+                for gone in [k for k in self._view_fits if k not in suns]:  # (a light's view fit, by direction)
+                    del self._view_fits[gone]
         # What the maps depend on: where the lights are (not how bright), what is in the scene, and where
         # view-fitted maps are.
         key = ([np.asarray(light.position, float).tobytes() + np.float64(light.range).tobytes()
@@ -446,7 +453,7 @@ class ShadowMaps:
         self._shadow_draws += 1
         settled = self._settled
         m = 0
-        for nth, (view_mats, view_rows, casters, near, region) in enumerate(views):
+        for view_mats, view_rows, casters, near, region in views:
             offset, n, sides, first = int(params[m, 1]), int(params[m, 2]), len(view_rows), m
             depth = texels[offset:offset + sides * n * n].reshape(sides * n, n)  # a cube's faces one above another
             m += sides
@@ -458,7 +465,7 @@ class ShadowMaps:
             view_key = (view_mats.tobytes(), n) if region is None else (region[0].tobytes(), region[1])
             at = (0, 0) if region is None else region[2:]
             here = casters[~clear[casters]]
-            entry = settled.get(nth)
+            entry = settled.get(view_key)
             found = None if entry is None else entry.rows.find(rows[here], hashes[here])
             stale = entry is None or not entry.current(view_key, mesh_keys, meshes, found)
             if not stale and self._shadow_draws - entry.made >= SETTLE_DRAWS:  # any newly settled to take in?
@@ -479,8 +486,11 @@ class ShadowMaps:
                     entry = _Settled(view_key, mesh_keys, used, _Rows(rows[still], hashes[still]), base,
                                      self._shadow_draws)
                     found = entry.rows.find(rows[here], hashes[here])
-                settled[nth] = entry
+                    settled[view_key] = entry
+                else:
+                    settled.pop(view_key, None)
             if entry is not None:
+                entry.used = self._shadow_draws
                 kept = np.zeros(len(rows), np.bool_)
                 kept[here[found >= 0]] = True
                 casters = casters[~kept[casters]]
@@ -491,6 +501,12 @@ class ShadowMaps:
                                   _NO_BASE if entry is None else entry.base, trans if clear[casters].any() else None,
                                   offset, at):
                 params[first:first + sides, 9] = 1
+        # Settled maps no light used this time: kept a while (the light may be back), the latest few.
+        unused = sorted((entry.used, view_key) for view_key, entry in settled.items()
+                        if entry.used < self._shadow_draws)
+        for n, (used, view_key) in enumerate(reversed(unused)):
+            if n >= len(views) or self._shadow_draws - used > KEEP_DRAWS:
+                del settled[view_key]
         shadows = (texels, trans, mats, params)
         self._shadows = (key, shadows)
         return shadows
@@ -560,7 +576,7 @@ class ShadowMaps:
             return None
         return _seen_region(self.view_proj, lo, hi)
 
-    def _fit_view(self, nth, direction, centres, radii, size, soft, seen):
+    def _fit_view(self, direction, centres, radii, size, soft, seen):
         """A Light's map fitted to what the camera can see (seen: _seen()'s corners), for shadow_fit "view": (world
         to its clip space (4, 4), its region's (4, 4), the region's size in texels, the map's column and row in it,
         a texel's width, depth per unit of distance along the light); None where it would be no smaller than the
@@ -586,10 +602,10 @@ class ShadowMaps:
         reach += (soft + 3.0) * texel + pixel * far * (max(self.cell_pixels) + 1.0)
         half = _box_half(reach)
         if not half < whole:  # (also NaN)
-            self._view_fits.pop(nth, None)
+            self._view_fits.pop(direction.tobytes(), None)
             return None
         light_key = (direction.tobytes(), size, lo[2], hi[2])
-        last = self._view_fits.get(nth)
+        last = self._view_fits.get(direction.tobytes())
         same = last is not None and last[0] == light_key
         if same and reach <= last[1] <= half * 2.0 ** (VIEW_SHRINK / 8):
             half = last[1]
@@ -601,7 +617,7 @@ class ShadowMaps:
             rx, ry = last[2], last[3]
         else:
             rx, ry = cx, cy
-        self._view_fits[nth] = (light_key, half, rx, ry)
+        self._view_fits[direction.tobytes()] = (light_key, half, rx, ry)
         z_lo, span = _depth_range(lo, hi, texel)
         region = size + extra
         column = min(max(int(round((cx - rx) / texel)) + extra // 2, 0), extra)

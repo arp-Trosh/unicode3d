@@ -821,6 +821,60 @@ class RenderTests(unittest.TestCase):
         finally:
             shadows.SETTLE_DRAWS = settle
 
+    def test_settled_casters_maps_follow_their_lights(self):
+        # Settled maps are found by the light's view, not its place in the list: lights passed in another order, or
+        # one left out for a while, draw no map of settled casters again. Maps no light uses go in time, so a
+        # moving light doesn't pile them up.
+        from unicode3d import shadows
+
+        box = make_box()
+        still = [Object3D(box, position=np.array([x, 0.0, z]), scale=0.4) for x in (-2.0, 0.0, 2.0) for z in (-1.0, 1.0)]
+        floor = Object3D(box, position=np.array([0.0, -0.6, 0.0]), scale=(8.0, 0.1, 6.0))
+        lamps = [PointLight(np.array([x, 1.5, 0.0]), range=5.0, shadows=True) for x in (-2.0, 0.0, 2.0)]
+        sun = Light(direction=np.array([-0.3, -1.0, -0.4]), shadows=True)
+        camera = Camera(position=np.array([0.0, 5.0, 6.0]))
+        renderer = Renderer(48, 24)
+        settle = shadows.SETTLE_DRAWS
+        try:
+            shadows.SETTLE_DRAWS = 3
+            for f in range(8):
+                walker = Object3D(box, position=np.array([np.sin(f / 3), 0.5, 0.0]), scale=0.2)  # always moving
+                renderer.render(still + [floor, walker], camera, [sun] + lamps)
+            draws = renderer._settled_draws
+            for f, order in enumerate(([lamps[2], lamps[0], sun, lamps[1]], lamps[1:], [sun, lamps[1]],
+                                       [lamps[1], lamps[2], sun, lamps[0]]), 8):
+                walker = Object3D(box, position=np.array([np.sin(f / 3), 0.5, 0.0]), scale=0.2)
+                fb = renderer.render(still + [floor, walker], camera, order)
+                whole = Renderer(48, 24)  # (every caster drawn)
+                np.testing.assert_array_equal(fb.rgb, whole.render(still + [floor, walker], camera, order).rgb)
+            self.assertEqual(renderer._settled_draws, draws)
+            for f in range(3 * shadows.KEEP_DRAWS):  # a lamp moving every frame, the others left out
+                lamp = PointLight(np.array([0.01 * f, 1.5, 0.0]), range=5.0, shadows=True)
+                renderer.render(still + [floor], camera, [sun, lamp])
+            self.assertLessEqual(len(renderer._settled), 4)
+        finally:
+            shadows.SETTLE_DRAWS = settle
+
+    def test_point_lights_out_of_view_are_left_out(self):
+        # A point light whose range lies wholly outside the view lights nothing seen: it is left out (no shadow
+        # maps, no shading), and the picture is the same as without it, to the bit. Where mirrors show other views
+        # it isn't. One whose range reaches into the view is kept.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (6.0, 0.1, 6.0)), color=(255, 255, 255))
+        box = Object3D(block_mesh((0.0, 0.5, 0.0), (0.6, 1.0, 0.6)), color=(255, 255, 255))
+        camera = Camera(position=np.array([0.0, 3.0, 4.0]), target=np.zeros(3))
+        sun = Light(direction=np.array([-0.3, -1.0, -0.4]), shadows=True)
+        behind = PointLight(np.array([0.0, 2.0, 12.0]), range=5.0, shadows=True)  # behind the camera
+        near = PointLight(np.array([0.0, 2.0, 8.5]), range=5.0, shadows=True)  # behind too, but reaching the box
+        renderer, plain = Renderer(40, 20), Renderer(40, 20)
+        fb = renderer.render([floor, box], camera, [behind, sun])
+        self.assertEqual(len(renderer._shadows[1][3]), 1)  # the sun's map only
+        np.testing.assert_array_equal(fb.rgb, plain.render([floor, box], camera, [sun]).rgb)
+        renderer.render([floor, box], camera, [near, sun])
+        self.assertEqual(len(renderer._shadows[1][3]), 7)
+        mirror = Object3D(flat_quad(3.0, 2.0), np.array([0.0, 1.0, -2.0]), color=(255, 255, 255), reflectivity=0.8)
+        renderer.render([floor, box, mirror], camera, [behind, sun])
+        self.assertEqual(len(renderer._shadows[1][3]), 7)
+
     def test_shadows(self):
         # A box above a floor, seen from straight above, lit from up and to the left: its shadow falls a
         # unit to the right of it, where the floor gets only the light's ambient light.
@@ -920,14 +974,14 @@ class RenderTests(unittest.TestCase):
                 frame(f, 0.0)
             texel, depths = frame(5, 0.0)
             self.assertTrue((depths > 0.0).all())  # (every point in the map, and on the floor)
-            draws, kept = renderer._settled_draws, renderer._settled[0]
+            draws, (kept,) = renderer._settled_draws, renderer._settled.values()
             for f, step in enumerate((0.3, 0.37, 0.71, 1.9), 6):  # under a texel and more, while in the region
                 t, moved = frame(f, 0.0 + step * 0.01 if step < 1 else step)
                 self.assertEqual(t, texel)
                 away = grid[:, 0] < 0.0  # (from the walker, which moves)
                 np.testing.assert_array_equal(moved[away], depths[away])
             self.assertEqual(renderer._settled_draws, draws)
-            self.assertIs(renderer._settled[0], kept)
+            self.assertEqual(list(renderer._settled.values()), [kept])
             # Far off: out of the region, which moves, and the settled casters are drawn into it again.
             frame(10, 40.0 * texel)
             self.assertEqual(renderer._settled_draws, draws)
