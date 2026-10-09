@@ -1012,21 +1012,22 @@ class Renderer(ShadowMaps, Mirrors):
         # Which solid triangles (cut-outs too) may touch each band of rows, for both rasterizing passes.
         scene["bands"] = self._bins(scene["xs"], scene["ys"], scene["see"], SOLID | CUT, fb.height, "")
         n = self.samples
+        keep = self._reflects(scene["inst"], 0)  # (each sample's colour, for mirrors to replace their share of)
         # The base samples give every pixel its colour, coverage, depth and id; edge samples then add to some.
         base = self._accumulate(scene, SAMPLE_PATTERNS[n], "base", depth=fb.depth.reshape(-1), ids=fb.ids.reshape(-1),
-                                frame_samples=0)
+                                frame_samples=0, keep=keep)
         layers = self._layers(scene, SAMPLE_PATTERNS[n], base["sample_depth"]) if (scene["see"] == 1).any() else None
         if self.edge_samples and n > 1:
             pixels = np.flatnonzero(base["more"])
             if len(pixels):
                 # A different pattern from the base one: the same one turned a quarter.
                 pattern = tuple((1.0 - y, x) for x, y in SAMPLE_PATTERNS[self.edge_samples])
-                extra = self._accumulate(scene, pattern, "edge", pixels, frame_samples=n)
+                extra = self._accumulate(scene, pattern, "edge", pixels, frame_samples=n, keep=keep)
                 rows = self._buffers.get("edge_rows", (fb.width * fb.height,), np.int64)
                 rows.fill(-1)
                 rows[pixels] = np.arange(len(pixels))
                 base["extra"] = (rows, extra["tris"], extra["sample_rgb"])  # for mirrors to replace them too
-        if self.reflections and self.mirror_bounces > 0:  # what mirrors show (the base samples drew every pixel)
+        if keep:  # what mirrors show (the base samples drew every pixel)
             every = self._buffers.arange(fb.width * fb.height)
             self._reflect(scene, base, every, every, fb.rgb.reshape(-1, 3), 0, 1.0)
         if layers is not None:
@@ -1177,12 +1178,13 @@ class Renderer(ShadowMaps, Mirrors):
 
     # ----- sampling and shading ---------------------------------------------------------
 
-    def _accumulate(self, scene, pattern, name, pixels=None, depth=None, ids=None, frame_samples=None):
+    def _accumulate(self, scene, pattern, name, pixels=None, depth=None, ids=None, frame_samples=None, keep=False):
         """Render every sample position in `pattern`, in all pixels or just the given flat pixel indices (in
         increasing order: see raster.rasterize_pixels).
 
         Returns _resolve()'s per-pixel outputs (rgb, cover, more) and, at each sample, its depth,
-        triangle and colour (sample_depth, tris, sample_rgb), in buffers named after `name`; the depth
+        triangle and colour (sample_depth, tris, sample_rgb; the colours only with `keep`, for mirrors, else
+        sample_rgb is empty), in buffers named after `name`; the depth
         and object id of each pixel's nearest sample go into `depth` and `ids` if given. With frame_samples, each
         pixel's colour and coverage go into the framebuffer instead of rgb and cover (left empty): averaged with
         the frame_samples samples already there (0: none), as resolve() does.
@@ -1216,14 +1218,14 @@ class Renderer(ShadowMaps, Mirrors):
             frame = fb.rgb.reshape(-1, 3), fb.alpha.reshape(-1)
         out = {"rgb": sums[0], "cover": sums[1],
                "more": buf.get(name + "_more", (m,), np.bool_), "sample_depth": sample_depth, "tris": tris,
-               "sample_rgb": buf.get(name + "_sample_rgb", (m, n, 3))}
+               "sample_rgb": buf.get(name + "_sample_rgb", (m, n, 3)) if keep else np.zeros((0, n, 3))}
         depth = buf.get("near_depth", (m,)) if depth is None else depth
         ids = buf.get("near_id", (m,), np.int32) if ids is None else ids
         args = (tris, sample_depth, pixels, fb.width, scene["xs"], scene["ys"], scene["inv_w"], scene["attrs"],
                 scene["tri_inst"], scene["ident"], scene["emissive"], scene["specular"], scene["shininess"],
                 scene["shine"], scene["chain"], scene["lod"], *scene["textures"], scene["lights"], *scene["shadows"],
-                scene["pixel_size"], scene["eye"], *scene["sky"], EDGE_CONTRAST, out["sample_rgb"],
-                buf.get(name + "_spec", (m, 3)), out["rgb"], out["cover"], depth, ids, out["more"], *frame,
+                scene["pixel_size"], scene["eye"], *scene["sky"], EDGE_CONTRAST, out["sample_rgb"], out["rgb"],
+                out["cover"], depth, ids, out["more"], *frame,
                 frame_samples or 0)
         cell_w, cell_h = (max(int(v), 1) for v in fb.cell_pixels)
         if whole and self._shading != "pixel" and cell_w * cell_h > 1:  # (blocks of the frame's own cells)

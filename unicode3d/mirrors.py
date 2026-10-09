@@ -106,6 +106,12 @@ class Mirrors:
         return ((inst["shine"] > 0.0) & (inst["alpha"] >= 1.0) & ~pack["clear"][inst["mesh"]]
                 & np.isfinite(pack["planes"][inst["mesh"], 0]))
 
+    def _reflects(self, inst, level):
+        """Whether a pass `level` mirrors deep (0: the frame itself) showing instances `inst` has mirrors to show
+        the scene in (see _reflect), which then need its samples' colours."""
+        return bool(self.reflections and level < min(int(self.mirror_bounces), MAX_BOUNCES)
+                    and self._mirrors(inst).any())
+
     def _pass_shine(self, inst, level):
         """Each instance's reflectivity of the background (see _shade) in a pass `level` mirrors deep (0: the
         frame itself): mirrors reflect the scene instead (their own pass) until mirror_bounces runs out,
@@ -181,7 +187,7 @@ class Mirrors:
                 child["bands"] = self._bins(child["xs"], child["ys"], child["see"], SOLID | CUT, fb.height, prefix,
                                             span)
                 pattern = SAMPLE_PATTERNS[self.samples]
-                image = self._accumulate(child, pattern, prefix + "pass", shown)
+                image = self._accumulate(child, pattern, prefix + "pass", shown, keep=self._reflects(sub, level + 1))
                 _gather_pass(shown, image["rgb"], image["cover"], buf.get("near_depth", (len(shown),)),
                              buf.get("near_id", (len(shown),), np.int32), n, *seen)
                 # As in the frame itself: mirrors in the reflection, then glass in front, then the background.

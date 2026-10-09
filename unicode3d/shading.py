@@ -35,6 +35,7 @@ _DECODE = _decode_exact(np.linspace(0.0, 1.0, DECODE_STEPS + 1))
 SPEC_CUTOFF = float(np.log(65536.0))
 # A shadow lookup this near fully dark or fully lit counts as that, for sharing a cell's lighting (resolve_cells).
 SHADOW_EDGE = 1e-9
+PIXEL_CHUNK = 64  # pixels resolve() shades as one piece of parallel work (sharing scratch space)
 
 
 @njit(cache=True, error_model="numpy", fastmath=MATH)
@@ -196,19 +197,19 @@ def _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, out, split, spec_out):
 
 
 @njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
-def _polish(c, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod,
-            sample_rgb, spec_rgb):
-    """A polished surface's sample (sample_rgb[c, s], with its highlight apart in spec_rgb[c]): part (gloss) the
+def _polish(row, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod,
+            sample_rgb, spec):
+    """A polished surface's sample (sample_rgb[row, s], with its highlight apart in spec (3,)): part (gloss) the
     background seen reflected in direction r, and its highlight on top."""
     sr, sg, sb = sky_colour(sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, rx, ry, rz)
     for k, reflected in ((0, sr), (1, sg), (2, sb)):
-        sample_rgb[c, s, k] = min(sample_rgb[c, s, k] * (1.0 - gloss) + gloss * reflected + spec_rgb[c, k], 1.0)
+        sample_rgb[row, s, k] = min(sample_rgb[row, s, k] * (1.0 - gloss) + gloss * reflected + spec[k], 1.0)
 
 
 @njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
-def _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover, near_depth, near_id,
-                 more, frame_rgb, frame_alpha, frame_samples):
-    """Pixel c's samples, shaded into sample_rgb[c], summed up as resolve() describes."""
+def _sum_samples(c, row, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover, near_depth,
+                 near_id, more, frame_rgb, frame_alpha, frame_samples):
+    """Pixel c's samples, shaded into sample_rgb[row], summed up as resolve() describes."""
     r = g = b = 0.0
     lr = lg = lb = np.inf
     hr = hg = hb = -np.inf
@@ -221,7 +222,7 @@ def _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rg
         mixed |= sid != first_id
         if depth[c, s] > best:
             best, best_id = depth[c, s], sid
-        vr, vg, vb = sample_rgb[c, s, 0], sample_rgb[c, s, 1], sample_rgb[c, s, 2]
+        vr, vg, vb = sample_rgb[row, s, 0], sample_rgb[row, s, 1], sample_rgb[row, s, 2]
         r, g, b = r + vr, g + vg, b + vb
         lr, lg, lb = min(lr, vr), min(lg, vg), min(lb, vb)
         hr, hg, hb = max(hr, vr), max(hg, vg), max(hb, vb)
@@ -243,7 +244,7 @@ def _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rg
 def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess, shine,
             chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
             pixel_size, eye, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first, sky_lod, contrast,
-            sample_rgb, spec_rgb, rgb, cover, near_depth, near_id, more, frame_rgb, frame_alpha, frame_samples):
+            sample_rgb, rgb, cover, near_depth, near_id, more, frame_rgb, frame_alpha, frame_samples):
     """Shade the rasterized samples and sum them up per pixel.
 
     Each pixel is shaded once per triangle covering it, at the pixel centre, like
@@ -254,7 +255,9 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
     samples were covered), the depth and object id of the nearest sample, and
     more: whether the samples disagree (some covered and some not, different
     objects, or colours further apart than `contrast`), so the pixel is worth more
-    samples. sample_rgb (M, S, 3) and spec_rgb (M, 3) are scratch space.
+    samples. sample_rgb (M, S, 3) gets each sample's colour, for mirrors (Renderer._reflect) to replace their share
+    of; given as (0, S, 3), it isn't kept (each pixel's are in scratch space of its own, as are highlights): most
+    frames have no mirror, and frame-sized colours cost memory traffic (96 bytes a pixel at 4 samples).
 
     With frame_rgb and frame_alpha (whole-frame, flat; empty for none), the pixel's colour (premultiplied) and
     coverage go there instead of rgb and cover: the average of its samples, or, where frame_samples of them are
@@ -265,34 +268,40 @@ def resolve(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, e
     them (sky and its colours etc.: background.sky_colour's arguments) into their colour.
     """
     m, n = tris.shape
-    for c in prange(m):
-        cx, cy = pixels[c] % width + 0.5, pixels[c] // width + 0.5
-        for s in range(n):
-            t = tris[c, s]
-            if t < 0:
-                sample_rgb[c, s, :] = 0.0
-                continue
-            prev = s
-            for s2 in range(s):
-                if tris[c, s2] == t:
-                    prev = s2
-                    break
-            if prev < s:
-                sample_rgb[c, s, :] = sample_rgb[c, prev, :]
-            else:
-                b0, b1, b2 = barycentric(xs, ys, t, cx, cy)
-                inst = tri_inst[t]
-                gloss = shine[inst]
-                kr, kg, kb, spec_r, spec_g, spec_b, _, rx, ry, rz, _ = _light(
-                    t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
-                    pixel_size, eye, emissive[inst], specular[inst], shininess[inst], 1.0)
-                r, g, b, _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first)
-                _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, sample_rgb[c, s], gloss > 0.0, spec_rgb[c])
-                if gloss > 0.0:  # polished: part the background reflected in it, and its highlight on top
-                    _polish(c, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first,
-                            sky_lod, sample_rgb, spec_rgb)
-        _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover, near_depth, near_id,
-                     more, frame_rgb, frame_alpha, frame_samples)
+    keep = sample_rgb.shape[0] > 0
+    for chunk in prange((m + PIXEL_CHUNK - 1) // PIXEL_CHUNK):
+        own = np.empty((0 if keep else 1, n, 3))  # (scratch: a pixel's samples, where they aren't kept)
+        spec = np.empty(3)
+        samples = sample_rgb if keep else own
+        for c in range(chunk * PIXEL_CHUNK, min(chunk * PIXEL_CHUNK + PIXEL_CHUNK, m)):
+            row = c if keep else 0
+            cx, cy = pixels[c] % width + 0.5, pixels[c] // width + 0.5
+            for s in range(n):
+                t = tris[c, s]
+                if t < 0:
+                    samples[row, s, :] = 0.0
+                    continue
+                prev = s
+                for s2 in range(s):
+                    if tris[c, s2] == t:
+                        prev = s2
+                        break
+                if prev < s:
+                    samples[row, s, :] = samples[row, prev, :]
+                else:
+                    b0, b1, b2 = barycentric(xs, ys, t, cx, cy)
+                    inst = tri_inst[t]
+                    gloss = shine[inst]
+                    kr, kg, kb, spec_r, spec_g, spec_b, _, rx, ry, rz, _ = _light(
+                        t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
+                        pixel_size, eye, emissive[inst], specular[inst], shininess[inst], 1.0)
+                    r, g, b, _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain, lod, texels, levels, first)
+                    _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, samples[row, s], gloss > 0.0, spec)
+                    if gloss > 0.0:  # polished: part the background reflected in it, and its highlight on top
+                        _polish(row, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels,
+                                sky_first, sky_lod, samples, spec)
+            _sum_samples(c, row, tris, depth, pixels, n, tri_inst, ident, contrast, samples, rgb, cover, near_depth,
+                         near_id, more, frame_rgb, frame_alpha, frame_samples)
 
 
 @njit(cache=True, error_model="numpy")
@@ -314,7 +323,7 @@ def _spread(n):
 def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, ident, emissive, specular, shininess,
                   shine, chain, lod, texels, levels, first, lights, shadow_texels, shadow_trans, shadow_mats,
                   shadow_params, pixel_size, eye, sky, sky_colors, sky_faces, sky_texels, sky_levels, sky_first,
-                  sky_lod, contrast, sample_rgb, spec_rgb, rgb, cover, near_depth, near_id, more, frame_rgb,
+                  sky_lod, contrast, sample_rgb, rgb, cover, near_depth, near_id, more, frame_rgb,
                   frame_alpha, frame_samples, cell_w, cell_h, coarse):
     """resolve() for a whole frame (pixels: every pixel, in order; tris has a row for each), shading less often than
     every pixel: in blocks of cell_w x cell_h pixels (a terminal cell's, whose pixels end up as two colours anyway),
@@ -339,8 +348,12 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
     span = 1.0 if coarse else np.sqrt(cell_w * cell_w + cell_h * cell_h) + 1.0  # (the block's diagonal, a pixel more)
     most = cell_w * cell_h * n  # the most different triangles a block can hold
     step = _spread(rows)
+    keep = sample_rgb.shape[0] > 0
     for turn in prange(rows):
         row = turn * step % rows
+        own = np.empty((0 if keep else 1, n, 3))  # (scratch: a pixel's samples, where they aren't kept; see resolve)
+        spec = np.empty(3)
+        samples = sample_rgb if keep else own
         # Each block's triangles: which, where they are (summed pixel centres, how many; then their mean), their
         # lighting (light levels, highlight, reflected view, whether shared: _light's), coarse, their surface colour,
         # and their texture's mip level (and its change along x and y).
@@ -400,10 +413,11 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     c = y * width + x
+                    at = c if keep else 0
                     for s in range(n):
                         t = tris[c, s]
                         if t < 0:
-                            sample_rgb[c, s, :] = 0.0
+                            samples[at, s, :] = 0.0
                             continue
                         prev = s
                         for s2 in range(s):
@@ -411,7 +425,7 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                                 prev = s2
                                 break
                         if prev < s:
-                            sample_rgb[c, s, :] = sample_rgb[c, prev, :]
+                            samples[at, s, :] = samples[at, prev, :]
                             continue
                         j = 0
                         while block_tris[j] != t:
@@ -432,11 +446,11 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                             r, g, b, _ = _surface_at(t, b0, b1, b2, inv_w, attrs, chain, texels, levels, first, level)
                         else:
                             r, g, b = block[j, 12], block[j, 13], block[j, 14]
-                        _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, sample_rgb[c, s], gloss > 0.0, spec_rgb[c])
+                        _lit(r, g, b, kr, kg, kb, spec_r, spec_g, spec_b, samples[at, s], gloss > 0.0, spec)
                         if gloss > 0.0:
-                            _polish(c, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels,
-                                    sky_first, sky_lod, sample_rgb, spec_rgb)
-                    _sum_samples(c, tris, depth, pixels, n, tri_inst, ident, contrast, sample_rgb, rgb, cover,
+                            _polish(at, s, gloss, rx, ry, rz, sky, sky_colors, sky_faces, sky_texels, sky_levels,
+                                    sky_first, sky_lod, samples, spec)
+                    _sum_samples(c, at, tris, depth, pixels, n, tri_inst, ident, contrast, samples, rgb, cover,
                                  near_depth, near_id, more, frame_rgb, frame_alpha, frame_samples)
 
 
