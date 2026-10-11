@@ -63,7 +63,8 @@ class Particles:
     Like an Object3D, a Particles has position, rotation, scale, visible and parent: particles live in its own
     space (the world's, by default), so a Particles with a parent moves with it. emissive, cast_shadows (False
     by default: a thousand sparks in the shadow maps cost more than they show), opacity (times each particle's),
-    color (times each particle's), specular, shininess and double_sided work as on an Object3D. pick() on a
+    color (times each particle's), specular, shininess, double_sided and outline work as on an Object3D (outline is
+    off by default: dark edges would ring every spark and give smoke a hard rim). pick() on a
     particle gives the Particles. Ray and overlap queries (Colliders) and union_bounds() leave Particles out.
 
     The live particles' arrays are open to programs moving them their own way: positions, velocities, ages and
@@ -76,7 +77,7 @@ class Particles:
 
     def __init__(self, mesh=None, face_camera=False, gravity=(0.0, 0.0, 0.0), drag=0.0, ground=None, bounce=0.3,
                  friction=0.6, limit=10000, emissive=0.0, cast_shadows=False, opacity=1.0, color=(255, 255, 255),
-                 specular=0.0, shininess=None, double_sided=False, seed=None, position=(0.0, 0.0, 0.0),
+                 specular=0.0, shininess=None, double_sided=False, outline=False, seed=None, position=(0.0, 0.0, 0.0),
                  rotation=None, scale=1.0, visible=True, parent=None):
         self.face_camera = bool(face_camera)
         self.mesh = mesh if mesh is not None else (DISK if self.face_camera else BALL)
@@ -84,6 +85,7 @@ class Particles:
         self.bounce, self.friction = bounce, friction
         self.emissive, self.cast_shadows, self.opacity, self.color = emissive, cast_shadows, opacity, color
         self.specular, self.shininess, self.double_sided = specular, shininess, double_sided
+        self.outline = outline
         self.position = np.array(position, dtype=float)
         self.rotation = quat_identity() if rotation is None else np.array(rotation, dtype=float)
         self.scale, self.visible, self.parent = scale, visible, parent

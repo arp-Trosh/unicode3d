@@ -570,6 +570,12 @@ def blend(pixels, rgb, alpha, depth, ids, layer_count, layer_depth, layer_tri, l
 
 
 @njit(cache=True, error_model="numpy")
+def _outlined(ident, outlined):
+    """Whether the object with id `ident` (a framebuffer's ids) has outlines (0, or beyond the table: no)."""
+    return 0 < ident < outlined.shape[0] and outlined[ident]
+
+
+@njit(cache=True, error_model="numpy")
 def _plane_depth(d, offset):
     """A depth (1/w) measured from the camera's plane rather than from the eye offset behind it: an orthographic
     view is drawn as a perspective one from far back (see Camera), and its depths count from the plane the camera
@@ -580,7 +586,7 @@ def _plane_depth(d, offset):
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear, tan_x, tan_y, offset, outline, sky,
+def post_effects(rgb, alpha, depth, ids, outlined, fog, fog_start, fog_end, fog_rgb, fog_clear, tan_x, tan_y, offset, outline, sky,
                  sky_colors, sky_basis, sky_faces, sky_texels, sky_levels, sky_first, haze_lod):
     """Outlines, then fog, applied in place to a framebuffer's arrays (see Renderer for both). Depths are measured
     from `offset` in front of the eye (see _plane_depth).
@@ -595,6 +601,10 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
     them), fog_clear fades surfaces instead into the sky box blurred (sampled at mip level haze_lod) in the
     direction they are seen in, and they keep their coverage: haze hides the sky's fine detail (stars, say),
     which would otherwise show through a fogged wall as if it were glass.
+
+    Outlines darken a pixel only where the nearer of the two neighbours across the edge (the one in front)
+    belongs to an object that is outlined (outlined[ids[...]]: by object id, False for Particles unless asked
+    for), so a spark in the air doesn't ring itself with dark pixels.
     """
     h, w = depth.shape
     if outline:
@@ -607,12 +617,15 @@ def post_effects(rgb, alpha, depth, fog, fog_start, fog_end, fog_rgb, fog_clear,
                 d = _plane_depth(depth[y, x], offset)
                 if alpha[y, x] <= 0:
                     continue
-                edge = (0 < y < h - 1 and alpha[y - 1, x] > 0 and alpha[y + 1, x] > 0
-                        and _plane_depth(depth[y - 1, x], offset) + _plane_depth(depth[y + 1, x], offset) - 2 * d
-                        > 0.08 * d)
-                edge = edge or (0 < x < w - 1 and alpha[y, x - 1] > 0 and alpha[y, x + 1] > 0
-                                and _plane_depth(depth[y, x - 1], offset) + _plane_depth(depth[y, x + 1], offset)
-                                - 2 * d > 0.08 * d)
+                edge = False
+                if 0 < y < h - 1 and alpha[y - 1, x] > 0 and alpha[y + 1, x] > 0:
+                    a, b = _plane_depth(depth[y - 1, x], offset), _plane_depth(depth[y + 1, x], offset)
+                    front = ids[y - 1, x] if a > b else ids[y + 1, x]
+                    edge = a + b - 2 * d > 0.08 * d and _outlined(front, outlined)
+                if not edge and 0 < x < w - 1 and alpha[y, x - 1] > 0 and alpha[y, x + 1] > 0:
+                    a, b = _plane_depth(depth[y, x - 1], offset), _plane_depth(depth[y, x + 1], offset)
+                    front = ids[y, x - 1] if a > b else ids[y, x + 1]
+                    edge = a + b - 2 * d > 0.08 * d and _outlined(front, outlined)
                 if edge:
                     rgb[y, x, :] *= 1.0 - outline
     if fog_end > 0.0:

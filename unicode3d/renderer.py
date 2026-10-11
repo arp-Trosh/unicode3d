@@ -75,7 +75,7 @@ def _same(a, b):
 
 _object_attrs = operator.attrgetter("mesh", "opacity", "color", "simplify", "double_sided", "emissive",
                                     "cast_shadows", "reflectivity", "specular", "shininess",
-                                    "billboard")  # (see _instances)
+                                    "billboard", "outline")  # (see _instances)
 
 
 def _numbers(values):
@@ -765,7 +765,7 @@ class Renderer(ShadowMaps, Mirrors):
             attrs = [attrs[k] for k in keep]
             nodes = [nodes[k] for k in keep]
             ident = np.array(candidates, np.int32)[keep] + 1
-        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard = zip(*attrs)
+        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined = zip(*attrs)
         if camera is not None and any(billboard):  # (turned to face the camera, keeping their sizes)
             right, up, forward = camera.basis()
             facing = np.flatnonzero(np.array(billboard, np.bool_))
@@ -808,8 +808,8 @@ class Renderer(ShadowMaps, Mirrors):
         swarms = [k for k, obj in enumerate(nodes) if type(obj) is Particles]
         if swarms:  # (each particle drawn as an instance of its Particles' mesh)
             per_object = [mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident,
-                          np.array(double, np.bool_), np.array(cast, np.bool_)]
-            mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast = \
+                          np.array(double, np.bool_), np.array(cast, np.bool_), np.array(outlined, np.bool_)]
+            mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast, outlined = \
                 self._particle_rows(nodes, swarms, per_object, camera)
             if not len(ident):
                 return None
@@ -825,6 +825,7 @@ class Renderer(ShadowMaps, Mirrors):
                 "shininess": np.maximum(shiny, 0.0),  # (None, each light's own, as 0)
                 "ident": ident,
                 "emissive": emissive, "cast": np.array(cast, np.bool_), "pack": arrays,
+                "outline": np.array(outlined, np.bool_),
                 "keys": keys, "mesh_keys": mesh_keys}
 
     def _particle_rows(self, nodes, swarms, per_object, camera):
@@ -965,7 +966,7 @@ class Renderer(ShadowMaps, Mirrors):
             return values, []
         values += [inst[k].tobytes()
                    for k in ("mesh", "pos", "lin", "rgb", "double", "ident", "emissive", "cast", "alpha",
-                             "shine", "specular", "shininess")]
+                             "shine", "specular", "shininess", "outline")]
         return values, inst["keys"]
 
     def render(self, objects, camera, lights):
@@ -1063,8 +1064,11 @@ class Renderer(ShadowMaps, Mirrors):
         if layers is not None:
             self._blend_layers(scene, layers, n)
         outline = float(self.outline) if math.isfinite(self.outline) else 0.0  # (NaN would darken edges into NaN)
-        post_effects(fb.rgb, fb.alpha, fb.depth, *fog_args(self.fog), *self._view_tan, float(self._ortho), outline,
-                     *self._haze)
+        inst = scene["inst"]
+        outlined = np.zeros(int(inst["ident"].max()) + 1, np.bool_)  # (by object id: whether its edges darken)
+        outlined[inst["ident"]] = inst["outline"]
+        post_effects(fb.rgb, fb.alpha, fb.depth, fb.ids, outlined, *fog_args(self.fog), *self._view_tan,
+                     float(self._ortho), outline, *self._haze)
 
     def _bins(self, xs, ys, select, want, height, prefix, span=None):
         """The triangles whose kind (select: 0 solid, 1 see-through, 2 cut-out) is among `want` (SOLID, CLEAR

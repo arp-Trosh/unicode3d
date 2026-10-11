@@ -33,6 +33,32 @@ class ParticlesTest(unittest.TestCase):
         np.testing.assert_allclose(got[1], want[1], atol=1e-9)
         self.assertEqual(set(np.unique(got[2])) - {0}, {1, 2})  # (every particle: the Particles' id)
 
+    def test_no_outlines_unless_asked_for(self):
+        # Outlines darken what is behind an object's edges; particles have none by default, nor objects with
+        # outline=False: the frame is as drawn with no outlines at all.
+        floor = Object3D(make_box(), np.array([0.0, -1.0, 0.0]), scale=(6.0, 0.2, 6.0), color=(200, 200, 200),
+                         outline=False)  # (its own edges outlined: not what is looked at)
+        swarm = Particles(make_box(), seed=1)
+        swarm.emit((0.0, -0.4, 0.0), 6, radius=0.5, size=0.3, angle=0.0, life=10.0)  # (in front of the floor)
+        box = Object3D(make_box(), np.array([1.0, -0.4, 0.5]), scale=0.4, outline=False)
+        objects = [floor, swarm, box]
+        plain = frame(objects, renderer=Renderer(60, 30, outline=0.0))[0]
+        np.testing.assert_array_equal(frame(objects)[0], plain)
+        swarm.outline = True
+        self.assertGreater((frame(objects)[0] != plain).any(axis=2).sum(), 10)
+        swarm.outline, box.outline = False, True
+        self.assertGreater((frame(objects)[0] != plain).any(axis=2).sum(), 10)
+        # A see-through puff seen from above against an outlined floor: the floor next to it is level with its
+        # neighbours on the far side (to rounding), which must not count as the edge's near side.
+        floor.outline = True
+        puff = Particles(blob_mesh((1.0, 1.0, 1.0), rings=5, segments=8), seed=1)
+        puff.emit((0.0, 0.6, 0.0), size=0.6, opacity=0.45, life=10.0)
+        above = Camera(position=np.array([0.0, 5.0, 3.0]), target=np.zeros(3))
+        flat = Object3D(make_box(), np.array([0.0, -0.5, 0.0]), scale=(6.0, 1.0, 6.0))
+        for size in ((60, 30), (120, 60)):
+            np.testing.assert_array_equal(frame([flat, puff], above, renderer=Renderer(*size))[0],
+                                          frame([flat, puff], above, renderer=Renderer(*size, outline=0.0))[0])
+
     def test_pick_gives_the_particles(self):
         swarm = Particles(seed=1)
         swarm.emit((0.0, 0.0, 0.0), 50, radius=0.5, size=0.3, life=10.0)

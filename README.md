@@ -575,7 +575,8 @@ renderer.render(objects + [sparks, smoke], camera, lights)
   triangle, so small meshes are best: 3,000 sparks of the default ball take about 5 ms to draw at
   180x50 cells.
 - **Like an object**, a `Particles` has `emissive`, `opacity` and `color` (times each particle's),
-  `specular`, `shininess`, `cast_shadows` (off by default), `visible`, and a pose and `parent`:
+  `specular`, `shininess`, `cast_shadows` and `outline` (both off by default: outlines would ring
+  every spark with dark pixels), `visible`, and a pose and `parent`:
   particles live in its own space, so a `Particles` with a parent moves with it (a torch's flame
   carried by a character). `pick()` on a particle gives the `Particles`; ray and overlap queries
   and `union_bounds()` leave particles out.
@@ -588,7 +589,8 @@ renderer.render(objects + [sparks, smoke], camera, lights)
 
 **Sprites.** `Object3D(..., billboard=True)` turns any object to face the camera wherever it is, its
 +z towards the camera and +y up the picture, keeping its size and place: a textured square for a
-sprite, a tree card, a marker over a unit.
+sprite, a tree card, a marker over a unit. Like any object it is outlined (see `Renderer`'s
+`outline`); `outline=False` on an object leaves its edges plain.
 
 </details>
 

@@ -190,6 +190,7 @@ class Object3D(_Placed):
                             # and thin plates laid on other parts, which it can sink behind them
     billboard: bool = False  # turned to face the camera wherever it is (its +z towards it, +y up the picture),
                              # keeping its size and place: a sprite (a textured square), a marker, a tree card
+    outline: bool = True  # whether what is behind its edges is darkened (Renderer.outline), setting it apart
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
