@@ -748,6 +748,14 @@ for 30 frames) are kept in a map of their own, which each frame starts from, so 
 drawn again (in Castle Panic, the board and its towers: shadows 6.0 to 2.7 ms a frame). At 180x50 cells, a shadowed sun over a few dice adds about 1.2 ms to a
 frame when something moves, and about 0.5 ms when nothing but the camera does. `shadow_softness`
 blurs edges further; they are always smoothed over at least a pixel on screen.
+
+Many lights: lights without shadows cost little (sixteen lamps add about 1.4 ms at 480x130). A
+shadowed `PointLight` costs what moves within its range: about 0.35 ms a frame for a lamp in a
+still corridor with someone walking by, about 1.8 ms for a torch with a crowd of fighters around
+it (the `benchmarks.genres` corridor and arena). A `PointLight` whose range is wholly out of view
+is left out, and a light that comes back finds its map of still things kept. To cap the cost, give
+`shadows=True` only to the few lights nearest the player and leave the rest unshadowed (their light
+still reaches everything in range).
 `renderer.shadows = False` switches all shadows off, as F5 does in the demos
 (`DisplayControls(renderer=...)`).
 
