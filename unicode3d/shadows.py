@@ -14,7 +14,7 @@ from numba import njit
 
 from .lights import PointLight
 from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, project_depth,
-                     rasterize_depth, rasterize_tint, transform_depth)
+                     rasterize_depth, rasterize_tint, stretch, transform_depth)
 from .transforms import look_at, normalize, perspective
 
 MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for the lookups shading makes: see shading.MATH)
@@ -161,11 +161,20 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
     return lit / total, min(tr / total, 1.0), min(tg / total, 1.0), min(tb / total, 1.0)
 
 
-def _world_spheres(spheres, linear, pos):
-    """Bounding spheres (centres (N, 3), radii (N,)) in the world of instances whose meshes have bounding
-    spheres `spheres` (N, 4: centre, radius), placed by `linear` (N, 3, 3) and positions (see raster.transform)."""
-    gram = np.abs(np.einsum("nki,nkj->nij", linear, linear)).sum(axis=2).max(axis=1)  # as raster.stretch
-    return np.einsum("nij,nj->ni", linear, spheres[:, :3]) + pos, spheres[:, 3] * np.sqrt(gram)
+@njit(cache=True, error_model="numpy")  # (serial: a few thousand instances take less than waking threads)
+def instance_bounds(spheres, middles, halves, inst_mesh, inst_lin, inst_pos, centres, radii, box_lo, box_hi):
+    """Each instance's bounding sphere in the world (centres (N, 3), radii (N,)), from its mesh's (spheres (M, 4):
+    centre, radius), and the box around its mesh's box (middles, halves (M, 3): its middle and half-widths) turned
+    and moved (box_lo, box_hi (N, 3)), placed by inst_lin (N, 3, 3) and inst_pos (see raster.transform)."""
+    for n in range(inst_mesh.shape[0]):
+        m, lin = inst_mesh[n], inst_lin[n]
+        for r in range(3):
+            centres[n, r] = lin[r, 0] * spheres[m, 0] + lin[r, 1] * spheres[m, 1] + lin[r, 2] * spheres[m, 2] + \
+                inst_pos[n, r]
+            middle = lin[r, 0] * middles[m, 0] + lin[r, 1] * middles[m, 1] + lin[r, 2] * middles[m, 2] + inst_pos[n, r]
+            reach = abs(lin[r, 0]) * halves[m, 0] + abs(lin[r, 1]) * halves[m, 1] + abs(lin[r, 2]) * halves[m, 2]
+            box_lo[n, r], box_hi[n, r] = middle - reach, middle + reach
+        radii[n] = spheres[m, 3] * stretch(lin)
 
 
 def _light_frame(direction, centres, radii):
@@ -385,9 +394,9 @@ class ShadowMaps:
         fits = [None] * len(shadowed)  # each Light's view-fitted map (see _fit_view), or None: fitted to the scene
         if self._shadow_fit == "view" and not (self.reflections and self.mirror_bounces > 0
                                               and self._mirrors(inst).any()):
-            seen = self._seen(inst)
+            centres, radii, box_lo, box_hi = self._bounds(inst)
+            seen = self._seen(box_lo, box_hi)
             if seen is not None:
-                centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
                 fits = [None if isinstance(light, PointLight) else
                         self._fit_view(np.asarray(light.direction, float), centres, radii, size, soft, seen)
                         for light in shadowed]
@@ -406,16 +415,17 @@ class ShadowMaps:
         if last is not None and last[0][0] == key[0] and last[0][1] is key[1]:
             return last[1]
         if centres is None:
-            centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
+            centres, radii, _, _ = self._bounds(inst)
         spheres = (centres, radii)
         cast = np.flatnonzero(inst["cast"])
+        cast_centres, cast_radii = centres[cast], radii[cast]
         # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters, a cube's near plane, and for
         # a view-fitted map, its region's (world to clip space (1, 4, 4), size, the map's column and row in it)).
         views = []
         for light, fit in zip(shadowed, fits):
             if isinstance(light, PointLight):
                 position, reach = np.asarray(light.position, float), float(light.range)
-                near_enough = cast[np.linalg.norm(centres[cast] - position, axis=1) - radii[cast] < reach]
+                near_enough = cast[np.linalg.norm(cast_centres - position, axis=1) - cast_radii < reach]
                 face_mats, texel, near = _cube_views(position, reach, cube_size)
                 views.append((face_mats, [(1, 0, cube_size, texel, 1.0, soft, *position, 0)] * 6, near_enough, near,
                               None))
@@ -519,7 +529,7 @@ class ShadowMaps:
         """Draw instances `casters` into one light's shadow map: depth (sides * n rows of n texels), over `base`
         (see rasterize_depth: its part from column base_at[0], row base_at[1]), and, given trans, what the
         see-through ones let through into it from `offset`; returns whether it did that. spheres is every instance's
-        bounding sphere (centres, radii; see _world_spheres)."""
+        bounding sphere (centres, radii; see instance_bounds)."""
         buf = self._buffers
         sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "pos", "rgb", "alpha")}
         if sides == 1:
@@ -559,10 +569,10 @@ class ShadowMaps:
                        chain, lod, *pack["textures"])
         return True
 
-    def _seen(self, inst):
-        """The corners (P, 3) of what the camera can see of the scene (see _seen_region), the box around every
-        instance (each one's mesh's box, turned and moved); None if nothing, or if that can't be told."""
-        pack = inst["pack"]
+    def _bounds(self, inst):
+        """Every instance's bounding sphere in the world and the box around it (see instance_bounds): (centres,
+        radii, box_lo, box_hi), in buffers kept from frame to frame."""
+        pack, buf, n = inst["pack"], self._buffers, len(inst["mesh"])
         memo = self._mesh_boxes
         if memo is None or memo[0] is not pack:  # each mesh's box in its own space, once per pack
             vertices, starts = pack["vertices"], pack["mesh_vertex"]
@@ -574,10 +584,15 @@ class ShadowMaps:
                 hi[some] = np.maximum.reduceat(vertices, starts[some], axis=0)
             memo = self._mesh_boxes = (pack, (lo + hi) / 2, (hi - lo) / 2)
         _, middles, halves = memo
-        lin, mesh = inst["lin"], inst["mesh"]
-        centres = np.einsum("nij,nj->ni", lin, middles[mesh]) + inst["pos"]
-        reach = np.einsum("nij,nj->ni", np.abs(lin), halves[mesh])
-        lo, hi = (centres - reach).min(axis=0), (centres + reach).max(axis=0)
+        bounds = (buf.get("shadow_centres", (n, 3)), buf.get("shadow_radii", (n,)), buf.get("shadow_box_lo", (n, 3)),
+                  buf.get("shadow_box_hi", (n, 3)))
+        instance_bounds(pack["spheres"], middles, halves, inst["mesh"], inst["lin"], inst["pos"], *bounds)
+        return bounds
+
+    def _seen(self, box_lo, box_hi):
+        """The corners (P, 3) of what the camera can see of the scene (see _seen_region), the box around every
+        instance (box_lo, box_hi: each one's, see _bounds); None if nothing, or if that can't be told."""
+        lo, hi = box_lo.min(axis=0), box_hi.max(axis=0)
         if not (np.isfinite(lo).all() and np.isfinite(hi).all()):
             return None
         return _seen_region(self.view_proj, lo, hi)
