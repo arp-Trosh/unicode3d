@@ -35,6 +35,7 @@ _DECODE = _decode_exact(np.linspace(0.0, 1.0, DECODE_STEPS + 1))
 SPEC_CUTOFF = float(np.log(65536.0))
 # A shadow lookup this near fully dark or fully lit counts as that, for sharing a cell's lighting (resolve_cells).
 SHADOW_EDGE = 1e-9
+ALL_LIGHTS = np.int64(-1)  # every light, as a mask of lights (see _light_levels)
 PIXEL_CHUNK = 64  # pixels resolve() shades as one piece of parallel work (sharing scratch space)
 
 
@@ -61,6 +62,30 @@ def _light(t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, sha
     Returns (the light levels decoded to linear light, r g b; the highlight, r g b, not clamped; how squarely the
     surface faces the eye (the cosine of the angle); the direction a view from the eye is reflected in, x y z;
     whether every shadow lookup came out fully lit or fully dark, untinted: 1.0, else 0.0)."""
+    (level_r, level_g, level_b, spec_r, spec_g, spec_b, facing, rx, ry, rz, edges, _, _, _, _, _, _) = _light_levels(
+        t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params, pixel_size, eye,
+        emissive, emissive, emissive, specular, shininess, span, ALL_LIGHTS)
+    kr = _decode(level_r)
+    kg = kr if level_g == level_r else _decode(level_g)
+    kb = kr if level_b == level_r else _decode(level_b)
+    return kr, kg, kb, spec_r, spec_g, spec_b, facing, rx, ry, rz, 1.0 if edges == 0 else 0.0
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _light_bit(i):
+    """Light i's bit in _light_levels' masks of lights (the 64th and any after it share the last)."""
+    return np.int64(1) << min(i, 63)
+
+
+@njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
+def _light_levels(t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
+                  pixel_size, eye, start_r, start_g, start_b, specular, shininess, span, only):
+    """_light's work before decoding: the light levels as perceived (r g b, not decoded) from the lights in `only` (a
+    mask of _light_bit()s; ALL_LIGHTS for every one), on top of `start`, and the rest of what _light returns, but in
+    place of its last, the mask of the lights whose shadow lookups came out neither fully lit nor fully dark, or
+    tinted (0 if none: their shadow edges may be near), then the levels (r g b, from `start`) and highlight (r g b)
+    of the other lights alone. Light levels add up light by light, so those can be passed on as `start` for the
+    lights in the mask."""
     # Perspective-correct interpolation of world position and normal.
     w0, w1, w2 = b0 * inv_w[t, 0], b1 * inv_w[t, 1], b2 * inv_w[t, 2]
     ws = w0 + w1 + w2
@@ -84,10 +109,14 @@ def _light(t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, sha
         ex = ey = ez = el = 0.0
     el = max(el, 1e-12)
     ex, ey, ez = ex / el, ey / el, ez / el
-    level_r = level_g = level_b = emissive
+    level_r, level_g, level_b = start_r, start_g, start_b
     spec_r = spec_g = spec_b = 0.0
-    uniform = 1.0
+    rest_r, rest_g, rest_b = start_r, start_g, start_b  # (the lights not in edges)
+    rest_spec_r = rest_spec_g = rest_spec_b = 0.0
+    edges = np.int64(0)
     for i in range(lights.shape[0]):
+        if not only & _light_bit(i):
+            continue
         light = lights[i]
         lx, ly, lz, fade = light[1], light[2], light[3], 1.0
         if light[0] != 0:  # a point light: towards it, fading out smoothly by its range
@@ -107,18 +136,21 @@ def _light(t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, sha
                                             pixel_size * el * (span - 1.0))
                 if not ((reach <= SHADOW_EDGE or reach >= 1.0 - SHADOW_EDGE) and tr == 1.0 and tg == 1.0
                         and tb == 1.0):
-                    uniform = 0.0  # (NaN too)
+                    edges |= _light_bit(i)  # (NaN too)
             else:
                 reach = 0.0
         if tr == 1.0 and tg == 1.0 and tb == 1.0:
             level = (light[10] + light[11] * max(ndl, 0.0) * reach) * fade
-            level_r, level_g, level_b = (level_r + light[4] * level, level_g + light[5] * level,
-                                         level_b + light[6] * level)
+            add_r, add_g, add_b = light[4] * level, light[5] * level, light[6] * level
         else:  # light through coloured glass: tinted, channel by channel
             lit = light[11] * max(ndl, 0.0) * reach
-            level_r += light[4] * (light[10] + lit * tr) * fade
-            level_g += light[5] * (light[10] + lit * tg) * fade
-            level_b += light[6] * (light[10] + lit * tb) * fade
+            add_r = light[4] * (light[10] + lit * tr) * fade
+            add_g = light[5] * (light[10] + lit * tg) * fade
+            add_b = light[6] * (light[10] + lit * tb) * fade
+        level_r, level_g, level_b = level_r + add_r, level_g + add_g, level_b + add_b
+        apart = not edges & _light_bit(i)
+        if apart:
+            rest_r, rest_g, rest_b = rest_r + add_r, rest_g + add_g, rest_b + add_b
         if light[12] > 0.0 and reach > 0.0 and specular > 0.0:
             hx, hy, hz = lx + ex, ly + ey, lz + ez
             hl = max(np.sqrt(hx * hx + hy * hy + hz * hz), 1e-12)
@@ -126,16 +158,15 @@ def _light(t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, sha
             nh = (nx * hx + ny * hy + nz * hz) / hl
             if nh > 0.0 and power * (1.0 - nh) < SPEC_CUTOFF:  # (else too faint to show, or NaN)
                 spec = light[12] * specular * nh ** power * fade * reach
-                spec_r, spec_g, spec_b = (spec_r + light[7] * spec * tr, spec_g + light[8] * spec * tg,
-                                          spec_b + light[9] * spec * tb)
+                add_r, add_g, add_b = light[7] * spec * tr, light[8] * spec * tg, light[9] * spec * tb
+                spec_r, spec_g, spec_b = spec_r + add_r, spec_g + add_g, spec_b + add_b
+                if apart:
+                    rest_spec_r, rest_spec_g, rest_spec_b = rest_spec_r + add_r, rest_spec_g + add_g, rest_spec_b + add_b
     # Light levels are perceived brightness (0.5 looks half as bright), as artists tune them, so they
-    # are decoded like any sRGB value; everything after this point works in linear light.
-    kr = _decode(level_r)
-    kg = kr if level_g == level_r else _decode(level_g)
-    kb = kr if level_b == level_r else _decode(level_b)
+    # are decoded like any sRGB value (by _light, once they are all added up); after that, linear light.
     ne = nx * ex + ny * ey + nz * ez  # the view reflected about the surface: 2 (n . e) n - e
-    return (kr, kg, kb, spec_r, spec_g, spec_b, abs(ne), 2 * ne * nx - ex, 2 * ne * ny - ey, 2 * ne * nz - ez,
-            uniform)
+    return (level_r, level_g, level_b, spec_r, spec_g, spec_b, abs(ne), 2 * ne * nx - ex, 2 * ne * ny - ey,
+            2 * ne * nz - ez, edges, rest_r, rest_g, rest_b, rest_spec_r, rest_spec_g, rest_spec_b)
 
 
 @njit(cache=True, error_model="numpy", fastmath=MATH, inline="always")
@@ -330,8 +361,9 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
     each triangle in a block is lit once (_light), at the mean of the centres of the block's pixels it covers.
 
     Where a shadow's edge may cross the block (a shadow lookup smoothed over the whole block comes out neither fully
-    lit nor fully dark, or tinted), the block's pixels are lit one by one, as resolve() lights them: shadows keep
-    their edges, and fully lit or fully dark blocks, the most, are lit once. The surface's colour and texture are
+    lit nor fully dark, or tinted), that light is worked out pixel by pixel, as resolve() does, on top of the
+    other lights' levels worked out once for the block: shadows keep their edges, and fully lit or fully dark
+    blocks, the most, are lit once. The surface's colour and texture are
     still worked out per pixel, at a texture mip level worked out once per block and triangle (at the same point,
     with how it changes along x and y, for each pixel's); with `coarse`, they too are once per block and triangle
     (cheaper, and coarser: texture detail inside a cell is lost), and shadow edges are not looked for.
@@ -354,11 +386,14 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
         own = np.empty((0 if keep else 1, n, 3))  # (scratch: a pixel's samples, where they aren't kept; see resolve)
         spec = np.empty(3)
         samples = sample_rgb if keep else own
-        # Each block's triangles: which, where they are (summed pixel centres, how many; then their mean), their
-        # lighting (light levels, highlight, reflected view, whether shared: _light's), coarse, their surface colour,
-        # and their texture's mip level (and its change along x and y).
+        # Each block's triangles: which, and in block's columns where they are (0-2: summed pixel centres, how many;
+        # then 0-1 their mean), their lighting (3-5 light levels, decoded; 6-8 highlight; 9-11 reflected view), 12-14
+        # coarse, their surface colour, 15-17 their texture's mip level (and its change along x and y), and where
+        # block_edges isn't 0, 18-20 the light levels of the lights not in it, not decoded (3-5 unused; 6-8 those
+        # lights' highlight alone).
         block_tris = np.empty(most, np.int64)
-        block = np.empty((most, 18))
+        block = np.empty((most, 21))
+        block_edges = np.empty(most, np.int64)  # the lights whose shadow edges may cross (see _light_levels)
         y0, y1 = row * cell_h, min(row * cell_h + cell_h, height)
         for col in range(cols):
             x0, x1 = col * cell_w, min(col * cell_w + cell_w, width)
@@ -391,10 +426,20 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                 t, inst = block_tris[j], tri_inst[block_tris[j]]
                 mx, my = block[j, 0] / block[j, 2], block[j, 1] / block[j, 2]
                 b0, b1, b2 = barycentric(xs, ys, t, mx, my)
-                (block[j, 3], block[j, 4], block[j, 5], block[j, 6], block[j, 7], block[j, 8], _, block[j, 9],
-                 block[j, 10], block[j, 11], block[j, 2]) = _light(
+                glow = emissive[inst]
+                (level_r, level_g, level_b, block[j, 6], block[j, 7], block[j, 8], _, block[j, 9], block[j, 10],
+                 block[j, 11], edges, rest_r, rest_g, rest_b, rest_spec_r, rest_spec_g, rest_spec_b) = _light_levels(
                     t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats, shadow_params,
-                    pixel_size, eye, emissive[inst], specular[inst], shininess[inst], span)
+                    pixel_size, eye, glow, glow, glow, specular[inst], shininess[inst], span, ALL_LIGHTS)
+                if edges != 0 and not coarse:  # the other lights' levels (not decoded) and highlight, to add to
+                    block[j, 18], block[j, 19], block[j, 20] = rest_r, rest_g, rest_b
+                    block[j, 6], block[j, 7], block[j, 8] = rest_spec_r, rest_spec_g, rest_spec_b
+                else:
+                    edges = 0
+                    block[j, 3] = _decode(level_r)
+                    block[j, 4] = block[j, 3] if level_g == level_r else _decode(level_g)
+                    block[j, 5] = block[j, 3] if level_b == level_r else _decode(level_b)
+                block_edges[j] = edges
                 # The texture's mip level here, and how it changes a pixel to the right and a pixel down, for each
                 # pixel's own (three texture_lod calls instead of one per pixel; within a level of 8-bit colour).
                 block[j, 0], block[j, 1] = mx, my
@@ -407,7 +452,6 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                     c0, c1, c2 = barycentric(xs, ys, t, mx, my + 1.0)
                     block[j, 17] = texture_lod(xs, ys, inv_w, attrs, t, c0, c1, c2, levels, first, chain[t]) - level
                 if coarse:
-                    block[j, 2] = 1.0
                     block[j, 12], block[j, 13], block[j, 14], _ = _surface(t, b0, b1, b2, xs, ys, inv_w, attrs, chain,
                                                                            lod, texels, levels, first)
             for y in range(y0, y1):
@@ -437,10 +481,17 @@ def resolve_cells(tris, depth, pixels, width, xs, ys, inv_w, attrs, tri_inst, id
                         rx, ry, rz = block[j, 9], block[j, 10], block[j, 11]
                         if not coarse:
                             b0, b1, b2 = barycentric(xs, ys, t, x + 0.5, y + 0.5)
-                            if block[j, 2] == 0.0:  # a shadow's edge may be here: lit at this pixel, as resolve() does
-                                kr, kg, kb, spec_r, spec_g, spec_b, _, rx, ry, rz, _ = _light(
+                            edges = block_edges[j]
+                            if edges != 0:  # a shadow's edge may be here: those lights at this pixel, as resolve() does
+                                (level_r, level_g, level_b, spec_r, spec_g, spec_b, _, rx, ry, rz, _, _, _, _, _, _,
+                                 _) = _light_levels(
                                     t, b0, b1, b2, inv_w, attrs, lights, shadow_texels, shadow_trans, shadow_mats,
-                                    shadow_params, pixel_size, eye, emissive[inst], specular[inst], shininess[inst], 1.0)
+                                    shadow_params, pixel_size, eye, block[j, 18], block[j, 19], block[j, 20],
+                                    specular[inst], shininess[inst], 1.0, edges)
+                                kr = _decode(level_r)
+                                kg = kr if level_g == level_r else _decode(level_g)
+                                kb = kr if level_b == level_r else _decode(level_b)
+                                spec_r, spec_g, spec_b = spec_r + block[j, 6], spec_g + block[j, 7], spec_b + block[j, 8]
                             level = block[j, 15] + block[j, 16] * (x + 0.5 - block[j, 0]) + block[j, 17] * (
                                 y + 0.5 - block[j, 1])
                             r, g, b, _ = _surface_at(t, b0, b1, b2, inv_w, attrs, chain, texels, levels, first, level)
