@@ -138,7 +138,7 @@ def shadow_lookup(texels, trans, mats, params, first, px, py, pz, nx, ny, nz, nd
                     tr, tg, tb = tr + wx * wy * r, tg + wx * wy * g, tb + wx * wy * b
         total = 4.0 * radius * radius
     else:
-        taps = 2 if radius <= SMALL_FILTER else 4  # bilinear samples either way
+        taps = 2 if radius <= SMALL_FILTER or (cube and widen > 0.0) else 4  # bilinear samples either way (a cell's widened cube lookup: 2)
         step = 2.0 * radius / taps
         for j in range(taps):
             sv = v + (j - 0.5 * (taps - 1)) * step
