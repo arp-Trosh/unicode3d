@@ -562,6 +562,7 @@ class Renderer(ShadowMaps, Mirrors):
         self._settled_draws = 0  # maps of settled casters drawn (shadows._Settled), for tests and benchmarks
         self._view_fits = {}  # each view-fitted Light's map's (light, half-width, its region's centre), by its direction
         self._mesh_boxes = None  # (the pack, each mesh's box: middles and half-widths) for shadow_fit "view"
+        self._shadow_works = None  # (the pack, renderer._work's plans for shadow maps' casters, by their meshes)
         self.resize(width, height)
 
     @property

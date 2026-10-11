@@ -14,7 +14,7 @@ from numba import njit
 
 from .lights import PointLight
 from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, project_depth,
-                     rasterize_depth, rasterize_tint, stretch, transform_depth)
+                     rasterize_depth, rasterize_tint, stretch, transform_depth, transform_world)
 from .transforms import look_at, normalize, perspective
 
 MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for the lookups shading makes: see shading.MATH)
@@ -291,7 +291,6 @@ def _cube_views(position, reach, size):
     return mats, 2.0 * tan_half / size, near
 
 
-_EVERYWHERE = np.diag([0.0, 0.0, 0.0, 1.0])  # a view for transform_depth() that culls nothing (w = 1, no sides)
 _NO_BASE = np.zeros((0, 0), np.float32)  # rasterize_depth's base when there is none
 SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins the settled ones (see _shadow_maps)
 KEEP_DRAWS = 30  # shadow draws a settled casters' map no light uses is kept for (a light left out for a while)
@@ -544,8 +543,11 @@ class ShadowMaps:
             tri_side.fill(0)
         else:
             # The casters' vertices in the world, then their triangles in each cube face they reach.
-            _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._shadow_transform(
-                pack, sub_inst, _EVERYWHERE)
+            inst_vertex, (vchunk_inst, vchunk_first, vchunk_end, _), (chunk_inst, _, chunk_first, chunk_end) = \
+                self._shadow_work(pack, sub_inst["mesh"])
+            world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
+            transform_world(pack["vertices"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["lin"], sub_inst["pos"],
+                            inst_vertex, vchunk_inst, vchunk_first, vchunk_end, world)
             centres, radii = spheres[0][casters], spheres[1][casters]
             counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
             count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
@@ -650,11 +652,10 @@ class ShadowMaps:
         """raster.transform_depth() of the instances `inst` (as Renderer._transform, without normals, back faces
         or a clipping plane; runs of faces out of the light's view left out as there): (triangle count, world,
         inst_vertex, the face chunks and their plan)."""
-        from .renderer import _work  # (renderer imports this module)
         buf = self._buffers
         n_inst = len(inst["mesh"])
         inst_vertex, (vchunk_inst, vchunk_first, vchunk_end, inst_vchunk), (chunk_inst, chunk_run, chunk_first,
-                                                                            chunk_end) = _work(pack, inst["mesh"])
+                                                                            chunk_end) = self._shadow_work(pack, inst["mesh"])
         n_chunks = len(chunk_inst)
         plan = [buf.get("shadow_" + name, (n_chunks,), np.int64) for name in ("whole", "cut", "off_whole", "off_cut")]
         world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
@@ -666,6 +667,19 @@ class ShadowMaps:
                             buf.get("shadow_seen", (n_chunks,), np.bool_),
                             buf.get("shadow_needed", (len(vchunk_inst),), np.bool_), *plan)
         return k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *plan)
+
+    def _shadow_work(self, pack, inst_mesh):
+        """renderer._work(pack, inst_mesh), kept while the pack is (a light's casters change little from one draw to
+        the next; their arrays are only read)."""
+        from .renderer import _work  # (renderer imports this module)
+        memo = self._shadow_works
+        if memo is None or memo[0] is not pack or len(memo[1]) > 64:
+            memo = self._shadow_works = (pack, {})
+        key = inst_mesh.tobytes()
+        work = memo[1].get(key)
+        if work is None:
+            work = memo[1][key] = _work(pack, inst_mesh)
+        return work
 
     def _shadow_triangles(self, k):
         """Buffers for k triangles of a shadow map: pixel coordinates (xs, ys), depth and surface (see

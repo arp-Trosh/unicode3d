@@ -1207,8 +1207,8 @@ def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, 
                     mesh_run, run_spheres, run_vertex, world, visible, seen, needed, whole, cut, off_whole, off_cut):
     """transform() for a shadow map: the instances' vertices in the world and in the light's clip space (world
     columns 0:3 and 6:10; a shadow map has no use for normals, columns 3:6, which are left as they were), and the
-    plan of where each chunk of faces writes its triangles, for project_depth() (or, through a view that culls
-    nothing, count_cube()). Face chunks are the meshes' runs, left out when out of the light's view as in
+    plan of where each chunk of faces writes its triangles, for project_depth() (a cube map takes transform_world()
+    instead). Face chunks are the meshes' runs, left out when out of the light's view as in
     transform() (seen, needed), with the vertex chunks only they use. Every face is drawn whatever way it faces,
     and the only clipping is against the near plane, as project_depth() does it: a face with every corner in front
     of it is one whole triangle, one with one or two leaves one or two."""
@@ -1256,6 +1256,23 @@ def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, 
                     n_cut += ahead  # (one corner in front leaves a triangle, two a quad: two)
         whole[c], cut[c] = n_whole, n_cut
     return _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut)
+
+
+@njit(cache=True, error_model="numpy", parallel=True)
+def transform_world(vertices, mesh_vertex, inst_mesh, inst_lin, inst_pos, inst_vertex, vchunk_inst, vchunk_first,
+                    vchunk_end, world):
+    """The instances' vertices in the world, into world columns 0:3 (as transform_depth(), for a cube map, which
+    projects them into its faces itself: count_cube(), project_cube()); every vertex chunk, in parallel."""
+    for j in prange(vchunk_inst.shape[0]):
+        inst = vchunk_inst[j]
+        m = inst_mesh[inst]
+        lin = inst_lin[inst]
+        position = inst_pos[inst]
+        v0, w0 = mesh_vertex[m], inst_vertex[inst]
+        for v in range(vchunk_first[j], vchunk_end[j]):
+            p, out = vertices[v0 + v], world[w0 + v]
+            for i in range(3):
+                out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
