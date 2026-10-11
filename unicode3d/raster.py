@@ -1329,14 +1329,33 @@ def _cube_face_corners(world, faces, f, base, mat, near, corners):
     return 0 if right == 3 or left == 3 or top == 3 or bottom == 3 else ahead
 
 
+@njit(cache=True, error_model="numpy", inline="always")
+def _sphere_beyond(mat, centres, radii, inst):
+    """Whether instance inst's bounding sphere (centres (N, 3), radii (N,)) lies wholly beyond a side of the cube
+    face whose view is `mat`, so that every triangle of it does too (False for NaN)."""
+    cx, cy, cz, r = centres[inst, 0], centres[inst, 1], centres[inst, 2], radii[inst]
+    for i in range(4):  # the sides w - x, w + x, w - y, w + y >= 0
+        sign, row = (-1.0 if i % 2 == 0 else 1.0), i // 2
+        a, b, c = mat[3, 0] + sign * mat[row, 0], mat[3, 1] + sign * mat[row, 1], mat[3, 2] + sign * mat[row, 2]
+        length = np.sqrt(a * a + b * b + c * c)
+        d = (a * cx + b * cy + c * cz + mat[3, 3] + sign * mat[row, 3]) / length
+        if d + r < -1e-6 * (abs(d) + r):
+            return True
+    return False
+
+
 @njit(cache=True, error_model="numpy", parallel=True)
 def count_cube(faces, mesh_vertex, inst_mesh, inst_vertex, world, mats, near, chunk_inst, chunk_first, chunk_end,
-               counts):
+               centres, radii, counts):
     """First pass of projecting faces into the six faces of a cube shadow map (see project_cube): how many
-    triangles each chunk of faces leaves in each cube face, into counts (chunks, 6)."""
+    triangles each chunk of faces leaves in each cube face, into counts (chunks, 6). centres and radii are the
+    instances' bounding spheres in the world: most reach only one cube face, and the others are skipped."""
     for i in prange(chunk_inst.shape[0] * 6):
         c, side = i // 6, i % 6
         inst = chunk_inst[c]
+        if _sphere_beyond(mats[side], centres, radii, inst):
+            counts[c, side] = 0
+            continue
         base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]
         corners = np.empty((3, 10))
         n = 0
@@ -1348,18 +1367,21 @@ def count_cube(faces, mesh_vertex, inst_mesh, inst_vertex, world, mats, near, ch
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def project_cube(faces, uvs, colors, face_chain, face_texels, face_kind, mesh_vertex, inst_mesh, inst_rgb, inst_alpha,
-                 inst_vertex, world, mats, near, size, chunk_inst, chunk_first, chunk_end, offsets, xs, ys, depth, surf,
-                 see, chain, lod, tri_side):
+                 inst_vertex, world, mats, near, size, chunk_inst, chunk_first, chunk_end, centres, radii, offsets, xs, ys,
+                 depth, surf, see, chain, lod, tri_side):
     """The faces as screen triangles in a cube shadow map: its six faces (+x, -x, +y, -y, +z, -z, each
     size x size texels) stacked one above the other in one tall map, a triangle for each cube face it
     may show in, clipped against that face's near plane and carrying 1/w as its depth (see
     project_depth, as are surf, see, chain and lod, and triangles covering no texel). World positions come
     from transform(); chunk c writes its triangles in cube face `side` from row offsets[c, side] (count_cube()'s counts, summed
-    up), and tri_side[k] is triangle k's cube face, which rasterize_depth() keeps it inside.
+    up; centres and radii as there), and tri_side[k] is triangle k's cube face, which rasterize_depth() keeps it
+    inside.
     """
     for i in prange(chunk_inst.shape[0] * 6):
         c, side = i // 6, i % 6
         inst = chunk_inst[c]
+        if _sphere_beyond(mats[side], centres, radii, inst):
+            continue
         base = inst_vertex[inst] - mesh_vertex[inst_mesh[inst]]
         corners = np.empty((3, 10))
         poly = np.empty((4, 10))

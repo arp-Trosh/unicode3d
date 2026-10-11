@@ -407,6 +407,7 @@ class ShadowMaps:
             return last[1]
         if centres is None:
             centres, radii = _world_spheres(pack["spheres"][inst["mesh"]], inst["lin"], inst["pos"])
+        spheres = (centres, radii)
         cast = np.flatnonzero(inst["cast"])
         # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters, a cube's near plane, and for
         # a view-fitted map, its region's (world to clip space (1, 4, 4), size, the map's column and row in it)).
@@ -476,11 +477,13 @@ class ShadowMaps:
                 still = here[age[here] >= SETTLE_DRAWS]
                 if len(still):  # draw the settled casters' map afresh
                     if region is None:
-                        self._draw_casters(pack, inst, still, view_mats, near, n, sides, depth, _NO_BASE, None, offset)
+                        self._draw_casters(pack, inst, still, view_mats, near, n, sides, depth, _NO_BASE, None, offset,
+                                           spheres)
                         base = depth.copy()
                     else:
                         base = np.empty((region[1], region[1]), np.float32)
-                        self._draw_casters(pack, inst, still, region[0], near, region[1], 1, base, _NO_BASE, None, 0)
+                        self._draw_casters(pack, inst, still, region[0], near, region[1], 1, base, _NO_BASE, None, 0,
+                                           spheres)
                     self._settled_draws += 1
                     used = {id(mesh_keys[i][0]): mesh_keys[i] for i in np.unique(inst["mesh"][still]).tolist()}
                     entry = _Settled(view_key, mesh_keys, used, _Rows(rows[still], hashes[still]), base,
@@ -499,7 +502,7 @@ class ShadowMaps:
                     continue
             if self._draw_casters(pack, inst, casters, view_mats, near, n, sides, depth,
                                   _NO_BASE if entry is None else entry.base, trans if clear[casters].any() else None,
-                                  offset, at):
+                                  offset, spheres, at):
                 params[first:first + sides, 9] = 1
         # Settled maps no light used this time: kept a while (the light may be back), the latest few.
         unused = sorted((entry.used, view_key) for view_key, entry in settled.items()
@@ -511,10 +514,12 @@ class ShadowMaps:
         self._shadows = (key, shadows)
         return shadows
 
-    def _draw_casters(self, pack, inst, casters, view_mats, near, n, sides, depth, base, trans, offset, base_at=(0, 0)):
+    def _draw_casters(self, pack, inst, casters, view_mats, near, n, sides, depth, base, trans, offset, spheres,
+                      base_at=(0, 0)):
         """Draw instances `casters` into one light's shadow map: depth (sides * n rows of n texels), over `base`
         (see rasterize_depth: its part from column base_at[0], row base_at[1]), and, given trans, what the
-        see-through ones let through into it from `offset`; returns whether it did that."""
+        see-through ones let through into it from `offset`; returns whether it did that. spheres is every instance's
+        bounding sphere (centres, radii; see _world_spheres)."""
         buf = self._buffers
         sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "pos", "rgb", "alpha")}
         if sides == 1:
@@ -531,9 +536,10 @@ class ShadowMaps:
             # The casters' vertices in the world, then their triangles in each cube face they reach.
             _, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, *_) = self._shadow_transform(
                 pack, sub_inst, _EVERYWHERE)
+            centres, radii = spheres[0][casters], spheres[1][casters]
             counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
             count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
-                       chunk_inst, chunk_first, chunk_end, counts)
+                       chunk_inst, chunk_first, chunk_end, centres, radii, counts)
             offsets = np.zeros(counts.shape, np.int64)
             offsets.reshape(-1)[1:] = np.cumsum(counts)[:-1]
             k = int(counts.sum())
@@ -542,7 +548,7 @@ class ShadowMaps:
             project_cube(pack["faces"], pack["uvs"], pack["colors"], pack["face_chain"], pack["face_texels"],
                          pack["face_kind"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["rgb"],
                          sub_inst["alpha"], inst_vertex, world, view_mats, near, n, chunk_inst, chunk_first,
-                         chunk_end, offsets, xs, ys, dep, surf, see, chain, lod, tri_side)
+                         chunk_end, centres, radii, offsets, xs, ys, dep, surf, see, chain, lod, tri_side)
         band_start, band_tris = self._bins(xs, ys, see, SOLID | CUT, sides * n, "shadow_")
         rasterize_depth(depth, base, int(base_at[0]), int(base_at[1]), xs, ys, dep, tri_side, n, band_start, band_tris,
                         see, surf, chain, lod, *pack["textures"])

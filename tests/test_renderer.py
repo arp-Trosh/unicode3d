@@ -1049,6 +1049,28 @@ class RenderTests(unittest.TestCase):
         for x, z in ((1.8, 1.8), (-1.8, 1.8), (1.8, -1.8), (-1.8, -1.8), (3.0, 3.0), (0.5, 0.3)):
             self.assertAlmostEqual(at(fb, x, z), at(plain, x, z), places=9)
 
+    def test_point_light_shadows_across_cube_faces(self):
+        # Boxes whose middles are in the lamp's +x (-x) cube face and a corner in the +z (-z) one, past the diagonal
+        # where the faces meet. Cube faces a caster's bounding sphere doesn't reach are skipped, but these reach
+        # both: the corner's shadow is there too, unbroken across the seam.
+        floor = Object3D(block_mesh((0.0, -0.05, 0.0), (16.0, 0.1, 16.0)), color=(255, 255, 255))
+        boxes = [Object3D(block_mesh((x, 0.3, z), (1.0, 0.6, 1.0)), color=(255, 255, 255))
+                 for x, z in ((1.3, 1.0), (-1.3, -1.0))]
+        camera = Camera(position=np.array([0.0, 12.0, 0.0]), target=np.zeros(3), up=np.array([0.0, 0.0, -1.0]))
+        renderer = Renderer(80, 40, fog=0, outline=0, shading="pixel")
+        lamp = PointLight(np.array([0.0, 0.6, 0.0]), diffuse=1.0, specular=0.0, range=12.0, shadows=True)
+        fb = renderer.render([floor, *boxes], camera, lamp)
+
+        def at(x, z):
+            cx, cy = renderer.project((x, 0.0, z))
+            return lum(fb)[int(cy * 2), int(cx)]
+
+        for s in (1.0, -1.0):
+            for x, z in ((1.4, 2.2), (2.4, 2.0), (3.0, 1.5)):  # behind the corner, and behind the middle
+                self.assertEqual(at(s * x, s * z), 0.0)
+            for x, z in ((1.0, 2.5), (2.0, -2.0)):  # beside them, lit
+                self.assertGreater(at(s * x, s * z), 0.02)
+
     def test_transparency(self):
         # A red wall, and in front of it see-through panes and a glass box, lit evenly (no highlights).
         wall = Object3D(block_mesh((0.0, 0.0, -1.0), (8.0, 6.0, 0.1)), color=(255, 0, 0))
