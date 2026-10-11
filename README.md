@@ -42,7 +42,7 @@ Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it.
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.20.0
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.20.1
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
@@ -226,7 +226,10 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   A colour is sent only when it changes, and in truecolor a cell whose colours moved by a single
   level is left for a moment (`color_tolerance`), which halves the output for busy scenes.
   Under `run()`, a frame is sent from a thread of its own while the next one is drawn, so a
-  terminal slow to take in big frames costs less frame rate.
+  terminal slow to take in big frames costs less frame rate. It adds no delay between a key and the
+  frame that shows it while the terminal takes frames in faster than they are drawn (kitty does by
+  far, even at a tiny font); a terminal slower than that holds the frame with the key behind the one
+  being sent (`python -m benchmarks.latency` measures it).
   There is no curses: on Windows the console is put in VT mode, and keys and mouse clicks are read
   as console input records.
 - **Speed:** the per-pixel work (projecting and clipping triangles, rasterizing, shading, fog and
@@ -1290,6 +1293,9 @@ For work on the engine itself (see also `CLAUDE.md`):
 - `python -m benchmarks.bench`: frame times by stage (see [Performance](#performance)).
 - `python -m benchmarks.stress`: a few minutes of random walking, resizing and extreme cameras,
   before a release.
+- `python -m benchmarks.latency`: the time from a key to the end of the frame showing it, under
+  `run()` in a pseudo-terminal (Unix), with `--rate` for a slower terminal and `--sync` to compare
+  with writing from the drawing thread.
 - `python -m unicode3d.precompile --update`: after changing a kernel's arguments or adding one, so
   that the first run still compiles it in parallel (a test says when it is needed).
 - `python -m docs.make_figures`: redraws the pictures in the article and this README's gallery, after
@@ -1304,7 +1310,7 @@ Releases are git tags (`v0.1.0`, ...) following [semantic versioning](https://se
 release (`0.1.1`) fixes bugs, a minor release (`0.2.0`) adds features, and before 1.0 a minor release
 may also change the API. `unicode3d.__version__` holds the version. The `main` branch can be ahead
 of the latest tag; pin a tag in a game. To release: bump `__version__` in `unicode3d/__init__.py`,
-commit, then tag it and push the tag (`git tag v0.20.0 && git push --tags`).
+commit, then tag it and push the tag (`git tag v0.20.1 && git push --tags`).
 
 </details>
 
