@@ -39,7 +39,7 @@ from .background import Sky
 from .mesh import Mesh, make_box
 from .pictures import cells_picture
 from .queries import Colliders
-from .scene import Camera, Light, Object3D, Particles, PointLight, Renderer, union_bounds
+from .scene import Camera, Light, Lines, Object3D, Particles, PointLight, Renderer, union_bounds
 
 __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
            "frame_to_text", "crash_log_path"]
@@ -537,8 +537,10 @@ def compile_kernels():
     facing = Particles(face_camera=True)
     facing.emit((0.0, 0.0, 0.0), 4, radius=0.5)
     card = Object3D(mirror, scale=0.2, billboard=True)
-    screen.draw_frame(renderer.render(objects + [sparks, facing, card], Camera(position=np.array([0.0, 0.0, 6.0])),
-                                      lights))
+    lines = Lines([(-1.0, -1.0, 2.0), (1.0, 0.0, 0.0)], [(1.0, 1.0, -30.0), (1.0, 1.0, 0.0)], width=0.02,
+                  units="world", colors=[(255, 0, 0), (0, 255, 0)])  # lines (one in tapered pieces)
+    screen.draw_frame(renderer.render(objects + [sparks, facing, card, lines],
+                                      Camera(position=np.array([0.0, 0.0, 6.0])), lights))
     objects[1].position = np.array([1.0, 0.5, 0.0])  # without the mirrors (the sun's map fitted to the view), and
     screen.draw_frame(renderer.render(objects[:-2], Camera(), lights))  # something moved (casters looked up)
     screen.render_updates()

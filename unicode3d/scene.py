@@ -15,11 +15,12 @@ from .color import linear_to_srgb, srgb_to_linear, to_linear_rgb
 from .mesh import Mesh, _srgb01
 from .shapes import merge_meshes
 from .texture import alpha_kind
+from .lines import Lines
 from .particles import Particles
 from .renderer import Anchor, Pick, Renderer
 from .transforms import look_at, quat_from_matrix, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
-__all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Particles", "Pick", "PointLight", "Renderer", "union_bounds"]
+__all__ = ["Anchor", "Camera", "Light", "Lines", "Model", "Node", "Object3D", "Particles", "Pick", "PointLight", "Renderer", "union_bounds"]
 
 
 ORTHO_BACK = 1e5  # how far back, in view sizes, the eye an orthographic view is drawn from sits (see Camera)
@@ -394,9 +395,9 @@ class Model:
 
 def union_bounds(objects):
     """The corners (low (3,), high (3,)) of the box around several objects (Object3Ds or Models) as they stand in
-    the world; None if there is nothing to box. Particles are left out."""
+    the world; None if there is nothing to box. Particles and Lines are left out."""
     parts = [part for obj in objects for part in ([obj] if hasattr(obj, "mesh") else obj)]
-    parts = [part for part in parts if type(part) is not Particles and len(_finite_vertices(part.mesh))]
+    parts = [part for part in parts if type(part) not in (Particles, Lines) and len(_finite_vertices(part.mesh))]
     if not parts:
         return None
     rows, linear, position, _ = scene_poses(parts)  # (each shared parent once)

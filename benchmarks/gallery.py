@@ -25,7 +25,7 @@ cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor r
 world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
 floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; after 0.7.1, the
 courtyard through an orthographic camera; after 0.17.0, sun shadows fitted to the view in a big field; and,
-after 0.20.1, particles and a billboard sprite.
+after 0.20.1, particles and a billboard sprite, and lines.
 """
 import argparse
 import os
@@ -587,6 +587,34 @@ def particles():
     return Shot(objects, camera((1.0, 3.0, 6.5), (0.3, 1.2, 0.0)), sun, {"background": Sky()})
 
 
+def lines():
+    """Lines (added after 0.20.1): a floor grid 1 pixel wide running off to the horizon, axes 2 pixels wide, a wire
+    box (its edges partly behind a solid box, partly in front), a laser beam in world units (thinner further off),
+    and a path in steps of changing colour, all unshaded, with a lit box among them and its sun shadow."""
+    from unicode3d.scene import Lines
+    reach = np.arange(-30.0, 31.0)
+    edge = np.full(len(reach), 30.0)
+    zero = np.zeros(len(reach))
+    grid = Lines(np.r_[np.c_[reach, zero, -edge], np.c_[-edge, zero, reach]],
+                 np.r_[np.c_[reach, zero, edge], np.c_[edge, zero, reach]], color=(80, 95, 110))
+    axes = Lines(np.zeros((3, 3)), 1.5 * np.eye(3), colors=[(255, 70, 70), (70, 255, 70), (90, 130, 255)], width=2)
+    corners = np.array([(x, y, z) for x in (-0.7, 0.7) for y in (0.0, 1.4) for z in (-0.7, 0.7)])
+    pairs = [(a, b) for a in range(8) for b in range(a + 1, 8)
+             if np.isclose(np.abs(corners[a] - corners[b]).sum(), 1.4)]
+    wire = Lines(corners[[a for a, _ in pairs]], corners[[b for _, b in pairs]], width=2, color=(255, 210, 90),
+                 position=(1.8, 0.0, -0.4))
+    beam = Lines([(-3.0, 1.2, 2.0)], [(4.0, 0.6, -12.0)], width=0.06, units="world", color=(255, 60, 170))
+    t = np.linspace(0.0, 1.0, 25)
+    path = np.c_[-2.5 + 3.0 * t, 0.02 + 0.6 * np.sin(np.pi * t), 1.5 - 4.0 * t]
+    hue = (np.c_[255 * (1 - t), 120 + 100 * t, 255 * t]).astype(int)
+    trail = Lines(path[:-1], path[1:], colors=hue[:-1], width=3)
+    box = Object3D(make_box(), np.array([1.8, 0.5, -0.4]), color=(170, 140, 100))
+    objects = [Object3D(floor(30.0), np.array([0.0, -0.01, 0.0]), color=(40, 44, 50)), box, grid, axes, wire, beam,
+               trail]
+    sun = Light(direction=np.array([-0.4, -1.0, -0.6]), shadows=True)
+    return Shot(objects, camera((-1.5, 2.6, 6.0), (0.6, 0.4, -1.0)), sun, {"background": Sky()})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -617,6 +645,7 @@ SCENES = {
     "detail": detail,
     "level": level,
     "particles": particles,
+    "lines": lines,
 }
 
 

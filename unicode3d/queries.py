@@ -28,6 +28,7 @@ import numpy as np
 from numba import njit, prange
 
 from .threads import kernel_lock
+from .lines import Lines
 from .particles import Particles
 from .transforms import quat_to_matrix, scene_poses
 
@@ -779,8 +780,8 @@ def _quiet(method):
 
 
 class Colliders:
-    """A set of objects (Object3Ds, or Models for all their parts; Particles are left out) to ask what a ray hits or
-    what a shape touches.
+    """A set of objects (Object3Ds, or Models for all their parts; Particles and Lines are left out) to ask what a
+    ray hits or what a shape touches.
 
     The set reads where its objects are when made and on each update(): call that after moving them, once a frame
     for any number of queries. Objects can be added to or taken out of `objects` (a list) at any time, before an
@@ -813,7 +814,7 @@ class Colliders:
         objects, trees, tree_of, inst_tree = [], [], {}, []
         for obj in self.objects:
             mesh = getattr(obj, "mesh", None)
-            if mesh is None or type(obj) is Particles:  # (effects: nothing to hit)
+            if mesh is None or type(obj) in (Particles, Lines):  # (effects: nothing to hit)
                 continue
             tree = mesh_tree(mesh)
             if not len(tree.tri):

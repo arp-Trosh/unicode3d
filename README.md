@@ -196,6 +196,8 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
 - **Particles and sprites:** sparks, smoke, dust, debris and rain by the thousand, moved in one
   kernel and drawn as instances of a small mesh (any mesh, or flat sprites facing the camera), and
   single objects that always face the camera.
+- **Lines:** grids, axes, wireframes, laser beams and debug drawing, thousands of segments as one
+  object, a set number of pixels wide however far off, or a width in the world.
 - **Reflections:** flat objects can be mirrors (a wall mirror, a polished floor, still water),
   showing the scene reflected in them, lit and shadowed like the rest, mirrors in mirrors included
   if asked for. Curved shiny objects (chrome, lacquer) reflect the sky or background.
@@ -591,6 +593,43 @@ renderer.render(objects + [sparks, smoke], camera, lights)
 +z towards the camera and +y up the picture, keeping its size and place: a textured square for a
 sprite, a tree card, a marker over a unit. Like any object it is outlined (see `Renderer`'s
 `outline`); `outline=False` on an object leaves its edges plain.
+
+</details>
+
+<details>
+<summary><h3 id="lines">Lines</h3></summary>
+
+A `Lines` is a set of straight segments, each drawn as a flat strip turned to face the camera, put
+in the render list like an object: a floor grid, axes, a wireframe, a laser beam, the path a unit
+will take, or what a ray query hit, drawn to see it.
+
+```python
+from unicode3d import Lines
+
+grid = Lines(starts, ends, color=(90, 90, 90))                  # (n, 3) arrays; 1 pixel wide
+axes = Lines([(0, 0, 0)] * 3, [(1, 0, 0), (0, 1, 0), (0, 0, 1)],
+             colors=[(255, 0, 0), (0, 255, 0), (0, 0, 255)], width=2)
+beam = Lines([gun], [target], width=0.05, units="world", color=(255, 40, 40))
+
+# every frame, if they move:
+beam.set([gun], [target])          # or change starts, ends and colors in place
+renderer.render(objects + [grid, axes, beam], camera, lights)
+```
+
+- **width** is in pixels by default (`units="pixels"`): the same near and far, which suits grids,
+  axes and debug drawing. A line running off to the horizon stays that wide all along: each segment
+  is drawn as a strip tapered to match. `units="world"` makes it a width in the world, thinner
+  further off, for beams and wires; it is still drawn at least `min_pixels` wide (1), so far-off
+  lines don't break up into dashes.
+- **Colours:** `colors` gives each segment its own (`(n, 3)`, 0..255), times `color`. Lines show
+  their colour as it is (`emissive=1.0`); `emissive=0.0` lights them as strips facing the camera.
+- **Like an object**, a `Lines` has `opacity`, `cast_shadows` and `outline` (both off by default),
+  `visible`, and a pose and `parent`: segments are in its own space, and a parent's scale widens
+  world-unit lines with them. `pick()` on a line gives the `Lines`; ray and overlap queries and
+  `union_bounds()` leave lines out.
+- **Cost:** each segment is 2 triangles, so a grid of 2,000 lines draws in a few milliseconds at
+  180x50 cells. Segments are butt-ended: joined into a path, wide ones show small notches at sharp
+  turns.
 
 </details>
 

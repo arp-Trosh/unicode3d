@@ -26,7 +26,7 @@ from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
 from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
-from unicode3d.scene import Camera, Light, Model, Node, Object3D, Particles, PointLight, Renderer, union_bounds
+from unicode3d.scene import Camera, Light, Lines, Model, Node, Object3D, Particles, PointLight, Renderer, union_bounds
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_bitmap, text_mesh
 from unicode3d.kernel_signatures import KERNELS
 from unicode3d.precompile import missing_kernels, share_out
@@ -360,7 +360,7 @@ class RenderTests(unittest.TestCase):
         level = merge_meshes([block_mesh((1.5 * x, -1.0, -1.5 * z), (1.0, 1.0, 1.0)) for x in range(-12, 13)
                               for z in range(-2, 20)])
         scenes.append(([Object3D(level, color=(200, 180, 150)), *crowd[:20]], shadowed))
-        # Particles (solid, and see-through ones facing the camera) and a billboard, among others.
+        # Particles (solid, and see-through ones facing the camera), a billboard and lines, among others.
         sparks = Particles(gravity=(0.0, -9.8, 0.0), ground=-1.0, emissive=0.5, seed=4)
         sparks.emit((0.0, 0.5, 0.0), 300, speed=(0.5, 2.0), radius=0.5, life=(1.0, 2.0), size=(0.05, 0.15),
                     color=(255, 160, 60), spin=(-4.0, 4.0))
@@ -369,8 +369,13 @@ class RenderTests(unittest.TestCase):
                    opacity_end=0.2, spin=1.0)
         sparks.update(0.2)
         puffs.update(0.5)
-        scenes.append(([*crowd[:30], sparks, puffs, Object3D(textured_quad(1.0, 1.0, holes), np.array([0.5, 0.2, 0.5]),
-                                                              color=(255, 255, 255), billboard=True)], shadowed))
+        grid = np.linspace(-2.0, 2.0, 9)  # (and lines: a grid running off, a beam)
+        lines = Lines(np.c_[grid, np.full(9, -1.0), np.full(9, 3.0)], np.c_[grid, np.full(9, -1.0), np.full(9, -30.0)],
+                      color=(120, 200, 255), width=2)
+        beam = Lines([(-1.5, 0.8, 1.0)], [(1.5, -0.2, -2.0)], width=0.06, units="world", opacity=0.7, cast_shadows=True)
+        scenes.append(([*crowd[:30], sparks, puffs, lines, beam,
+                        Object3D(textured_quad(1.0, 1.0, holes), np.array([0.5, 0.2, 0.5]), color=(255, 255, 255),
+                                 billboard=True)], shadowed))
         ortho = Camera(position=np.array([3.0, 3.0, 4.0]), target=np.zeros(3), projection="ortho", size=4.0)
 
         def draw(threads):

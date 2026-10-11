@@ -210,11 +210,12 @@ class Particles:
                            min(max(number(self.drag), 0.0), 1e300), ground, number(self.bounce),
                            number(self.friction))
 
-    def _rows(self, linear, position, basis):
+    def _rows(self, linear, position, view):
         """Each live particle drawn: (count, its pose (linear (n, 3, 3) and position (n, 3)) in the world, linear
         rgb (n, 3), opacity (n,)), from the Particles' own pose in the world (linear, position) and the camera's
-        (right, up, back) rows in `basis` (3, 3). Particles that aren't finite, or wholly clear, are left out."""
-        n = self._count
+        view (see Lines._rows), of which only the (right, up, back) rows (3, 3) of its basis count here.
+        Particles that aren't finite, or wholly clear, are left out."""
+        n, basis = self._count, view[0]
         lin, pos = np.empty((n, 3, 3)), np.empty((n, 3))
         rgb, alpha = np.empty((n, 3)), np.empty(n)
         kept = particle_rows(n, self._pos, self._age, self._life, self._size, self._rgb, self._alpha, self._axis,

@@ -4,7 +4,7 @@
 [--threads N] [--scene NAME]
 
 Renders scenes off-screen and reports the time each stage of a frame takes:
-a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain), and three that load the
+a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain; lines-2k a grid), and three that load the
 engine as kinds of game would (corridor, arena, board: see genres.py), each
 moving its world as a game loop does and writing text over the picture:
 
@@ -36,7 +36,7 @@ import numpy as np
 
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
-from unicode3d.scene import Camera, Light, Node, Object3D, Particles, PointLight, Renderer
+from unicode3d.scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer
 from unicode3d.mesh import Mesh, make_box
 from unicode3d.shapes import blob_mesh
 from unicode3d import __version__
@@ -143,6 +143,30 @@ def particles_scene(sparks=3000, puffs=200):
         Light(direction=(0.4, -1.0, -0.3), shadows=True), objects, churn
 
 
+def lines_scene(count=1000):
+    """A floor grid of `count` lines each way running off to the horizon (1 pixel wide), a spinning wire cube, and
+    20 beams (in world units) sweeping round, set afresh every frame: the cost of lines in their thousands."""
+    reach = np.linspace(-40.0, 40.0, count)
+    edge = np.full(count, 40.0)
+    grid = Lines(np.r_[np.c_[reach, np.zeros(count), -edge], np.c_[-edge, np.zeros(count), reach]],
+                 np.r_[np.c_[reach, np.zeros(count), edge], np.c_[edge, np.zeros(count), reach]], color=(90, 110, 130))
+    corners = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)], float)
+    pairs = [(a, b) for a in range(8) for b in range(a + 1, 8) if np.abs(corners[a] - corners[b]).sum() == 2]
+    cube = Lines(corners[[a for a, _ in pairs]], corners[[b for _, b in pairs]], width=2, color=(255, 200, 80),
+                 position=(0.0, 1.5, 0.0))
+    beams = Lines(width=0.05, units="world", color=(255, 60, 160))
+    objects = [grid, cube, beams]
+    turn = np.linspace(0.0, 2.0 * np.pi, 20, endpoint=False)
+
+    def churn(frame):
+        a = turn + 0.05 * frame
+        beams.set(np.tile((0.0, 1.5, 0.0), (20, 1)), np.c_[6.0 * np.cos(a), 0.2 + np.zeros(20), 6.0 * np.sin(a)])
+        return objects
+
+    return objects, Camera(position=np.array([0.0, 3.0, 9.0]), target=np.array([0.0, 1.0, 0.0]), fov=60.0, far=200.0), \
+        Light(), [grid, beams], churn
+
+
 SCENES = {
     "dice": lambda: dice_scene(3),
     "dice-sun": lambda: dice_scene(3, shadows="sun"),
@@ -153,6 +177,7 @@ SCENES = {
     "crowd-20": lambda: crowd_scene(20),
     "spawn-60": lambda: spawn_scene(60),
     "particles-3k": lambda: particles_scene(3000, 200),
+    "lines-2k": lambda: lines_scene(1000),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
     **GENRES,

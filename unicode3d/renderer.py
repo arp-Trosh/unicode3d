@@ -17,6 +17,7 @@ from .background import SKYBOX_FACES, background_args, fill_background, fog_args
 from .color import cached_linear_rgb
 from .lights import LIGHT_COLUMNS, PointLight, as_lights, light_rows
 from .mirrors import Mirrors
+from .lines import STRIPS, Lines
 from .particles import Particles
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEAST, RUN_MOST, SAMPLE_PATTERNS, SOLID,
                      FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
@@ -782,19 +783,31 @@ class Renderer(ShadowMaps, Mirrors):
                     m = mesh_of[id(mesh)] = len(meshes)
                     meshes.append(mesh)
                 mesh_idx.append(m)
+            if id(STRIPS[0]) in mesh_of:  # (Lines: each segment takes the strip it needs, all of them packed)
+                meshes += [strip for strip in STRIPS[1:] if id(strip) not in mesh_of]
             mesh_idx = np.array(mesh_idx, np.int64)
             memo["meshes"] = (on, meshes, mesh_idx)
         keys = list(map(_mesh_key, meshes))  # (afresh: a mesh's arrays may have been replaced)
         rgb = self._linear_colors(colors)
         emissive, shine, spec, shiny = _numbers((emissive, shine, spec, shiny))
         shine = np.clip(shine, 0.0, 1.0)
+        alpha = np.array(alpha, np.float64)
+        simplified = np.fromiter(simplify, np.bool_, len(simplify))
+        double, cast, outlined = (np.array(x, np.bool_) for x in (double, cast, outlined))
+        swarms = [k for k, obj in enumerate(nodes) if type(obj) is Particles or type(obj) is Lines]
+        if swarms:  # (each particle drawn as an instance of its Particles' mesh, each line as strips)
+            per_object = [mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast,
+                          outlined, simplified]
+            mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast, outlined, \
+                simplified = self._particle_rows(nodes, swarms, per_object, camera, meshes)
+            if not len(ident):
+                return None
         flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
         if _same(self._flat, flat):  # (as usual: then the same list, which _detail and the pack find at once)
             flat = self._flat
         self._flat = flat
         version = None
         if self.simplify > 0 and camera is not None:  # (every level of each mesh packed, and which one each draws)
-            simplified = np.fromiter(simplify, np.bool_, len(simplify))
             meshes, keys, mesh_idx, version = self._detail(meshes, keys, flat, mesh_idx, linear, where, shine > 0.0,
                                                            simplified, camera)
         placed = self._pack
@@ -804,18 +817,9 @@ class Renderer(ShadowMaps, Mirrors):
                                    [x for key in pack_keys for x in (*key, None)])
         _, _, arrays, at_pack, mesh_keys, keys = placed
         mesh_idx = at_pack[mesh_idx]
-        alpha = np.array(alpha, np.float64)
-        swarms = [k for k, obj in enumerate(nodes) if type(obj) is Particles]
-        if swarms:  # (each particle drawn as an instance of its Particles' mesh)
-            per_object = [mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident,
-                          np.array(double, np.bool_), np.array(cast, np.bool_), np.array(outlined, np.bool_)]
-            mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast, outlined = \
-                self._particle_rows(nodes, swarms, per_object, camera)
-            if not len(ident):
-                return None
         alpha = np.clip(alpha, 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
-        double = np.array(double, np.bool_) | (alpha < 1.0) | arrays["clear"][mesh_idx]
+        double = double | (alpha < 1.0) | arrays["clear"][mesh_idx]
 
         return {"mesh": mesh_idx, "pos": where, "lin": np.ascontiguousarray(linear),
                 "flip": _determinants(linear) < 0.0,
@@ -824,32 +828,41 @@ class Renderer(ShadowMaps, Mirrors):
                 "specular": np.maximum(spec, 0.0),
                 "shininess": np.maximum(shiny, 0.0),  # (None, each light's own, as 0)
                 "ident": ident,
-                "emissive": emissive, "cast": np.array(cast, np.bool_), "pack": arrays,
-                "outline": np.array(outlined, np.bool_),
+                "emissive": emissive, "cast": cast, "pack": arrays,
+                "outline": outlined,
                 "keys": keys, "mesh_keys": mesh_keys}
 
-    def _particle_rows(self, nodes, swarms, per_object, camera):
-        """The arrays in per_object (one row per object drawn, nodes[k] for row k) with the row of each Particles
-        (rows `swarms`) made into one row per particle drawn: its pose, linear colour (times the Particles'
-        colour) and opacity (times the Particles') from Particles._rows()."""
+    def _particle_rows(self, nodes, swarms, per_object, camera, meshes):
+        """The arrays in per_object (one row per object drawn, nodes[k] for row k; the first its mesh, as an index
+        into `meshes`) with the row of each Particles or Lines (rows `swarms`) made into one row per particle or
+        piece of a line drawn: its pose, linear colour (times the object's colour), opacity (times the object's)
+        and, for Lines, which of STRIPS it shows, from its _rows()."""
         if camera is None:
-            basis = np.eye(3)
+            basis, eye, near = np.eye(3), np.zeros(3), 1.0
         else:
             right, up, forward = camera.basis()
             basis = np.ascontiguousarray([right, up, -forward], np.float64)
+            eye, near = np.asarray(camera.position, np.float64), float(camera.near)
+        view = (basis, eye, near, self._pixel_size(camera) if camera is not None else 0.0)
         mesh_idx, where, linear, rgb, alpha = per_object[:5]
         counts = np.ones(len(mesh_idx), np.int64)
         made = {}
         for k in swarms:
-            made[k] = nodes[k]._rows(linear[k], where[k], basis)
+            made[k] = nodes[k]._rows(linear[k], where[k], view)
             counts[k] = made[k][0]
         first = np.cumsum(counts) - counts
         rows = np.repeat(np.arange(len(counts)), counts)
         out = [a[rows] for a in per_object]
-        where, linear, rgb, alpha = out[1:5]
+        mesh_idx, where, linear, rgb, alpha = out[:5]
+        strip_at = None
         for k in swarms:
-            n, lin, pos, colour, opacity = made[k]
+            n, lin, pos, colour, opacity = made[k][:5]
             at = slice(first[k], first[k] + n)
+            if len(made[k]) > 5:  # (Lines)
+                if strip_at is None:
+                    place = {id(mesh): j for j, mesh in enumerate(meshes)}
+                    strip_at = np.array([place[id(strip)] for strip in STRIPS], np.int64)
+                mesh_idx[at] = strip_at[made[k][5][:n]]
             linear[at], where[at] = lin[:n], pos[:n]
             rgb[at] = colour[:n] * rgb[at]
             alpha[at] = opacity[:n] * alpha[at]
