@@ -4,7 +4,7 @@
 [--threads N] [--scene NAME]
 
 Renders scenes off-screen and reports the time each stage of a frame takes:
-a few fixed, spinning set pieces (dice ... sphere-27k), and three that load the
+a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain), and three that load the
 engine as kinds of game would (corridor, arena, board: see genres.py), each
 moving its world as a game loop does and writing text over the picture:
 
@@ -36,7 +36,7 @@ import numpy as np
 
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
-from unicode3d.scene import Camera, Light, Node, Object3D, PointLight, Renderer
+from unicode3d.scene import Camera, Light, Node, Object3D, Particles, PointLight, Renderer
 from unicode3d.mesh import Mesh, make_box
 from unicode3d.shapes import blob_mesh
 from unicode3d import __version__
@@ -120,6 +120,29 @@ def spawn_scene(count=60, textures=6):
     return objects, Camera(position=np.array([0.0, 7.0, 9.0]), fov=50.0), Light(), [], churn
 
 
+def particles_scene(sparks=3000, puffs=200):
+    """A fountain of about `sparks` sparks bouncing on a floor, and about `puffs` see-through smoke puffs facing the
+    camera, each a Particles emitting every frame as many as die: the cost of particles in their thousands."""
+    floor = Object3D(make_box(), np.array([0.0, -0.5, 0.0]), scale=(12.0, 1.0, 12.0), color=(90, 100, 80))
+    fountain = Particles(gravity=(0.0, -9.8, 0.0), ground=0.0, bounce=0.4, emissive=0.8, limit=2 * sparks, seed=1)
+    smoke = Particles(face_camera=True, gravity=(0.0, 0.5, 0.0), drag=0.3, limit=2 * puffs, seed=2)
+    objects = [floor, fountain, smoke]
+
+    def churn(frame):
+        fountain.emit((0.0, 0.5, 0.0), sparks * DT / 1.5, velocity=(0.0, 5.0, 0.0), speed=(0.5, 2.5), life=(1.0, 2.0),
+                      size=0.06, size_end=0.02, color=(255, 220, 120), color_end=(255, 80, 20), spin=(-6.0, 6.0))
+        smoke.emit((2.0, 0.5, -1.0), puffs * DT / 3.0, speed=0.2, radius=0.3, life=(2.5, 3.5), size=0.4,
+                   size_end=1.5, color=(150, 150, 150), opacity=0.6, opacity_end=0.0, spin=(-0.5, 0.5))
+        fountain.update(DT)
+        smoke.update(DT)
+        return objects
+
+    for frame in range(60):  # (filled to about as many as each holds from then on)
+        churn(frame)
+    return objects, Camera(position=np.array([0.0, 5.0, 11.0]), target=np.array([0.0, 2.0, 0.0]), fov=50.0), \
+        Light(direction=(0.4, -1.0, -0.3), shadows=True), objects, churn
+
+
 SCENES = {
     "dice": lambda: dice_scene(3),
     "dice-sun": lambda: dice_scene(3, shadows="sun"),
@@ -129,6 +152,7 @@ SCENES = {
     "balls-400": lambda: balls_scene(400),
     "crowd-20": lambda: crowd_scene(20),
     "spawn-60": lambda: spawn_scene(60),
+    "particles-3k": lambda: particles_scene(3000, 200),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
     **GENRES,

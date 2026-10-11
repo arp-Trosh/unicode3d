@@ -4,101 +4,104 @@
 each took to compile, for precompile.py. Made by `python -m unicode3d.precompile --update`: don't edit."""
 NUMBA = "0.68.0"
 KERNELS = [
-    ('shading', 'resolve_cells', 31.11, [
+    ('shading', 'resolve_cells', 32.57, [
         "(Array(int32, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, float64, Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), int64, int64, int64, bool)",
     ]),
-    ('shading', 'resolve', 11.73, [
+    ('shading', 'resolve', 12.39, [
         "(Array(int32, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, float64, Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), int64)",
     ]),
-    ('raster', 'project_depth', 5.89, [
+    ('raster', 'project_depth', 5.95, [
         "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), int64, int64, float64, bool, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
-    ('shading', 'blend', 5.02, [
+    ('shading', 'blend', 5.19, [
         "(Array(int64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True))",
     ]),
-    ('raster', 'rasterize', 3.98, [
+    ('raster', 'rasterize', 4.15, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), bool)",
     ]),
-    ('raster', 'project_cube', 3.95, [
+    ('raster', 'project_cube', 4.00, [
         "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
     ('raster', 'transform', 3.59, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'project', 3.00, [
+    ('raster', 'project', 3.03, [
         "(Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, Array(float64, 1, 'C', False, aligned=True), int64, int64, float64, Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'rasterize_pixels', 2.80, [
+    ('raster', 'rasterize_pixels', 2.90, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'transform_depth', 2.37, [
+    ('raster', 'transform_depth', 2.41, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('shading', 'post_effects', 2.07, [
-        "(Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, float64, float64, Array(float64, 1, 'C', False, aligned=True), bool, float64, float64, float64, float64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64)",
-    ]),
-    ('raster', 'rasterize_layers', 2.05, [
-        "(Array(float64, 2, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), float64)",
-    ]),
-    ('queries', 'overlap', 1.91, [
+    ('queries', 'overlap', 2.24, [
         "(int64, Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(uint8, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'rasterize_depth', 1.41, [
+    ('shading', 'post_effects', 2.12, [
+        "(Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, float64, float64, Array(float64, 1, 'C', False, aligned=True), bool, float64, float64, float64, float64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64)",
+    ]),
+    ('raster', 'rasterize_layers', 2.08, [
+        "(Array(float64, 2, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), float64)",
+    ]),
+    ('raster', 'rasterize_depth', 1.43, [
         "(Array(float32, 2, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'rasterize_tint', 1.33, [
+    ('raster', 'rasterize_tint', 1.35, [
         "(Array(float32, 2, 'C', False, aligned=True), int64, int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), int64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('terminal', '_encode_updates', 1.22, [
+    ('terminal', '_encode_updates', 1.27, [
         "(Array(uint32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(uint8, 2, 'C', False, aligned=True), Array(uint32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(uint8, 2, 'C', False, aligned=True), Array(uint8, 2, 'C', False, aligned=True), Array(uint8, 2, 'C', False, aligned=True), bool, bool, bool, int64, Array(uint8, 1, 'C', False, aligned=True))",
     ]),
-    ('glyphs', '_match', 1.13, [
-        "(Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), int64, int64, Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, float64, Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(bool, 2, 'C', False, aligned=True), Array(bool, 2, 'C', False, aligned=True))",
-    ]),
-    ('animation', '_sample', 1.02, [
-        "(float64, float64, Array(int8, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
-    ]),
-    ('queries', 'cast_ray', 0.90, [
+    ('queries', 'cast_ray', 1.23, [
         "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, Array(uint8, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
-    ('queries', 'build_tree', 0.82, [
+    ('glyphs', '_match', 1.16, [
+        "(Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), int64, int64, Array(float64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), float64, float64, Array(int64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(bool, 2, 'C', False, aligned=True), Array(bool, 2, 'C', False, aligned=True))",
+    ]),
+    ('queries', 'build_tree', 0.84, [
         "(Array(float64, 3, 'C', False, aligned=True),)",
     ]),
     ('raster', 'count_bands', 0.79, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'count_cube', 0.73, [
+    ('animation', '_sample', 0.77, [
+        "(float64, float64, Array(int8, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
+    ]),
+    ('raster', 'count_cube', 0.75, [
         "(Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), float64, Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True))",
     ]),
-    ('queries', 'cast_all', 0.61, [
-        "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, Array(uint8, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
+    ('particles', 'particle_rows', 0.69, [
+        "(int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), bool, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
-    ('background', 'fill_background', 0.57, [
+    ('background', 'fill_background', 0.58, [
         "(Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64)",
     ]),
-    ('mirrors', '_mix_mirror', 0.54, [
+    ('mirrors', '_mix_mirror', 0.57, [
         "(Array(float32, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), int64, float64, Array(float32, 2, 'C', False, aligned=True))",
     ]),
-    ('queries', 'cast_rays', 0.54, [
+    ('queries', 'cast_rays', 0.55, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(uint8, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
     ]),
-    ('shadows', 'find_rows', 0.54, [
-        "(Array(uint64, 2, 'C', False, aligned=True), Array(uint64, 1, 'C', False, aligned=True), Array(uint64, 2, 'C', False, aligned=True), Array(uint64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
-    ]),
-    ('shadows', 'seen_corners', 0.45, [
+    ('shadows', 'seen_corners', 0.48, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
-    ('mirrors', '_fill_sky', 0.44, [
+    ('mirrors', '_fill_sky', 0.46, [
         "(Array(int64, 1, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), int64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), float64)",
     ]),
-    ('raster', 'bin_bands', 0.44, [
+    ('raster', 'bin_bands', 0.45, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int8, 1, 'C', False, aligned=True), int64, int64, Array(float64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
-    ('raster', 'upscale', 0.41, [
+    ('raster', 'upscale', 0.43, [
         "(Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True), Array(float32, 3, 'C', False, aligned=True), Array(float32, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int32, 2, 'C', False, aligned=True))",
     ]),
-    ('raster', 'work_plan', 0.29, [
+    ('queries', 'cast_all', 0.35, [
+        "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, Array(uint8, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
+    ]),
+    ('raster', 'work_plan', 0.30, [
         "(Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
+    ]),
+    ('shadows', 'find_rows', 0.27, [
+        "(Array(uint64, 2, 'C', False, aligned=True), Array(uint64, 1, 'C', False, aligned=True), Array(uint64, 2, 'C', False, aligned=True), Array(uint64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True))",
     ]),
     ('raster', 'transform_world', 0.26, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
@@ -106,17 +109,23 @@ KERNELS = [
     ('transforms', 'compose_poses', 0.26, [
         "(Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(bool, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
     ]),
-    ('mirrors', '_gather_pass', 0.21, [
+    ('mirrors', '_gather_pass', 0.22, [
         "(Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), int64, Array(float32, 2, 'C', False, aligned=True), Array(float32, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True))",
     ]),
-    ('mirrors', '_mirror_cover', 0.20, [
+    ('mirrors', '_mirror_cover', 0.21, [
         "(Array(int32, 2, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), Array(int32, 1, 'C', False, aligned=True), int64, Array(int64, 1, 'C', False, aligned=True))",
+    ]),
+    ('particles', 'step', 0.21, [
+        "(int64, float64, Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, float64, float64, float64)",
     ]),
     ('shadows', 'instance_bounds', 0.20, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
     ]),
-    ('color', '_encode_srgb', 0.15, [
+    ('color', '_encode_srgb', 0.16, [
         "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
+    ]),
+    ('detail', 'allowed_errors', 0.14, [
+        "(Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, float64, Array(bool, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
     ('raster', 'face_runs', 0.14, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 2, 'C', False, aligned=True), float64, int64, int64, Array(int64, 1, 'C', False, aligned=True))",
@@ -124,10 +133,7 @@ KERNELS = [
     ('color', '_decode_srgb', 0.13, [
         "(Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
     ]),
-    ('detail', 'allowed_errors', 0.13, [
-        "(Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True), float64, float64, Array(bool, 1, 'C', False, aligned=True), Array(float64, 1, 'C', False, aligned=True))",
-    ]),
-    ('transforms', 'place_boxes', 0.11, [
+    ('transforms', 'place_boxes', 0.12, [
         "(Array(float64, 2, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(int64, 1, 'C', False, aligned=True), Array(float64, 3, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True), Array(float64, 2, 'C', False, aligned=True))",
     ]),
     ('detail', 'pick_levels', 0.09, [

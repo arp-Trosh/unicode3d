@@ -24,7 +24,8 @@ cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor r
 (mipmapping); many small balls; a finely divided sphere; the room demo's courtyard; and, added after 0.4.1,
 world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
 floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; after 0.7.1, the
-courtyard through an orthographic camera; and, after 0.17.0, sun shadows fitted to the view in a big field.
+courtyard through an orthographic camera; after 0.17.0, sun shadows fitted to the view in a big field; and,
+after 0.20.1, particles and a billboard sprite.
 """
 import argparse
 import os
@@ -554,6 +555,38 @@ def level():
                 camera((1.5, 1.4, 7.5), (4.5, 1.0, -4.5), fov=70.0), lights, {"background": (10, 10, 14)})
 
 
+def particles():
+    """Particles (added after 0.20.1): a fountain of glowing sparks bouncing on a floor and fading from yellow to red,
+    chips of stone tumbling (boxes), smoke puffs facing the camera that grow and thin as they rise, and a cut-out
+    sprite (Object3D.billboard) beside them, with sun shadows. Particles are moved a fixed number of steps from a
+    seed, so the picture is the same every time."""
+    from unicode3d.scene import Particles
+    sparks = Particles(gravity=(0.0, -9.8, 0.0), ground=0.0, bounce=0.4, emissive=0.9, seed=1)
+    chips = Particles(make_box(), gravity=(0.0, -9.8, 0.0), ground=0.0, bounce=0.2, specular=0.3, cast_shadows=True,
+                      seed=2)
+    smoke = Particles(face_camera=True, gravity=(0.3, 0.0, 0.0), seed=3)  # (drifting in a breeze)
+    for step in range(45):
+        sparks.emit((0.0, 0.3, 0.0), 40, velocity=(0.0, 4.5, 0.0), speed=(0.5, 2.0), life=(0.8, 1.4), size=0.07,
+                    size_end=0.03, color=(255, 230, 120), color_end=(255, 60, 20), spin=(-6.0, 6.0))
+        if step % 15 == 0:
+            chips.emit((1.6, 0.3, 0.4), 12, velocity=(0.0, 3.0, 0.0), speed=(1.0, 2.5), life=3.0, size=(0.08, 0.16),
+                       color=(140, 135, 125), spin=(-8.0, 8.0))
+        if step % 3 == 0:
+            smoke.emit((-1.4, 0.2, -0.6), 2, velocity=(0.0, 0.9, 0.0), speed=0.1, radius=0.15, life=(2.5, 3.0),
+                       size=0.3, size_end=1.0,
+                       color=(150, 150, 155), opacity=0.7, opacity_end=0.0, spin=(-0.6, 0.6))
+        for p in (sparks, chips, smoke):
+            p.update(1.0 / 30.0)
+    y, x = np.mgrid[0:32, 0:32]
+    star = np.zeros((32, 32, 4))
+    star[..., :3] = (1.0, 0.85, 0.3)
+    star[..., 3] = (np.abs(x - 15.5) + np.abs(y - 15.5) < 14).astype(float)
+    sprite = Object3D(panel(1.0, 1.0, star), np.array([2.4, 1.2, -1.0]), color=(255, 255, 255), billboard=True)
+    objects = [Object3D(floor(5.0), color=(110, 120, 100)), sparks, chips, smoke, sprite]
+    sun = Light(direction=np.array([-0.4, -1.0, -0.6]), shadows=True)
+    return Shot(objects, camera((1.0, 3.0, 6.5), (0.3, 1.2, 0.0)), sun, {"background": Sky()})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -583,6 +616,7 @@ SCENES = {
     "lettering": lettering,
     "detail": detail,
     "level": level,
+    "particles": particles,
 }
 
 

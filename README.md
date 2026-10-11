@@ -193,6 +193,9 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   pixel. They show their far side through their near one, keep their highlights, grow more opaque
   at a slant as glass does, and cast shadows tinted by their colour. Textures with holes (leaves,
   fences) are cut out with smooth edges, and cast shadows with holes in them.
+- **Particles and sprites:** sparks, smoke, dust, debris and rain by the thousand, moved in one
+  kernel and drawn as instances of a small mesh (any mesh, or flat sprites facing the camera), and
+  single objects that always face the camera.
 - **Reflections:** flat objects can be mirrors (a wall mirror, a polished floor, still water),
   showing the scene reflected in them, lit and shadowed like the rest, mirrors in mirrors included
   if asked for. Curved shiny objects (chrome, lacquer) reflect the sky or background.
@@ -528,7 +531,64 @@ mesh with `merge_meshes` (keeping each part's colour) is cheaper still, and a lo
 stands still (scenery, a building, a tree) draws quicker as `model.bake()` (see [Models](#models)).
 For objects that are small
 on screen, a mesh with fewer triangles looks the same and costs less (the balls demo switches meshes
-by size).
+by size). For sparks, smoke and other short-lived bits by the hundred, use [Particles](#particles):
+each Object3D costs a few microseconds of Python a frame, which a Particles doesn't.
+
+</details>
+
+<details>
+<summary><h3 id="particles">Particles and sprites</h3></summary>
+
+A `Particles` holds many small copies of one mesh in arrays (place, velocity, age, size, colour,
+opacity), moves them all in one kernel, and is drawn by putting it in the render list like an
+object. A burst of sparks or a column of smoke is one `Particles`, whatever it holds:
+
+```python
+from unicode3d import Particles
+
+sparks = Particles(gravity=(0, -9.8, 0), ground=0.0, emissive=1.0)  # glowing, bouncing on y = 0
+smoke = Particles(face_camera=True, gravity=(0.3, 0, 0))             # flat puffs facing the camera
+
+# when something happens:
+sparks.emit(hit_point, count=30, velocity=(0, 2, 0), speed=(1, 3), life=(0.4, 0.8), size=0.06,
+            size_end=0.02, color=(255, 220, 120), color_end=(255, 60, 20))
+# every frame:
+smoke.emit(chimney, count=1, velocity=(0, 0.8, 0), radius=0.1, life=3.0, size=0.3, size_end=1.2,
+           color=(150, 150, 150), opacity=0.7, opacity_end=0.0, spin=(-0.5, 0.5))
+sparks.update(dt)
+smoke.update(dt)
+renderer.render(objects + [sparks, smoke], camera, lights)
+```
+
+- **emit()** adds `count` particles at a point, spread through a ball of `radius`, moving at
+  `velocity` plus `speed` in a random direction. `life` is in seconds; `size` (how wide: the mesh
+  is 1 across), `color` and `opacity` go to `size_end`, `color_end` and `opacity_end` over a
+  particle's life. `spin` turns it (radians a second). Any of `speed`, `radius`, `life`, `size`,
+  `size_end` and `spin` can be `(low, high)`, each particle drawing its own between them. `seed=`
+  on the `Particles` makes the same calls give the same particles.
+- **update(dt)** moves them on: `gravity`, `drag` (the share of speed lost a second), and `ground`
+  (a height they bounce on, `bounce` and `friction` saying how much speed they keep, and come to
+  rest on, their undersides on it); particles whose life is over are dropped.
+- **The mesh** is a small ball (16 triangles) by default, or with `face_camera=True` a flat disk
+  turned to face the camera. Any mesh works: `make_box()` for chips of stone, a square with a
+  texture for sprites (holes in the texture are cut out, as on objects). Particles cost per
+  triangle, so small meshes are best: 3,000 sparks of the default ball take about 5 ms to draw at
+  180x50 cells.
+- **Like an object**, a `Particles` has `emissive`, `opacity` and `color` (times each particle's),
+  `specular`, `shininess`, `cast_shadows` (off by default), `visible`, and a pose and `parent`:
+  particles live in its own space, so a `Particles` with a parent moves with it (a torch's flame
+  carried by a character). `pick()` on a particle gives the `Particles`; ray and overlap queries
+  and `union_bounds()` leave particles out.
+- **Up to `limit`** (10,000 by default) at once; past it, `emit()` drops the earliest emitted to
+  make room. See-through particles count towards the 4 see-through layers a pixel shows, so a
+  thick cloud of overlapping puffs shows only its nearest 4.
+- **Your own motion:** `positions`, `velocities`, `ages` and `lives` are views of the live
+  particles' arrays, to change in place (a swirl, homing, wind that varies), and `len()` is how
+  many there are.
+
+**Sprites.** `Object3D(..., billboard=True)` turns any object to face the camera wherever it is, its
++z towards the camera and +y up the picture, keeping its size and place: a textured square for a
+sprite, a tree card, a marker over a unit.
 
 </details>
 

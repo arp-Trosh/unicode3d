@@ -15,10 +15,11 @@ from .color import linear_to_srgb, srgb_to_linear, to_linear_rgb
 from .mesh import Mesh, _srgb01
 from .shapes import merge_meshes
 from .texture import alpha_kind
+from .particles import Particles
 from .renderer import Anchor, Pick, Renderer
 from .transforms import look_at, quat_from_matrix, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
-__all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Pick", "PointLight", "Renderer", "union_bounds"]
+__all__ = ["Anchor", "Camera", "Light", "Model", "Node", "Object3D", "Particles", "Pick", "PointLight", "Renderer", "union_bounds"]
 
 
 ORTHO_BACK = 1e5  # how far back, in view sizes, the eye an orthographic view is drawn from sits (see Camera)
@@ -187,6 +188,8 @@ class Object3D(_Placed):
                             # shapes that every edge matters to, such as lettering, which a level of detail can
                             # make illegible (it may move corners a pixel or two, closing the gaps in a letter),
                             # and thin plates laid on other parts, which it can sink behind them
+    billboard: bool = False  # turned to face the camera wherever it is (its +z towards it, +y up the picture),
+                             # keeping its size and place: a sprite (a textured square), a marker, a tree card
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
@@ -390,9 +393,9 @@ class Model:
 
 def union_bounds(objects):
     """The corners (low (3,), high (3,)) of the box around several objects (Object3Ds or Models) as they stand in
-    the world; None if there is nothing to box."""
+    the world; None if there is nothing to box. Particles are left out."""
     parts = [part for obj in objects for part in ([obj] if hasattr(obj, "mesh") else obj)]
-    parts = [part for part in parts if len(_finite_vertices(part.mesh))]
+    parts = [part for part in parts if type(part) is not Particles and len(_finite_vertices(part.mesh))]
     if not parts:
         return None
     rows, linear, position, _ = scene_poses(parts)  # (each shared parent once)

@@ -11,7 +11,7 @@
             then), towers, tokens, cards and dice, a still camera that pans now and then, and a side panel
 
 Each is a game loop in miniature, with a fixed step of DT: update() moves the world (characters walk by Clips with
-crossfades, as loaded models do; particles are Object3Ds coming and going, as programs make them today) and
+crossfades, as loaded models do; sparks and smoke are Particles) and
 returns what to draw, and hud() writes the text a game would write over the picture. Characters are figures of 17
 parts sharing their meshes and keyframes (as Model.copy() makes them), about 1,200 triangles each, near what a
 low-poly downloaded character has. Everything is seeded, so two runs draw the same frames.
@@ -25,7 +25,7 @@ from unicode3d.background import Gradient
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
 from unicode3d.mesh import Mesh, make_box
-from unicode3d.scene import Camera, Light, Node, Object3D, PointLight
+from unicode3d.scene import Camera, Light, Node, Object3D, Particles, PointLight
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes
 from unicode3d.transforms import quat_axis_angle, quat_mul
 
@@ -269,47 +269,29 @@ PALETTES = (((205, 160, 130), (150, 40, 40), (190, 190, 200)),
             ((150, 110, 90), (40, 90, 60), (170, 170, 175)))
 
 
-class Particles:
-    """Short-lived Object3Ds (sparks, smoke) moved in Python each frame, made and dropped as programs make them
-    today (Castle Panic's fx.py)."""
+class Effects:
+    """Sparks and smoke as two Particles (unicode3d.Particles), emitted in bursts and moved in one kernel each."""
 
-    def __init__(self, rng):
-        self.rng = rng
-        self.spark = blob_mesh((1.0, 1.0, 1.0), rings=3, segments=4)
-        self.puff = blob_mesh((1.0, 1.0, 1.0), rings=5, segments=8)
-        self.items = []  # [object, velocity, seconds left, gravity, growth a second, fade a second]
+    def __init__(self, seed):  # (seeds of their own: the scene's random numbers stay the scene's)
+        self.sparks = Particles(blob_mesh((1.0, 1.0, 1.0), rings=3, segments=4), gravity=(0.0, -9.8, 0.0),
+                                emissive=1.0, seed=seed)
+        self.puffs = Particles(blob_mesh((1.0, 1.0, 1.0), rings=5, segments=8), seed=seed + 1)
 
-    def burst(self, at, count, speed, life, color, gravity=-9.8, up=2.0):
-        for _ in range(count):
-            v = self.rng.normal(0.0, speed, 3) + (0.0, up, 0.0)
-            obj = Object3D(self.spark, np.array(at, float), scale=0.05, color=color, emissive=1.0,
-                           cast_shadows=False, specular=0.0)
-            self.items.append([obj, v, life * self.rng.uniform(0.6, 1.0), gravity, 0.0, 0.0])
+    def burst(self, at, count, speed, life, color, up=2.0):
+        self.sparks.emit(at, count, velocity=(0.0, up, 0.0), speed=(0.5 * speed, 2.5 * speed),
+                         life=(0.6 * life, life), size=0.05, color=color)
 
-    def smoke(self, at):
-        obj = Object3D(self.puff, np.array(at, float) + self.rng.normal(0.0, 0.05, 3), scale=0.12,
-                       color=(120, 120, 120), opacity=0.45, cast_shadows=False, specular=0.0)
-        self.items.append([obj, np.array([0.0, 0.8, 0.0]) + self.rng.normal(0.0, 0.1, 3), 2.0, 0.0, 0.15, 0.2])
+    def smoke(self, at):  # (growing and thinning as it rises)
+        self.puffs.emit(at, velocity=(0.0, 0.8, 0.0), speed=(0.0, 0.15), radius=0.08, life=2.0, size=0.12,
+                        size_end=0.42, color=(120, 120, 120), opacity=0.45, opacity_end=0.05)
 
     def update(self, dt):
-        kept = []
-        for item in self.items:
-            obj, v, life, gravity, grow, fade = item
-            item[2] = life = life - dt
-            if life <= 0.0:
-                continue
-            v[1] += gravity * dt
-            obj.position = obj.position + v * dt
-            if grow:
-                obj.scale = obj.scale + grow * dt
-            if fade:
-                obj.opacity = max(0.0, obj.opacity - fade * dt)
-            kept.append(item)
-        self.items = kept
+        self.sparks.update(dt)
+        self.puffs.update(dt)
 
     @property
     def objects(self):
-        return [item[0] for item in self.items]
+        return [self.sparks, self.puffs]
 
 
 # -------------------------------------------------------------------------------------------- the scenes
@@ -416,7 +398,7 @@ class Corridor(Game):
                             parent=self.camera, cast_shadows=False)
         self.flash = Object3D(blob_mesh((0.06, 0.06, 0.1)), np.array([0.22, -0.2, -0.98]), color=(255, 220, 120),
                               emissive=1.0, cast_shadows=False, parent=self.camera, visible=False)
-        self.particles = Particles(rng)
+        self.particles = Effects(7)
         self.figures = [w[0] for w in self.walkers]
         self.objects = self.level + self.props + [p for f in self.figures for p in f.parts] + [self.gun, self.flash]
         self.time, self.frame = 0.0, 0
@@ -537,7 +519,7 @@ class Arena(Game):
             fig = Figure(kit, PALETTES[k % 4], spot(6, 24), scale=0.9)
             fig.play("walk", 0.0, at=rng.uniform(0, 0.8))
             self.enemies.append([fig, rng.uniform(1.2, 2.0), 0.0])  # [figure, speed, seconds until back if dead]
-        self.particles = Particles(rng)
+        self.particles = Effects(7)
         self.camera = Camera(fov=40.0, far=80.0)
         self.objects = self.scenery + self.player.parts + [p for e in self.enemies for p in e[0].parts]
         self.time, self.frame = 0.0, 0

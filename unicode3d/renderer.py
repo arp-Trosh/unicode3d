@@ -17,6 +17,7 @@ from .background import SKYBOX_FACES, background_args, fill_background, fog_args
 from .color import cached_linear_rgb
 from .lights import LIGHT_COLUMNS, PointLight, as_lights, light_rows
 from .mirrors import Mirrors
+from .particles import Particles
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEAST, RUN_MOST, SAMPLE_PATTERNS, SOLID,
                      FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
                      rasterize_pixels, transform, upscale, work_plan, NO_CLIP)
@@ -73,7 +74,8 @@ def _same(a, b):
 
 
 _object_attrs = operator.attrgetter("mesh", "opacity", "color", "simplify", "double_sided", "emissive",
-                                    "cast_shadows", "reflectivity", "specular", "shininess")  # (see _instances)
+                                    "cast_shadows", "reflectivity", "specular", "shininess",
+                                    "billboard")  # (see _instances)
 
 
 def _numbers(values):
@@ -761,8 +763,14 @@ class Renderer(ShadowMaps, Mirrors):
             ident = np.array(candidates, np.int32) + 1
         else:
             attrs = [attrs[k] for k in keep]
+            nodes = [nodes[k] for k in keep]
             ident = np.array(candidates, np.int32)[keep] + 1
-        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny = zip(*attrs)
+        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard = zip(*attrs)
+        if camera is not None and any(billboard):  # (turned to face the camera, keeping their sizes)
+            right, up, forward = camera.basis()
+            facing = np.flatnonzero(np.array(billboard, np.bool_))
+            sizes = np.sqrt((linear[facing] ** 2).sum(axis=1))  # (the length of each axis: (n, 3))
+            linear[facing] = np.column_stack([right, up, -forward])[None] * sizes[:, None, :]
         last = memo.get("meshes")
         if last is not None and _same(last[0], on):  # (the same meshes on the same objects: the same indices)
             meshes, mesh_idx = last[1], last[2]
@@ -796,7 +804,16 @@ class Renderer(ShadowMaps, Mirrors):
                                    [x for key in pack_keys for x in (*key, None)])
         _, _, arrays, at_pack, mesh_keys, keys = placed
         mesh_idx = at_pack[mesh_idx]
-        alpha = np.clip(np.array(alpha, np.float64), 0.0, 1.0)
+        alpha = np.array(alpha, np.float64)
+        swarms = [k for k, obj in enumerate(nodes) if type(obj) is Particles]
+        if swarms:  # (each particle drawn as an instance of its Particles' mesh)
+            per_object = [mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident,
+                          np.array(double, np.bool_), np.array(cast, np.bool_)]
+            mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast = \
+                self._particle_rows(nodes, swarms, per_object, camera)
+            if not len(ident):
+                return None
+        alpha = np.clip(alpha, 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
         double = np.array(double, np.bool_) | (alpha < 1.0) | arrays["clear"][mesh_idx]
 
@@ -809,6 +826,33 @@ class Renderer(ShadowMaps, Mirrors):
                 "ident": ident,
                 "emissive": emissive, "cast": np.array(cast, np.bool_), "pack": arrays,
                 "keys": keys, "mesh_keys": mesh_keys}
+
+    def _particle_rows(self, nodes, swarms, per_object, camera):
+        """The arrays in per_object (one row per object drawn, nodes[k] for row k) with the row of each Particles
+        (rows `swarms`) made into one row per particle drawn: its pose, linear colour (times the Particles'
+        colour) and opacity (times the Particles') from Particles._rows()."""
+        if camera is None:
+            basis = np.eye(3)
+        else:
+            right, up, forward = camera.basis()
+            basis = np.ascontiguousarray([right, up, -forward], np.float64)
+        mesh_idx, where, linear, rgb, alpha = per_object[:5]
+        counts = np.ones(len(mesh_idx), np.int64)
+        made = {}
+        for k in swarms:
+            made[k] = nodes[k]._rows(linear[k], where[k], basis)
+            counts[k] = made[k][0]
+        first = np.cumsum(counts) - counts
+        rows = np.repeat(np.arange(len(counts)), counts)
+        out = [a[rows] for a in per_object]
+        where, linear, rgb, alpha = out[1:5]
+        for k in swarms:
+            n, lin, pos, colour, opacity = made[k]
+            at = slice(first[k], first[k] + n)
+            linear[at], where[at] = lin[:n], pos[:n]
+            rgb[at] = colour[:n] * rgb[at]
+            alpha[at] = opacity[:n] * alpha[at]
+        return out
 
     def _detail(self, meshes, keys, flat, mesh_idx, linear, where, shiny, simplified, camera):
         """Levels of detail (detail.py) for the instances seen from camera: (meshes, keys, mesh_idx, version), with
