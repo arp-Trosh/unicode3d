@@ -835,6 +835,41 @@ def face_runs(vertices, faces, limit, least, most, starts):
     return n
 
 
+@njit(cache=True, error_model="numpy")  # (serial: a few thousand instances take microseconds)
+def work_plan(mesh_vertex, mesh_run, run_first, run_end, inst_mesh):
+    """How transform() and transform_depth() split the instances showing meshes inst_mesh into pieces that run in
+    parallel (see renderer._work): (inst_vertex, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk, chunk_inst,
+    chunk_run, chunk_first, chunk_end). Each instance's vertices are cut into chunks of VERTEX_CHUNK (first and end
+    counted from its own first vertex), and its faces into its mesh's runs."""
+    n = inst_mesh.shape[0]
+    inst_vertex, inst_vchunk = np.zeros(n + 1, np.int64), np.zeros(n + 1, np.int64)
+    n_chunks = 0
+    for i in range(n):
+        m = inst_mesh[i]
+        count = mesh_vertex[m + 1] - mesh_vertex[m]
+        inst_vertex[i + 1] = inst_vertex[i] + count
+        inst_vchunk[i + 1] = inst_vchunk[i] + (count + VERTEX_CHUNK - 1) // VERTEX_CHUNK
+        n_chunks += mesh_run[m + 1] - mesh_run[m]
+    n_vchunks = inst_vchunk[n]
+    vchunk_inst, vchunk_first, vchunk_end = (np.empty(n_vchunks, np.int64), np.empty(n_vchunks, np.int64),
+                                             np.empty(n_vchunks, np.int64))
+    chunk_inst, chunk_run = np.empty(n_chunks, np.int64), np.empty(n_chunks, np.int64)
+    chunk_first, chunk_end = np.empty(n_chunks, np.int64), np.empty(n_chunks, np.int64)
+    c = 0
+    for i in range(n):
+        m = inst_mesh[i]
+        count = inst_vertex[i + 1] - inst_vertex[i]
+        for j in range(inst_vchunk[i + 1] - inst_vchunk[i]):
+            v = inst_vchunk[i] + j
+            vchunk_inst[v], vchunk_first[v] = i, j * VERTEX_CHUNK
+            vchunk_end[v] = min((j + 1) * VERTEX_CHUNK, count)
+        for r in range(mesh_run[m], mesh_run[m + 1]):
+            chunk_inst[c], chunk_run[c], chunk_first[c], chunk_end[c] = i, r, run_first[r], run_end[r]
+            c += 1
+    return (inst_vertex, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first,
+            chunk_end)
+
+
 @njit(cache=True, error_model="numpy", inline="always")
 def _run_seen(view_proj, near, clip, lin, position, run_spheres, r):
     """Whether run r of a mesh (see face_runs), placed by lin and position, is at least partly in view and on the

@@ -6,7 +6,6 @@ A Light's shadow map is one orthographic view along the light of a box around ev
 PointLight's is a cube of six perspective views out from it. Each texel holds the depth of the nearest thing
 blocking the light there, and see-through things add what they let through (tinted shadows).
 """
-import itertools
 import operator
 
 import numpy as np
@@ -15,7 +14,7 @@ from numba import njit
 from .lights import PointLight
 from .raster import (CLEAR, CUT, SOLID, SURFACE, count_cube, project_cube, project_depth,
                      rasterize_depth, rasterize_tint, stretch, transform_depth, transform_world)
-from .transforms import look_at, normalize, perspective
+from .transforms import _cross, look_at, normalize, perspective
 
 MATH = {"nsz", "arcp", "contract", "afn", "reassoc"}  # (for the lookups shading makes: see shading.MATH)
 
@@ -182,8 +181,8 @@ def _light_frame(direction, centres, radii):
     where it comes from) and the box around the spheres (centres, radii) in them (lo, hi)."""
     d = normalize(direction)
     up = np.array([0.0, 1.0, 0.0]) if abs(d[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
-    right = normalize(np.cross(d, up))
-    basis = np.stack([right, np.cross(right, d), -d])  # x, y across the light; z towards where it comes from
+    right = normalize(_cross(d, up))
+    basis = np.stack([right, _cross(right, d), -d])  # x, y across the light; z towards where it comes from
     p = centres @ basis.T
     return basis, (p - radii[:, None]).min(axis=0), (p + radii[:, None]).max(axis=0)
 
@@ -232,34 +231,72 @@ def _light_view(direction, centres, radii, size):
 SHADOW_FITS = ("scene", "view")  # what a Light's map is fitted to (Renderer.shadow_fit)
 VIEW_SHRINK = 2  # a view-fitted map's box shrinks only once what is seen fits this many steps (_box_half) smaller
 REGION_EXTRA = 1024  # texels a view-fitted map's settled map reaches beyond it (half each side; at most its width)
-_TRIPLES = np.array(list(itertools.combinations(range(12), 3)), np.int64)
 
 
 def _seen_region(view_proj, lo, hi):
     """The corners (P, 3) of the part of the box lo..hi (the scene's) a camera (view_proj: world to clip space) can
-    see: where the planes of its view and of the box meet in threes, kept where inside all of them. None where
-    there is nothing (or the view is degenerate: NaN, or planes of no direction)."""
-    r = np.asarray(view_proj, float)
-    planes = np.empty((12, 4))
-    planes[:6] = (r[3] + r[0], r[3] - r[0], r[3] + r[1], r[3] - r[1], r[3] + r[2], r[3] - r[2])
-    for k in range(3):
-        planes[6 + 2 * k] = np.r_[np.eye(3)[k], -lo[k]]
-        planes[7 + 2 * k] = np.r_[-np.eye(3)[k], hi[k]]
-    length = np.linalg.norm(planes[:, :3], axis=1)
-    if not (np.isfinite(planes).all() and (length > 1e-12).all()):
-        return None
-    planes /= length[:, None]
-    n, d = planes[:, :3], planes[:, 3]
-    a, b, c = n[_TRIPLES[:, 0]], n[_TRIPLES[:, 1]], n[_TRIPLES[:, 2]]
-    bc, ca, ab = np.cross(b, c), np.cross(c, a), np.cross(a, b)
-    det = np.einsum("ij,ij->i", a, bc)
-    ok = np.abs(det) > 1e-9
-    p = -(d[_TRIPLES[ok, 0], None] * bc[ok] + d[_TRIPLES[ok, 1], None] * ca[ok]
-          + d[_TRIPLES[ok, 2], None] * ab[ok]) / det[ok, None]
-    scale = 1.0 + float(np.abs(np.r_[lo, hi]).max())
-    p = p[np.isfinite(p).all(axis=1)]
-    p = p[(p @ n.T + d >= -1e-7 * scale).all(axis=1)]
+    see: where the planes of its view and of the box meet in threes, kept where inside all of them (seen_corners).
+    None where there is nothing (or the view is degenerate: NaN, or planes of no direction)."""
+    p = seen_corners(np.ascontiguousarray(view_proj, np.float64), np.asarray(lo, np.float64),
+                     np.asarray(hi, np.float64))
     return p if len(p) else None
+
+
+@njit(cache=True, error_model="numpy")
+def seen_corners(r, lo, hi):
+    """_seen_region()'s corners (P, 3), none where the view is degenerate. (Its arithmetic in numpy's order: the
+    same corners to the bit as the numpy it replaced, np.cross and all.)"""
+    planes = np.empty((12, 4))
+    for c in range(4):
+        planes[0, c], planes[1, c] = r[3, c] + r[0, c], r[3, c] - r[0, c]
+        planes[2, c], planes[3, c] = r[3, c] + r[1, c], r[3, c] - r[1, c]
+        planes[4, c], planes[5, c] = r[3, c] + r[2, c], r[3, c] - r[2, c]
+    for k in range(3):
+        for c in range(3):
+            one = 1.0 if c == k else 0.0
+            planes[6 + 2 * k, c], planes[7 + 2 * k, c] = one, -one
+        planes[6 + 2 * k, 3], planes[7 + 2 * k, 3] = -lo[k], hi[k]
+    for i in range(12):
+        length = np.sqrt(planes[i, 0] * planes[i, 0] + planes[i, 1] * planes[i, 1] + planes[i, 2] * planes[i, 2])
+        for c in range(4):
+            if not np.isfinite(planes[i, c]):
+                return np.empty((0, 3))
+        if not length > 1e-12:
+            return np.empty((0, 3))
+        for c in range(4):
+            planes[i, c] /= length
+    scale = 0.0
+    for k in range(3):
+        scale = max(scale, abs(lo[k]), abs(hi[k]))
+    slack = -1e-7 * (1.0 + scale)
+    out = np.empty((220, 3))  # (12 planes three at a time)
+    m = 0
+    for i in range(12):
+        a0, a1, a2, da = planes[i, 0], planes[i, 1], planes[i, 2], planes[i, 3]
+        for j in range(i + 1, 12):
+            b0, b1, b2, db = planes[j, 0], planes[j, 1], planes[j, 2], planes[j, 3]
+            ab0, ab1, ab2 = a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0
+            for k in range(j + 1, 12):
+                c0, c1, c2, dc = planes[k, 0], planes[k, 1], planes[k, 2], planes[k, 3]
+                bc0, bc1, bc2 = b1 * c2 - b2 * c1, b2 * c0 - b0 * c2, b0 * c1 - b1 * c0
+                ca0, ca1, ca2 = c1 * a2 - c2 * a1, c2 * a0 - c0 * a2, c0 * a1 - c1 * a0
+                det = a0 * bc0 + a1 * bc1 + a2 * bc2
+                if not abs(det) > 1e-9:
+                    continue
+                x = -(da * bc0 + db * ca0 + dc * ab0) / det
+                y = -(da * bc1 + db * ca1 + dc * ab1) / det
+                z = -(da * bc2 + db * ca2 + dc * ab2) / det
+                if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(z)):
+                    continue
+                inside = True
+                for q in range(12):
+                    if not planes[q, 0] * x + planes[q, 1] * y + planes[q, 2] * z + planes[q, 3] >= slack:
+                        inside = False
+                        break
+                if inside:
+                    out[m, 0], out[m, 1], out[m, 2] = x, y, z
+                    m += 1
+    return out[:m]
 
 
 # The faces of a cube map: the way each looks from the light, and its up.
@@ -308,6 +345,28 @@ def _caster_rows(inst, mesh_ids):
     return rows, (rows * _ROW_MIX).sum(axis=1, dtype=np.uint64)  # (wrapping round)
 
 
+@njit(cache=True, error_model="numpy")  # (serial: a few thousand rows take microseconds)
+def find_rows(known_rows, known_hashes, rows, hashes, which):
+    """Where each of rows[which] (with hashes[which]) is among known_rows (sorted by their known_hashes, each once),
+    -1 for those that aren't. A row is looked for only at the first of its hash: one of another row's hash before it
+    hides it, which is as if it weren't there."""
+    found = np.full(which.shape[0], -1, np.int64)
+    n = known_hashes.shape[0]
+    if n == 0:
+        return found
+    for i in range(which.shape[0]):
+        r = which[i]
+        at = min(np.searchsorted(known_hashes, hashes[r]), n - 1)
+        same = True
+        for c in range(rows.shape[1]):
+            if known_rows[at, c] != rows[r, c]:
+                same = False
+                break
+        if same:
+            found[i] = at
+    return found
+
+
 class _Rows:
     """Rows of _caster_rows() (each once), sorted by their hashes, to look others up among them."""
 
@@ -323,14 +382,9 @@ class _Rows:
     def __len__(self):
         return len(self.hashes)
 
-    def find(self, rows, hashes):
-        """Where each of `rows` (with their hashes) is among these, -1 for those that aren't. (A row is looked for
-        only at the first of its hash: one of another row's hash before it hides it, which is as if it weren't
-        there.)"""
-        if not len(self.hashes):
-            return np.full(len(hashes), -1, np.int64)
-        at = np.minimum(np.searchsorted(self.hashes, hashes), len(self.hashes) - 1)
-        return np.where((self.rows[at] == rows).all(axis=1), at, -1)
+    def find(self, rows, hashes, which):
+        """Where each of rows[which] (with their hashes) is among these, -1 for those that aren't (see find_rows)."""
+        return find_rows(self.rows, self.hashes, rows, hashes, which)
 
 
 class _Settled:
@@ -420,11 +474,17 @@ class ShadowMaps:
         cast_centres, cast_radii = centres[cast], radii[cast]
         # Each light's maps: (world to clip space (maps, 4, 4), params rows, casters, a cube's near plane, and for
         # a view-fitted map, its region's (world to clip space (1, 4, 4), size, the map's column and row in it)).
+        # Each PointLight's casters: those whose sphere reaches into its range (one array op for all of them).
+        points = [light for light in shadowed if isinstance(light, PointLight)]
+        if points:
+            positions = np.array([np.asarray(light.position, float) for light in points]).reshape(-1, 3)
+            reaches = np.array([float(light.range) for light in points])
+            within = np.linalg.norm(cast_centres - positions[:, None], axis=2) - cast_radii < reaches[:, None]
+            reached = iter([cast[row] for row in within])
         views = []
         for light, fit in zip(shadowed, fits):
             if isinstance(light, PointLight):
-                position, reach = np.asarray(light.position, float), float(light.range)
-                near_enough = cast[np.linalg.norm(cast_centres - position, axis=1) - cast_radii < reach]
+                position, reach, near_enough = np.asarray(light.position, float), float(light.range), next(reached)
                 face_mats, texel, near = _cube_views(position, reach, cube_size)
                 views.append((face_mats, [(1, 0, cube_size, texel, 1.0, soft, *position, 0)] * 6, near_enough, near,
                               None))
@@ -456,7 +516,7 @@ class ShadowMaps:
         age[solid] = 1
         if self._caster_ages is not None:
             known, last_age = self._caster_ages
-            at = known.find(rows[solid], hashes[solid])
+            at = known.find(rows, hashes, solid)
             age[solid] += np.where(at >= 0, last_age[np.maximum(at, 0)], 0)
         known = _Rows(rows[solid], hashes[solid])
         self._caster_ages = (known, age[solid[known.order]])
@@ -476,7 +536,7 @@ class ShadowMaps:
             at = (0, 0) if region is None else region[2:]
             here = casters[~clear[casters]]
             entry = settled.get(view_key)
-            found = None if entry is None else entry.rows.find(rows[here], hashes[here])
+            found = None if entry is None else entry.rows.find(rows, hashes, here)
             stale = entry is None or not entry.current(view_key, mesh_keys, meshes, found)
             if not stale and self._shadow_draws - entry.made >= SETTLE_DRAWS:  # any newly settled to take in?
                 stale = bool(((age[here] >= SETTLE_DRAWS) & (found < 0)).any())
@@ -497,7 +557,7 @@ class ShadowMaps:
                     used = {id(mesh_keys[i][0]): mesh_keys[i] for i in np.unique(inst["mesh"][still]).tolist()}
                     entry = _Settled(view_key, mesh_keys, used, _Rows(rows[still], hashes[still]), base,
                                      self._shadow_draws)
-                    found = entry.rows.find(rows[here], hashes[here])
+                    found = entry.rows.find(rows, hashes, here)
                     settled[view_key] = entry
                 else:
                     settled.pop(view_key, None)

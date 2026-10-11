@@ -531,6 +531,8 @@ def compile_kernels():
     screen.draw_frame(renderer.render(objects, Camera(), lights))
     renderer.simplify = 1.0  # levels of detail: which one each object takes
     screen.draw_frame(renderer.render(objects, Camera(position=np.array([0.0, 0.0, 6.0])), lights))
+    objects[1].position = np.array([1.0, 0.5, 0.0])  # without the mirrors (the sun's map fitted to the view), and
+    screen.draw_frame(renderer.render(objects[:-2], Camera(), lights))  # something moved (casters looked up)
     screen.render_updates()
     # Ray and overlap queries.
     solid = Colliders(objects)

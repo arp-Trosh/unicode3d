@@ -18,8 +18,8 @@ from .color import cached_linear_rgb
 from .lights import LIGHT_COLUMNS, PointLight, as_lights, light_rows
 from .mirrors import Mirrors
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEAST, RUN_MOST, SAMPLE_PATTERNS, SOLID,
-                     VERTEX_CHUNK, FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
-                     rasterize_pixels, transform, upscale, NO_CLIP)
+                     FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
+                     rasterize_pixels, transform, upscale, work_plan, NO_CLIP)
 from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import SHADOW_FITS, ShadowMaps
 from .texture import alpha_kind, pack as pack_textures
@@ -391,32 +391,11 @@ def _work(pack, inst_mesh):
     chunks of vertices (vchunk_inst, vchunk_first, vchunk_end, and where each instance's start: inst_vchunk), its
     chunks of faces (chunk_inst, chunk_run, chunk_first, chunk_end): its mesh's runs (see _runs), each left out when
     out of view, with the vertex chunks only they use)."""
-    n_inst = len(inst_mesh)
-    vertex_counts = np.diff(pack["mesh_vertex"])[inst_mesh]
-    inst_vertex = np.zeros(n_inst + 1, np.int64)
-    np.cumsum(vertex_counts, out=inst_vertex[1:])
-    vchunk_inst, vchunk_first, vchunk_end = _chunks(vertex_counts, np.zeros(n_inst, np.int64), VERTEX_CHUNK)
-    inst_vchunk = np.zeros(n_inst + 1, np.int64)
-    np.cumsum((vertex_counts + VERTEX_CHUNK - 1) // VERTEX_CHUNK, out=inst_vchunk[1:])
-    mesh_run = pack["mesh_run"]
-    first_run = mesh_run[inst_mesh]
-    runs = mesh_run[inst_mesh + 1] - first_run
-    chunk_inst = np.repeat(np.arange(n_inst, dtype=np.int64), runs)
-    chunk_run = np.arange(len(chunk_inst), dtype=np.int64) + np.repeat(first_run - (np.cumsum(runs) - runs), runs)
-    chunk_first, chunk_end = pack["run_first"][chunk_run], pack["run_end"][chunk_run]
+    (inst_vertex, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first,
+     chunk_end) = work_plan(pack["mesh_vertex"], pack["mesh_run"], pack["run_first"], pack["run_end"],
+                            np.ascontiguousarray(inst_mesh, np.int64))
     return (inst_vertex, (vchunk_inst, vchunk_first, vchunk_end, inst_vchunk),
             (chunk_inst, chunk_run, chunk_first, chunk_end))
-
-
-def _chunks(counts, starts, size):
-    """Split each instance's run of counts[i] items, starting at starts[i], into chunks of at most `size`:
-    (instance, first, end) arrays, in instance order."""
-    per = (counts + size - 1) // size
-    inst = np.repeat(np.arange(len(counts)), per)
-    within = np.arange(len(inst)) - np.repeat(np.cumsum(per) - per, per)
-    first = starts[inst] + within * size
-    end = np.minimum(first + size, starts[inst] + counts[inst])
-    return inst.astype(np.int64), first.astype(np.int64), end.astype(np.int64)
 
 
 class _Buffers:
