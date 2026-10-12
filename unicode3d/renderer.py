@@ -21,9 +21,10 @@ from .lines import STRIPS, Lines
 from .particles import Particles
 from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEAST, RUN_MOST, SAMPLE_PATTERNS, SOLID,
                      FrameBuffer, bin_bands, count_bands, face_runs, project, rasterize, rasterize_layers,
-                     rasterize_pixels, transform, upscale, work_plan, NO_CLIP)
+                     rasterize_pixels, transform, upscale, work_plan, NO_BOUNDS, NO_CLIP, NO_SKINNED)
 from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import SHADOW_FITS, ShadowMaps
+from .skinning import SkinPass
 from .sprites import SheetCell
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
@@ -77,7 +78,7 @@ def _same(a, b):
 
 _object_attrs = operator.attrgetter("mesh", "opacity", "color", "simplify", "double_sided", "emissive",
                                     "cast_shadows", "reflectivity", "specular", "shininess",
-                                    "billboard", "outline")  # (see _instances)
+                                    "billboard", "outline", "skin")  # (see _instances)
 
 
 def _numbers(values):
@@ -418,6 +419,14 @@ def _starts(whole, part):
     return part.base is whole and part.__array_interface__["data"][0] == whole.__array_interface__["data"][0]
 
 
+_NO_SKIN = (NO_SKINNED, NO_BOUNDS)  # an instances' "skin" when no row is skinned
+
+
+def _run_vertex(mesh):
+    """The vertices each run of a mesh's faces uses (see _runs), from its _Piece."""
+    return _mesh_piece(mesh, _mesh_key(mesh)).run_vertex
+
+
 def _work(pack, inst_mesh):
     """How raster.transform() and transform_depth() split the instances showing meshes inst_mesh of `pack` into
     pieces that run in parallel: (inst_vertex (where each instance's rows in `world` start, and their total), its
@@ -575,6 +584,7 @@ class Renderer(ShadowMaps, Mirrors):
         self._view_fits = {}  # each view-fitted Light's map's (light, half-width, its region's centre), by its direction
         self._mesh_boxes = None  # (the pack, each mesh's box: middles and half-widths) for shadow_fit "view"
         self._shadow_works = None  # (the pack, renderer._work's plans for shadow maps' casters, by their meshes)
+        self._skins = SkinPass()  # skinned objects' joints and vertices, from frame to frame (see skinning.py)
         self.resize(width, height)
 
     @property
@@ -760,12 +770,16 @@ class Renderer(ShadowMaps, Mirrors):
         self._settled = {}
         self._caster_ages = None
         self._caster_meshes = None
+        self._skins = SkinPass()
 
-    def _instances(self, objects, camera=None):
+    def _instances(self, objects, camera=None, lights=None):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and
         position), colours, materials, flags and ids (render-list index + 1). Packs the meshes afresh if the set
         of meshes has changed. With a camera and simplify on, each object's mesh is the level of detail (see
-        _detail) it is drawn with."""
+        _detail) it is drawn with. Skinned objects (Object3D.skin) are skinned (skinning.SkinPass): placed by the
+        identity, their vertices from rows of inst["skin"][0] (src), their bounds rows of inst["skin"][1] (bound);
+        given the lights too, those that can't be seen nor cast a shadow seen are left out first (see
+        _skin_culling)."""
         # Everything read from each object, in one pass (_object_attrs). Wholly clear objects, or with a NaN
         # opacity, have nothing to draw, nor any shadow.
         attrs = list(map(_object_attrs, objects))
@@ -796,7 +810,18 @@ class Renderer(ShadowMaps, Mirrors):
             attrs = [attrs[k] for k in keep]
             nodes = [nodes[k] for k in keep]
             ident = np.array(candidates, np.int32)[keep] + 1
-        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined = zip(*attrs)
+        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined, skin = zip(*attrs)
+        skin_of = None  # (each row's place among the skinned objects, -1 for the rest; None if there are none)
+        if skin.count(None) != len(skin):
+            skin_of, out = self._skins.pose(nodes, skin, on, _run_vertex, self._skin_culling(camera, lights, shine))
+            if out is not None:  # (culled, or a joint's pose isn't finite)
+                keep = np.flatnonzero(~out)
+                if not len(keep):
+                    return None
+                nodes, attrs = [nodes[k] for k in keep], [attrs[k] for k in keep]
+                linear, where, ident, skin_of = linear[keep], where[keep], ident[keep], skin_of[keep]
+                on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined, skin = \
+                    zip(*attrs)
         last = memo.get("meshes")
         if last is not None and _same(last[0], on):  # (the same meshes on the same objects: the same indices)
             meshes, mesh_idx, sprites = last[1], last[2], last[3]
@@ -827,19 +852,25 @@ class Renderer(ShadowMaps, Mirrors):
             linear = _face_camera(linear, billboard, camera)
         if len(sprites) and flipped.any():  # (mirrored sheets: the other half of the turn, flipped)
             linear[sprites[flipped], :, 0] *= -1.0
+        if skin_of is not None:  # (skinned rows are in the world already)
+            skinned = skin_of >= 0
+            linear[skinned], where[skinned] = np.eye(3), 0.0
         keys = list(map(_mesh_key, meshes))  # (afresh: a mesh's arrays may have been replaced)
         rgb = self._linear_colors(colors)
         emissive, shine, spec, shiny = _numbers((emissive, shine, spec, shiny))
         shine = np.clip(shine, 0.0, 1.0)
         alpha = np.array(alpha, np.float64)
         simplified = np.fromiter(simplify, np.bool_, len(simplify))
+        if skin_of is not None:
+            simplified[skin_of >= 0] = False  # (a level of detail has no joints)
         double, cast, outlined = (np.array(x, np.bool_) for x in (double, cast, outlined))
         swarms = [k for k, obj in enumerate(nodes) if type(obj) is Particles or type(obj) is Lines]
         if swarms:  # (each particle drawn as an instance of its Particles' mesh, each line as strips)
             per_object = [mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast,
-                          outlined, simplified]
+                          outlined, simplified] + ([] if skin_of is None else [skin_of])
             mesh_idx, where, linear, rgb, alpha, emissive, shine, spec, shiny, ident, double, cast, outlined, \
-                simplified = self._particle_rows(nodes, swarms, per_object, camera, meshes)
+                simplified, *skin_of = self._particle_rows(nodes, swarms, per_object, camera, meshes)
+            skin_of = skin_of[0] if skin_of else None
             if not len(ident):
                 return None
         flat = [x for key in keys for x in (*key, None)]  # (None ends each mesh's: compared by identity)
@@ -860,9 +891,20 @@ class Renderer(ShadowMaps, Mirrors):
         alpha = np.clip(alpha, 0.0, 1.0)
         # See-through objects, and those with holes, always show their far side, through their near one.
         double = double | (alpha < 1.0) | arrays["clear"][mesh_idx]
+        flip = _determinants(linear) < 0.0
+        n = len(mesh_idx)
+        src, bound, serial, tables = np.full(n, -1, np.int64), np.full(n, -1, np.int64), np.zeros(n, np.int64), _NO_SKIN
+        if skin_of is not None:
+            rows = np.flatnonzero(skin_of >= 0)
+            src[rows], bound[rows], serial[rows], flip[rows], *tables = self._skins.skin(arrays, skin_of[rows],
+                                                                                          mesh_idx[rows])
+            tables = tuple(tables)
 
         return {"mesh": mesh_idx, "pos": where, "lin": np.ascontiguousarray(linear),
-                "flip": _determinants(linear) < 0.0,
+                "flip": flip,
+                # (skinned rows: where each one's vertices start in skin[0], its bounds in skin[1], and a number that
+                # changes whenever its vertices do; -1, -1 and 0 for the rest)
+                "src": src, "bound": bound, "serial": serial, "skin": tables,
                 "rgb": rgb, "double": double, "alpha": alpha,
                 "shine": shine,
                 "specular": np.maximum(spec, 0.0),
@@ -874,6 +916,29 @@ class Renderer(ShadowMaps, Mirrors):
                 # for its own: see Mirrors._reflect)
                 "facing": camera is not None and (bool(swarms) or any(billboard) or len(sprites) > 0),
                 "keys": keys, "mesh_keys": mesh_keys}
+
+    def _skin_culling(self, camera, lights, shine):
+        """What skinned objects are culled by before they are skinned (see skinning.SkinPass.pose): the camera's
+        view, and the PointLights whose shadows an object out of view may still cast into it. None (none culled)
+        without lights, in scenes that may have mirrors (shine: the objects' reflectivity), which show what the
+        camera doesn't, or with a Light (a sun) that has shadows: its map, fitted to the view, can take casters from
+        out of it (culling against it is for later)."""
+        if lights is None or camera is None or self.width < 1 or self.height < 1:
+            return None
+        if self.reflections and self.mirror_bounces > 0 and any(shine):
+            return None
+        shadowed = [light for light in lights if light.shadows and self.shadows]
+        if any(not isinstance(light, PointLight) for light in shadowed):
+            return None
+        with np.errstate(all="ignore"):
+            m = perspective(np.radians(camera.fov), self.width * self.cell_aspect / self.height, camera.near,
+                            camera.far) @ camera.view_matrix()
+            planes = np.array([m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1], m[3] + m[2], m[3] - m[2]])
+            planes /= np.linalg.norm(planes[:, :3], axis=1)[:, None]
+        if not np.isfinite(planes).all():
+            return None
+        positions = np.array([np.asarray(light.position, float) for light in shadowed]).reshape(-1, 3)
+        return planes, positions, np.array([float(light.range) for light in shadowed])
 
     def _particle_rows(self, nodes, swarms, per_object, camera, meshes):
         """The arrays in per_object (one row per object drawn, nodes[k] for row k; the first its mesh, as an index
@@ -1056,7 +1121,7 @@ class Renderer(ShadowMaps, Mirrors):
             return values, []
         values += [inst[k].tobytes()
                    for k in ("mesh", "pos", "lin", "rgb", "double", "ident", "emissive", "cast", "alpha",
-                             "shine", "specular", "shininess", "outline")]
+                             "shine", "specular", "shininess", "outline", "serial")]
         return values, inst["keys"]
 
     def render(self, objects, camera, lights):
@@ -1077,7 +1142,7 @@ class Renderer(ShadowMaps, Mirrors):
         lights = as_lights(lights)
         self._fit()
         self._objects = objects = list(objects)  # (once: objects may be a generator)
-        inst = self._instances(objects, camera)
+        inst = self._instances(objects, camera, lights)
         self._light_rows = light_rows(lights, self.shadows)
         aspect = self.width * self.cell_aspect / max(self.height, 1)
         bg_args, bg_state = background_args(self.background, camera, aspect, self._fb.height)
@@ -1305,11 +1370,11 @@ class Renderer(ShadowMaps, Mirrors):
         off_cut = buf.get(prefix + "off_cut", (n_chunks,), np.int64)
         world = buf.get(prefix + "world", (int(inst_vertex[-1]), 10))
         k = transform(pack["vertices"], pack["normals"], pack["faces"], pack["mesh_vertex"], pack["spheres"],
-                      inst["mesh"], inst["lin"], inst["pos"], double, inst["flip"], inst_vertex,
-                      view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
-                      chunk_inst, chunk_run, chunk_first, chunk_end, pack["mesh_run"], pack["run_spheres"],
-                      pack["run_vertex"],
-                      world, buf.get(prefix + "visible", (n_inst,), np.bool_),
+                      inst["mesh"], inst["lin"], inst["pos"], double, inst["flip"], inst_vertex, inst["src"],
+                      inst["skin"][0], inst["bound"], inst["skin"][1], view_proj, eye, near, clip, vchunk_inst,
+                      vchunk_first, vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first, chunk_end,
+                      pack["mesh_run"], pack["run_spheres"], pack["run_vertex"], world,
+                      buf.get(prefix + "visible", (n_inst,), np.bool_),
                       buf.get(prefix + "seen", (n_chunks,), np.bool_),
                       buf.get(prefix + "needed", (len(vchunk_inst),), np.bool_),
                       whole, cut, off_whole, off_cut)

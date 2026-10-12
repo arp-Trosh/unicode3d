@@ -333,15 +333,17 @@ SETTLE_DRAWS = 30  # shadow maps drawn with a caster unchanged before it joins t
 KEEP_DRAWS = 30  # shadow draws a settled casters' map no light uses is kept for (a light left out for a while)
 
 
-_ROW_MIX = np.random.default_rng(1).integers(1, 2 ** 63, 17, dtype=np.uint64) * np.uint64(2) + np.uint64(1)  # odd
+_ROW_MIX = np.random.default_rng(1).integers(1, 2 ** 63, 18, dtype=np.uint64) * np.uint64(2) + np.uint64(1)  # odd
 
 
 def _caster_rows(inst, mesh_ids):
     """Each instance's mesh (the Mesh itself, by its id in mesh_ids, not its place in the pack, which moves as meshes
-    come and go), pose, colour and opacity: what its part of a shadow map is drawn from. Returns their bits ((N, 17)
+    come and go), pose, colour, opacity and, for a skinned one, the serial of its skinned vertices (which change while
+    its pose, the identity, doesn't): what its part of a shadow map is drawn from. Returns their bits ((N, 18)
     uint64) and a hash of each row ((N,) uint64)."""
     rows = np.concatenate([mesh_ids[inst["mesh"]][:, None].view(np.float64), inst["pos"], inst["lin"].reshape(-1, 9),
-                           inst["rgb"], inst["alpha"][:, None]], axis=1).view(np.uint64)
+                           inst["rgb"], inst["alpha"][:, None], inst["serial"][:, None].view(np.float64)],
+                          axis=1).view(np.uint64)
     return rows, (rows * _ROW_MIX).sum(axis=1, dtype=np.uint64)  # (wrapping round)
 
 
@@ -462,7 +464,7 @@ class ShadowMaps:
         key = ([np.asarray(light.position, float).tobytes() + np.float64(light.range).tobytes()
                 if isinstance(light, PointLight) else np.asarray(light.direction, float).tobytes()
                 for light in shadowed] + [size, cube_size, soft]
-               + [inst[k].tobytes() for k in ("mesh", "pos", "lin", "cast", "rgb", "alpha")]
+               + [inst[k].tobytes() for k in ("mesh", "pos", "lin", "cast", "rgb", "alpha", "serial")]
                + [None if fit is None else fit[0].tobytes() + fit[1].tobytes() for fit in fits], inst["pack"])
         last = self._shadows
         if last is not None and last[0][0] == key[0] and last[0][1] is key[1]:
@@ -590,7 +592,8 @@ class ShadowMaps:
         see-through ones let through into it from `offset`; returns whether it did that. spheres is every instance's
         bounding sphere (centres, radii; see instance_bounds)."""
         buf = self._buffers
-        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "pos", "rgb", "alpha")}
+        sub_inst = {k: inst[k][casters] for k in ("mesh", "lin", "pos", "rgb", "alpha", "src", "bound")}
+        sub_inst["skin"] = inst["skin"]
         if sides == 1:
             k, world, inst_vertex, (chunk_inst, chunk_first, chunk_end, whole, cut, off_whole, off_cut) = \
                 self._shadow_transform(pack, sub_inst, view_mats[0])
@@ -607,7 +610,8 @@ class ShadowMaps:
                 self._shadow_work(pack, sub_inst["mesh"])
             world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
             transform_world(pack["vertices"], pack["mesh_vertex"], sub_inst["mesh"], sub_inst["lin"], sub_inst["pos"],
-                            inst_vertex, vchunk_inst, vchunk_first, vchunk_end, world)
+                            inst_vertex, sub_inst["src"], sub_inst["skin"][0], vchunk_inst, vchunk_first, vchunk_end,
+                            world)
             centres, radii = spheres[0][casters], spheres[1][casters]
             counts = buf.get("shadow_counts", (len(chunk_inst), 6), np.int64)
             count_cube(pack["faces"], pack["mesh_vertex"], sub_inst["mesh"], inst_vertex, world, view_mats, near,
@@ -649,6 +653,11 @@ class ShadowMaps:
         bounds = (buf.get("shadow_centres", (n, 3)), buf.get("shadow_radii", (n,)), buf.get("shadow_box_lo", (n, 3)),
                   buf.get("shadow_box_hi", (n, 3)))
         instance_bounds(pack["spheres"], middles, halves, inst["mesh"], inst["lin"], inst["pos"], *bounds)
+        if len(inst["skin"][1]):  # skinned objects: their own spheres (see skinning.joint_palette)
+            skinned = np.flatnonzero(inst["bound"] >= 0)
+            spheres = inst["skin"][1][inst["bound"][skinned]]
+            bounds[0][skinned], bounds[1][skinned] = spheres[:, :3], spheres[:, 3]
+            bounds[2][skinned], bounds[3][skinned] = spheres[:, :3] - spheres[:, 3:], spheres[:, :3] + spheres[:, 3:]
         return bounds
 
     def _seen(self, box_lo, box_hi):
@@ -720,9 +729,10 @@ class ShadowMaps:
         plan = [buf.get("shadow_" + name, (n_chunks,), np.int64) for name in ("whole", "cut", "off_whole", "off_cut")]
         world = buf.get("shadow_world", (int(inst_vertex[-1]), 10))
         k = transform_depth(pack["vertices"], pack["faces"], pack["mesh_vertex"], pack["spheres"], inst["mesh"],
-                            inst["lin"], inst["pos"], inst_vertex, view_proj, 0.5, vchunk_inst, vchunk_first,
-                            vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first, chunk_end, pack["mesh_run"],
-                            pack["run_spheres"], pack["run_vertex"], world,
+                            inst["lin"], inst["pos"], inst_vertex, inst["src"], inst["skin"][0], inst["bound"],
+                            inst["skin"][1], view_proj, 0.5, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
+                            chunk_inst, chunk_run, chunk_first, chunk_end, pack["mesh_run"], pack["run_spheres"],
+                            pack["run_vertex"], world,
                             buf.get("shadow_visible", (n_inst,), np.bool_),
                             buf.get("shadow_seen", (n_chunks,), np.bool_),
                             buf.get("shadow_needed", (len(vchunk_inst),), np.bool_), *plan)

@@ -33,6 +33,9 @@ class Mesh:
     face_colors: np.ndarray | None = None    # (F, 3 or 4) one colour for each face (used if vertex_colors is None)
     normals: np.ndarray | None = None        # (V, 3) the surface's normal at each vertex, as a model was made with
                                              # (need not be unit length); None works them out (vertex_normals)
+    joints: np.ndarray | None = None         # (V, 4) ints: the joints moving each vertex, of the Skin of the object
+                                             # showing it (Object3D.skin; see skinning.py), as its skin numbers them
+    weights: np.ndarray | None = None        # (V, 4) how much each of those moves it (scaled to add up to 1)
 
     def vertex_normals(self):
         """The unit normal at each vertex (V, 3): `normals` where given, otherwise the area-weighted average of the
@@ -140,6 +143,13 @@ class Mesh:
                                  f"{materials.min()} to {materials.max()}")
             if np.shape(self.uvs) != (n_faces, 3, 2):
                 raise ValueError(f"Mesh.uvs must be ({n_faces}, 3, 2) for a textured mesh, not {np.shape(self.uvs)}")
+        if self.joints is not None or self.weights is not None:
+            joints, weights = np.asarray(self.joints), np.asarray(self.weights)
+            if joints.shape != (n_vertices, 4) or weights.shape != (n_vertices, 4):
+                raise ValueError(f"Mesh.joints and Mesh.weights must both be ({n_vertices}, 4), a row for each "
+                                 f"vertex, not {joints.shape} and {weights.shape}")
+            if not (np.issubdtype(joints.dtype, np.integer) or not joints.size) or (joints.size and joints.min() < 0):
+                raise ValueError(f"Mesh.joints must be whole numbers from 0, not {joints.dtype}")
 
     def mipmaps(self, material):
         """Mipmap chain of textures[material], built on first use and rebuilt if the texture is replaced. Meshes
@@ -160,7 +170,7 @@ class Mesh:
         extent = float((hi - lo).max()) or 1.0
         verts = (self.vertices - (lo + hi) / 2.0) * (size / extent)
         return Mesh(verts, self.faces, self.uvs, self.materials, self.textures, self.vertex_colors, self.face_colors,
-                    self.normals)
+                    self.normals, self.joints, self.weights)
 
 
 def load_obj(path, **options):

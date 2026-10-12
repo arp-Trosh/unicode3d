@@ -13,6 +13,8 @@ import unittest.mock
 import numba
 import numpy as np
 
+from .figures import figure, tube_mesh
+
 from unicode3d import fonts, pictures, terminal
 from unicode3d.animation import Animation, Clip, Track
 from unicode3d.examples.dice import DIE_VALUES, RollAnimation, make_die, orientation_showing, top_face
@@ -376,6 +378,11 @@ class RenderTests(unittest.TestCase):
         scenes.append(([*crowd[:30], sparks, puffs, lines, beam,
                         Object3D(textured_quad(1.0, 1.0, holes), np.array([0.5, 0.2, 0.5]), color=(255, 255, 255),
                                  billboard=True)], shadowed))
+        # Skinned figures (one of many faces, in runs; one mirrored), bent by their joints, casting shadows.
+        figures = [figure(tube_mesh(4, rings=10, segments=16), bones=4, position=(-0.8, -1.0, 0.0), bend=0.4)[0],
+                   figure(position=(0.6, -1.0, 0.3), bend=-0.6)[0], figure(position=(0.0, -1.0, -0.8), bend=0.9)[0]]
+        figures[2].skin.joints[0].scale = (-1.0, 0.8, 1.0)
+        scenes.append(([*crowd[:12], *figures], shadowed))
         ortho = Camera(position=np.array([3.0, 3.0, 4.0]), target=np.zeros(3), projection="ortho", size=4.0)
 
         def draw(threads):

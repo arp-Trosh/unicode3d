@@ -760,6 +760,8 @@ def _facing(world, faces, f, v0, eye):
     return nx * (eye[0] - a[0]) + ny * (eye[1] - a[1]) + nz * (eye[2] - a[2]) > 0
 
 
+NO_SKINNED = np.zeros((2, 0, 3))  # transform()'s `skinned` rows when no instance takes any (every inst_src -1)
+NO_BOUNDS = np.zeros((0, 4))  # and its `bounds` (every inst_bound -1)
 NO_CLIP = np.array([0.0, 0.0, 0.0, 1.0])  # a clipping plane (a, b, c, d: keeps a x + b y + c z + d > 0) keeping all
 
 
@@ -901,15 +903,20 @@ def _mark_needed(seen, chunk_inst, chunk_run, run_vertex, inst_vchunk, needed):
 
 @njit(cache=True, error_model="numpy", parallel=True)
 def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_double,
-              inst_flip, inst_vertex, view_proj, eye, near, clip, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
-              chunk_inst, chunk_run, chunk_first, chunk_end, mesh_run, run_spheres, run_vertex, world, visible, seen,
-              needed, whole, cut, off_whole, off_cut):
+              inst_flip, inst_vertex, inst_src, skinned, inst_bound, bounds, view_proj, eye, near, clip, vchunk_inst,
+              vchunk_first, vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first, chunk_end, mesh_run,
+              run_spheres, run_vertex, world, visible, seen, needed, whole, cut, off_whole, off_cut):
     """First pass of projecting instances (see project()): vertices in the world, and where each piece
     of work will write its triangles. Returns the number of triangles.
 
     Instance i shows mesh inst_mesh[i], its points p placed at inst_lin[i] @ p + inst_pos[i] (inst_lin: rotation,
     scale along each axis, and the same of its parents, as one (3, 3) matrix); inst_flip[i] says the matrix
     mirrors (a negative determinant), which turns faces inside out, so that which way they face flips too.
+    inst_src[i] is where its vertices come from: -1, the pack (vertices, vertex_normals, from row mesh_vertex[m]);
+    else rows inst_src[i]: of `skinned` (2, S, 3: positions, normals), already in the world (with lin = I and
+    pos = 0). Such an instance (a skinned object) has bounds of its own, rows of `bounds` (B, 4: centre, radius, in
+    the world) from inst_bound[i] (else -1): its sphere, then one for each run of its mesh, in place of spheres[m]
+    and run_spheres.
 
     visible[i]: whether instance i is at least partly in view (its bounding sphere, spheres[mesh]).
     Face chunk c covers faces chunk_first[c]:chunk_end[c] of instance chunk_inst[c] (chunks in instance order):
@@ -930,11 +937,12 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         m = inst_mesh[inst]
         lin = inst_lin[inst]
         position = inst_pos[inst]
-        sx, sy, sz = spheres[m, 0], spheres[m, 1], spheres[m, 2]
+        sphere = spheres[m] if inst_bound[inst] < 0 else bounds[inst_bound[inst]]
+        sx, sy, sz = sphere[0], sphere[1], sphere[2]
         cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
         cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
         cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
-        radius = spheres[m, 3] * stretch(lin)
+        radius = sphere[3] * stretch(lin)
         visible[inst] = (not _outside_view(view_proj, cx, cy, cz, radius, near)
                          and clip[0] * cx + clip[1] * cy + clip[2] * cz + clip[3] > -radius)
     for c in prange(chunk_inst.shape[0]):
@@ -942,7 +950,11 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         m = inst_mesh[inst]
         seen[c] = visible[inst]
         if visible[inst] and mesh_run[m + 1] - mesh_run[m] > 1:  # (one run: its sphere is the mesh's)
-            seen[c] = _run_seen(view_proj, near, clip, inst_lin[inst], inst_pos[inst], run_spheres, chunk_run[c])
+            if inst_bound[inst] < 0:
+                seen[c] = _run_seen(view_proj, near, clip, inst_lin[inst], inst_pos[inst], run_spheres, chunk_run[c])
+            else:
+                seen[c] = _run_seen(view_proj, near, clip, inst_lin[inst], inst_pos[inst], bounds,
+                                    inst_bound[inst] + 1 + chunk_run[c] - mesh_run[m])
     _mark_needed(seen, chunk_inst, chunk_run, run_vertex, inst_vchunk, needed)
     for j in prange(vchunk_inst.shape[0]):
         if not needed[j]:
@@ -954,8 +966,11 @@ def transform(vertices, vertex_normals, faces, mesh_vertex, spheres, inst_mesh, 
         _normal_matrix(lin, normal)
         position = inst_pos[inst]
         v0, w0 = mesh_vertex[m], inst_vertex[inst]
+        points, normals = vertices, vertex_normals
+        if inst_src[inst] >= 0:
+            v0, points, normals = inst_src[inst], skinned[0], skinned[1]
         for v in range(vchunk_first[j], vchunk_end[j]):
-            p, n, out = vertices[v0 + v], vertex_normals[v0 + v], world[w0 + v]
+            p, n, out = points[v0 + v], normals[v0 + v], world[w0 + v]
             for i in range(3):
                 out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
                 out[3 + i] = normal[i, 0] * n[0] + normal[i, 1] * n[1] + normal[i, 2] * n[2]
@@ -1237,31 +1252,38 @@ def _plan_offsets(chunk_inst, whole, cut, off_whole, off_cut):
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_vertex, view_proj, near,
-                    vchunk_inst, vchunk_first, vchunk_end, inst_vchunk, chunk_inst, chunk_run, chunk_first, chunk_end,
-                    mesh_run, run_spheres, run_vertex, world, visible, seen, needed, whole, cut, off_whole, off_cut):
+def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, inst_pos, inst_vertex, inst_src,
+                    skinned, inst_bound, bounds, view_proj, near, vchunk_inst, vchunk_first, vchunk_end, inst_vchunk,
+                    chunk_inst, chunk_run, chunk_first, chunk_end, mesh_run, run_spheres, run_vertex, world, visible,
+                    seen, needed, whole, cut, off_whole, off_cut):
     """transform() for a shadow map: the instances' vertices in the world and in the light's clip space (world
     columns 0:3 and 6:10; a shadow map has no use for normals, columns 3:6, which are left as they were), and the
     plan of where each chunk of faces writes its triangles, for project_depth() (a cube map takes transform_world()
     instead). Face chunks are the meshes' runs, left out when out of the light's view as in
     transform() (seen, needed), with the vertex chunks only they use. Every face is drawn whatever way it faces,
     and the only clipping is against the near plane, as project_depth() does it: a face with every corner in front
-    of it is one whole triangle, one with one or two leaves one or two."""
+    of it is one whole triangle, one with one or two leaves one or two. inst_src, skinned, inst_bound, bounds: see
+    transform()."""
     for inst in prange(inst_mesh.shape[0]):
         m = inst_mesh[inst]
         lin = inst_lin[inst]
         position = inst_pos[inst]
-        sx, sy, sz = spheres[m, 0], spheres[m, 1], spheres[m, 2]
+        sphere = spheres[m] if inst_bound[inst] < 0 else bounds[inst_bound[inst]]
+        sx, sy, sz = sphere[0], sphere[1], sphere[2]
         cx = lin[0, 0] * sx + lin[0, 1] * sy + lin[0, 2] * sz + position[0]
         cy = lin[1, 0] * sx + lin[1, 1] * sy + lin[1, 2] * sz + position[1]
         cz = lin[2, 0] * sx + lin[2, 1] * sy + lin[2, 2] * sz + position[2]
-        visible[inst] = not _outside_view(view_proj, cx, cy, cz, spheres[m, 3] * stretch(lin), near)
+        visible[inst] = not _outside_view(view_proj, cx, cy, cz, sphere[3] * stretch(lin), near)
     for c in prange(chunk_inst.shape[0]):
         inst = chunk_inst[c]
         m = inst_mesh[inst]
         seen[c] = visible[inst]
         if visible[inst] and mesh_run[m + 1] - mesh_run[m] > 1:  # (one run: its sphere is the mesh's)
-            seen[c] = _run_seen(view_proj, near, NO_CLIP, inst_lin[inst], inst_pos[inst], run_spheres, chunk_run[c])
+            if inst_bound[inst] < 0:
+                seen[c] = _run_seen(view_proj, near, NO_CLIP, inst_lin[inst], inst_pos[inst], run_spheres, chunk_run[c])
+            else:
+                seen[c] = _run_seen(view_proj, near, NO_CLIP, inst_lin[inst], inst_pos[inst], bounds,
+                                    inst_bound[inst] + 1 + chunk_run[c] - mesh_run[m])
     _mark_needed(seen, chunk_inst, chunk_run, run_vertex, inst_vchunk, needed)
     for j in prange(vchunk_inst.shape[0]):
         if not needed[j]:
@@ -1271,8 +1293,11 @@ def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, 
         lin = inst_lin[inst]
         position = inst_pos[inst]
         v0, w0 = mesh_vertex[m], inst_vertex[inst]
+        points = vertices
+        if inst_src[inst] >= 0:
+            v0, points = inst_src[inst], skinned[0]
         for v in range(vchunk_first[j], vchunk_end[j]):
-            p, out = vertices[v0 + v], world[w0 + v]
+            p, out = points[v0 + v], world[w0 + v]
             for i in range(3):
                 out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
             for i in range(4):
@@ -1294,18 +1319,22 @@ def transform_depth(vertices, faces, mesh_vertex, spheres, inst_mesh, inst_lin, 
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def transform_world(vertices, mesh_vertex, inst_mesh, inst_lin, inst_pos, inst_vertex, vchunk_inst, vchunk_first,
-                    vchunk_end, world):
+def transform_world(vertices, mesh_vertex, inst_mesh, inst_lin, inst_pos, inst_vertex, inst_src, skinned, vchunk_inst,
+                    vchunk_first, vchunk_end, world):
     """The instances' vertices in the world, into world columns 0:3 (as transform_depth(), for a cube map, which
-    projects them into its faces itself: count_cube(), project_cube()); every vertex chunk, in parallel."""
+    projects them into its faces itself: count_cube(), project_cube()); every vertex chunk, in parallel. inst_src,
+    skinned: see transform()."""
     for j in prange(vchunk_inst.shape[0]):
         inst = vchunk_inst[j]
         m = inst_mesh[inst]
         lin = inst_lin[inst]
         position = inst_pos[inst]
         v0, w0 = mesh_vertex[m], inst_vertex[inst]
+        points = vertices
+        if inst_src[inst] >= 0:
+            v0, points = inst_src[inst], skinned[0]
         for v in range(vchunk_first[j], vchunk_end[j]):
-            p, out = vertices[v0 + v], world[w0 + v]
+            p, out = points[v0 + v], world[w0 + v]
             for i in range(3):
                 out[i] = lin[i, 0] * p[0] + lin[i, 1] * p[1] + lin[i, 2] * p[2] + position[i]
 

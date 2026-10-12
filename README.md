@@ -223,8 +223,9 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   floor is crisp close by and smooth towards the horizon. Textures repeat (tile) where texture
   coordinates go beyond 0..1.
 - **Models:** glTF 2.0 files (`.gltf`, `.glb`) with their node hierarchy, PBR materials (mapped
-  onto unicode3d's), textures and animations; Wavefront OBJ files with their MTL materials (colour,
-  highlights, glow, opacity, textures and cut-outs).
+  onto unicode3d's), textures and animations, skinned characters bending with their skeletons;
+  Wavefront OBJ files with their MTL materials (colour, highlights, glow, opacity, textures and
+  cut-outs).
 - **Fog and depth cues:** fog by distance in the world, fading far surfaces into the sky or
   background (or a colour), or simple depth cueing; and where one surface passes in front of another
   the far side gets a dark outline.
@@ -743,7 +744,8 @@ fb = renderer.render([*ship, ground], camera, lights)
 ```
 
 For several of one model, load it once and copy it: `model.copy()` gives another with parts, nodes
-and animations of its own (posed as the original is now, its clips with their own clocks), sharing
+and animations of its own (posed as the original is now, its clips with their own clocks, its skinned
+parts on its own joints), sharing
 the meshes, textures, materials and keyframes, so a copy costs a fraction of a millisecond and
 little memory. Its root hangs from the same parent as the original's.
 
@@ -773,8 +775,9 @@ numpy), and keeps a model's parts, their hierarchy and its animations:
   from it goes too. `model.names` lists the parts by node, mesh and material name.
 - **Meshes:** positions, normals (flat where a mesh has none, as glTF asks), texture coordinates,
   vertex colours, triangles, strips and fans, sparse and quantized data, and morph targets at their
-  default weights. Skinned meshes load in the pose their joints give them. Points and lines are
-  skipped. Two nodes using one mesh share it.
+  default weights. Skinned meshes keep their joints and weights, and their parts a `Skin` on the
+  joints' nodes, so they bend as the joints move (see [Skinned meshes](#skinned-meshes)). Points and
+  lines are skipped. Two nodes using one mesh share it.
 - **Materials** are physically based in glTF, and map approximately onto unicode3d's: the base colour
   (and its texture) is the colour; rough surfaces get no highlights, smooth ones tight bright ones
   (`specular`, `shininess`); metal reflects (`reflectivity`), much less when rough, since reflections
@@ -786,8 +789,8 @@ numpy), and keeps a model's parts, their hierarchy and its animations:
   would show little of them), and textures repeat whatever their sampler says.
 - **Animations** come as `model.animations`, by name: each a `Clip` (see [Animation](#animation))
   moving the nodes along their translation, rotation and scale keyframes, with linear, step or
-  cubic-spline interpolation. Skinned and morph-target animation aren't supported: those meshes
-  stay in the pose they loaded in, and `model.warnings` says so.
+  cubic-spline interpolation; skinned meshes follow the joints they move. Morph-target animation
+  isn't supported: those meshes keep their default weights, and `model.warnings` says so.
 - **Refused:** a file that needs Draco or meshopt compression or KTX2 textures raises `ValueError`
   saying which, rather than loading wrong; so does one that isn't glTF 2 or is broken in its
   structure. Smaller problems (a missing image, a broken accessor) leave that piece out, with a
@@ -831,6 +834,43 @@ vertex) replaces the ones worked out from the faces, so that a model's texture s
 separate vertices) needn't show as creases. `mesh.check()` raises a `ValueError` if a mesh's arrays
 don't fit together (a face naming a vertex that isn't there, a colour or texture coordinate too few
 or too many); the renderer checks each mesh it draws.
+
+</details>
+
+<details>
+<summary><h3 id="skinned-meshes">Skinned meshes</h3></summary>
+
+A skinned mesh bends with a skeleton: each vertex follows up to four joints, weighted, so a
+character's arm is one mesh that bends at the elbow rather than parts hinged together. glTF files
+load this way (see [Models](#models)), and their animations move the joints. One can be built in
+code too: give the mesh `joints` and `weights` (one row of four for each vertex: which joints of
+the skin move it, and how much), and the object a `Skin` on those joints, any `Node`s:
+
+```python
+from unicode3d import Mesh, Node, Object3D, Skin
+
+hip = Node()
+knee = Node(position=np.array([0.0, 1.0, 0.0]), parent=hip)
+leg = Mesh(vertices, faces, joints=joints, weights=weights)   # joints, weights: (V, 4)
+obj = Object3D(leg, skin=Skin([hip, knee]))   # bound as the joints stand now
+knee.rotation = quat_axis_angle((1, 0, 0), 0.6)  # the leg bends at the knee
+```
+
+`Skin(joints, inverse_bind=None)`: `inverse_bind` holds a matrix for each joint (4x4) taking the
+mesh's vertices into that joint's space as it stood when the mesh was bound to it (glTF gives
+them); without it, the joints' poses when the `Skin` is made are taken as that pose. Weights are
+scaled to add up to 1 (NaN and negative ones count as 0).
+
+The joints place a skinned object, so its own position, rotation and scale don't count; its
+visibility does (its joints' doesn't), and so do its colour and material. It is skinned once a
+frame, for every pass that draws it (the view, shadows, mirrors), and only when its joints' matrices
+changed since the last frame, so idle characters cost nothing to skin. Out of view, it isn't
+skinned at all, where nothing could show it (no shadowed sun, no mirrors, no shadowed lamp within
+reach). `world_bounds()` boxes it as it is drawn, and `skin.pose(mesh)` gives its vertices and
+normals in the world; `model.copy()` gives each copy's parts a skin on the copy's joints. Ray and
+overlap queries (`Colliders`) see its mesh as it was bound, placed by the object, not as it is
+posed. A skinned object is never simplified (`Renderer.simplify`) nor a mirror, and ignores
+`billboard`.
 
 </details>
 

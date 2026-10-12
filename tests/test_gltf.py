@@ -382,7 +382,7 @@ class GltfTests(unittest.TestCase):
         lo, hi = model.bounds()
         self.assertAlmostEqual(float((hi - lo).max()) * model.root.scale, 2.0)
 
-    def test_skins_and_morph_targets_load_posed(self):
+    def test_skins_load_with_their_joints_and_morph_targets_posed(self):
         b = Builder()
         joints = b.accessor(np.zeros((4, 4)), USHORT)
         weights = b.accessor(np.tile([1.0, 0, 0, 0], (4, 1)))
@@ -404,10 +404,18 @@ class GltfTests(unittest.TestCase):
         model = load_gltf(b.glb(self.path("skin.glb")))
         skinned_obj = model.names["Skinned"][0]
         self.assertIs(skinned_obj.parent, model.root)
-        np.testing.assert_allclose(skinned_obj.mesh.vertices, QUAD + (0, 1, 0))  # moved up by its bone
+        np.testing.assert_allclose(skinned_obj.mesh.vertices, QUAD)  # as bound,
+        self.assertEqual(skinned_obj.mesh.joints.shape, (4, 4))
+        self.assertIs(skinned_obj.skin.joints[0], model.nodes["Bone"])  # and posed by its bone, which animates
+        np.testing.assert_allclose(skinned_obj.skin.pose(skinned_obj.mesh)[0], QUAD + (0, 1, 0))
+        model.nodes["Bone"].position = np.array([0.0, 3.0, 0.0])
+        np.testing.assert_allclose(skinned_obj.skin.pose(skinned_obj.mesh)[0], QUAD + (0, 3, 0))
+        lo, hi = skinned_obj.world_bounds()
+        np.testing.assert_allclose(lo, (-1, 2, 0))
+        np.testing.assert_allclose(hi, (1, 4, 0))
         np.testing.assert_allclose(model.nodes["Morph"].mesh.vertices[:, 2], 1.0)  # half way to its target
         self.assertEqual(rotate, 0)
-        self.assertTrue(any("skinned" in w for w in model.warnings))
+        self.assertFalse(any("skinned" in w for w in model.warnings))
         self.assertTrue(any("morph" in w for w in model.warnings))
 
     def test_animations(self):

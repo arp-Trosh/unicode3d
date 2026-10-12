@@ -39,7 +39,7 @@ from .background import Sky
 from .mesh import Mesh, make_box
 from .pictures import cells_picture
 from .queries import Colliders
-from .scene import Camera, Light, Lines, Object3D, Particles, PointLight, Renderer, union_bounds
+from .scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Skin, union_bounds
 
 __all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
            "frame_to_text", "crash_log_path"]
@@ -521,6 +521,12 @@ def compile_kernels():
     stained = np.full((4, 4, 4), 0.5)
     objects += [Object3D(make_box(textures=[t] * 6), position=np.array([x, 1.0, 0.0]))  # alpha in textures
                 for t, x in ((holes, -0.5), (stained, 0.5))]
+    bent = make_box()  # skinned: its joints' matrices, and its vertices blended by them
+    bent.joints = np.tile([0, 1, 0, 0], (len(bent.vertices), 1))
+    bent.weights = np.tile([0.5, 0.5, 0.0, 0.0], (len(bent.vertices), 1))
+    bones = [Node(position=np.array([0.0, 1.5, 0.0]))]
+    bones.append(Node(position=np.array([0.0, 0.5, 0.0]), parent=bones[0]))
+    objects += [Object3D(bent, skin=Skin(bones))]
     mirror = Mesh(np.array([(-2, -1, -1), (2, -1, -1), (2, 1, -1), (-2, 1, -1)], float),
                   np.array([(0, 1, 2), (0, 2, 3)]))
     objects += [Object3D(mirror, reflectivity=0.8), Object3D(make_box(), position=np.array([0.0, -1.0, 0.0]),

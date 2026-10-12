@@ -6,7 +6,8 @@ node hierarchy and animations. models.load_model() calls load_gltf() for these f
 What is read:
 - Meshes: positions, normals (flat, as glTF asks, where a mesh has none), texture coordinates, vertex colours,
   triangles, strips and fans (points and lines are skipped), sparse accessors, and morph targets at their
-  default weights. Skinned meshes are posed by their joints at load (the pose the file leaves them in).
+  default weights. Skinned meshes keep their vertices as bound, with their joints and weights (JOINTS_0,
+  WEIGHTS_0), and their objects a Skin on the joints' Nodes: they are posed by the joints as they move.
 - Materials (PBR, mapped approximately onto an Object3D's): base colour and its texture to color and the texture;
   roughness to highlights (specular, shininess); metallic, much less for rough metal, to reflectivity; emissive to
   emissive; alphaMode OPAQUE, MASK and BLEND to solid, cut-out and see-through; doubleSided. Extensions:
@@ -15,10 +16,10 @@ What is read:
 - Nodes: each becomes a Node, or an Object3D where it has a mesh of one part, under the Model's root, with its
   translation, rotation and scale (or matrix): Model.nodes has them by name.
 - Animations: translation, rotation and scale channels, with LINEAR, STEP or CUBICSPLINE interpolation, each an
-  animation.Clip in Model.animations.
+  animation.Clip in Model.animations (skinned meshes follow the joints these move).
 
 Not read: cameras, lights, normal, occlusion and metallic-roughness textures (which a terminal's pixels can't show
-much of), skinned and morph animation (those meshes keep the pose they load in), and compressed meshes and
+much of), morph animation (those meshes keep their default weights), and compressed meshes and
 textures (Draco, meshopt, KTX2/Basis): a file that requires those is refused with a ValueError rather than loaded
 wrong. What else can't be loaded (an image that isn't there, a broken accessor) is left out with a warning.
 """
@@ -33,7 +34,7 @@ import numpy as np
 from .animation import Animation, Clip, RotationTrack, SplineTrack, Track, step
 from .color import linear_to_srgb
 from .mesh import Mesh
-from .scene import Model, Node, Object3D
+from .scene import Model, Node, Object3D, Skin
 from .texture import MAX_TEXTURE, load_image
 from .transforms import quat_from_matrix, quat_to_matrix, scale3
 
@@ -329,7 +330,7 @@ def _triangles(indices, mode):
 
 def _primitive(file, prim, material, weights, skin):
     """A primitive as a Mesh (None if it has no triangles). weights: the mesh's morph target weights; skin: None, or
-    (joint matrices (J, 4, 4), which posed the vertices)."""
+    how many joints its skin has (its vertices keep their joints and weights, Mesh.joints and Mesh.weights)."""
     mode = prim.get("mode", TRIANGLES)
     if mode not in (TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN):
         return None
@@ -360,14 +361,14 @@ def _primitive(file, prim, material, weights, skin):
                 positions = positions + weight * file.accessor(target["POSITION"])[:count, :3]
             if "NORMAL" in target and normals is not None:
                 normals = normals + weight * file.accessor(target["NORMAL"])[:count, :3]
+    joints = weights4 = None
     if skin is not None:
         joints, weights4 = attribute("JOINTS_0", 4), attribute("WEIGHTS_0", 4)
-        if joints is not None and weights4 is not None:
-            joints = np.clip(joints[:, :4].astype(np.int64), 0, len(skin) - 1)
-            blend = np.einsum("vk,vkij->vij", weights4[:, :4], skin[joints])  # (V, 4, 4)
-            positions = np.einsum("vij,vj->vi", blend[:, :3, :3], positions) + blend[:, :3, 3]
-            if normals is not None:
-                normals = np.einsum("vij,vj->vi", blend[:, :3, :3], normals)
+        if joints is None or weights4 is None:
+            joints = weights4 = None
+        else:
+            joints = np.clip(joints[:, :4].astype(np.int64), 0, skin - 1)
+            weights4 = weights4[:, :4]
     colors = attribute("COLOR_0", 3)
     if colors is not None:
         rgb = _srgb(colors[:, :3])
@@ -389,10 +390,12 @@ def _primitive(file, prim, material, weights, skin):
         positions, faces = positions[corners], np.arange(len(corners), dtype=np.int64).reshape(-1, 3)
         colors = None if colors is None else colors[corners]
         uv = None if uv is None else uv[corners]
+        joints, weights4 = (None, None) if joints is None else (joints[corners], weights4[corners])
     used, local = np.unique(faces, return_inverse=True)  # only the vertices the triangles use
     faces = local.reshape(-1, 3).astype(np.int64)
     mesh = Mesh(positions[used], faces, vertex_colors=None if colors is None else colors[used],
-                normals=None if normals is None else normals[used])
+                normals=None if normals is None else normals[used],
+                joints=None if joints is None else joints[used], weights=None if joints is None else weights4[used])
     if uv is not None:
         uv = uv[used][:, :2]
         if material.uv_matrix is not None:
@@ -523,7 +526,7 @@ def _load(path, max_texture, double_sided, scene):
         order.append(i)
         todo += [(c, built[i], world[i]) for c in reversed(info.get("children", []))]
 
-    skinned = set()  # joints that move skinned meshes, which animations can't
+    skins = []  # (objects, the skin's joints (node indices), inverse bind matrices): given Skins once nodes are built
     for i in order:
         info, node = nodes[i], built[i]
         name = _name(info.get("name"), f"node {i}")
@@ -543,18 +546,20 @@ def _load(path, max_texture, double_sided, scene):
                 joints = skin_info["joints"]
                 inverse = (file.accessor(skin_info["inverseBindMatrices"]).reshape(-1, 4, 4).transpose(0, 2, 1)
                            if "inverseBindMatrices" in skin_info else np.tile(np.eye(4), (len(joints), 1, 1)))
-                skin = np.stack([world.get(j, np.eye(4)) @ inverse[k] for k, j in enumerate(joints)])
-                skinned.update(joints)
+                if not joints or len(inverse) < len(joints) or not all(j in built for j in joints):
+                    raise ValueError(f"{len(joints)} joints, {len(inverse)} inverse bind matrices, "
+                                     f"joints {[j for j in joints if j not in built]} not in the scene")
+                skin = (list(joints), np.ascontiguousarray(inverse[:len(joints)]))
                 parent = root  # posed by its joints, in the scene's space: the node's own place doesn't count
             except BROKEN as e:
                 file.warnings.append(f"node {name}: skin left out ({_problem(e)})")
         parts = []
         for p, prim in enumerate(mesh_info.get("primitives", [])):
             mat = material(prim.get("material"))
-            key = (info["mesh"], p, repr(info.get("skin")), repr(weights))
+            key = (info["mesh"], p, repr(info.get("skin") if skin is not None else None), repr(weights))
             try:
-                if key not in meshes or skin is not None:
-                    meshes[key] = _primitive(file, prim, mat, weights, skin)
+                if key not in meshes:
+                    meshes[key] = _primitive(file, prim, mat, weights, None if skin is None else len(skin[0]))
             except BROKEN as e:
                 file.warnings.append(f"mesh {_name(mesh_info.get('name'), info['mesh'])} part {p}: {_problem(e)}")
                 meshes[key] = None
@@ -580,14 +585,21 @@ def _load(path, max_texture, double_sided, scene):
                 model.names.setdefault(label, []).extend(objects)
         for obj, (_, mat) in zip(objects, parts):
             model.names.setdefault(mat.material.name, []).append(obj)
+        if skin is not None:
+            skins.append(([obj for obj, (mesh, _) in zip(objects, parts) if mesh.joints is not None], *skin))
     for i in order:
         if built[i].parent is None:
             built[i].parent = root
+    for objects, joints, inverse in skins:  # (on the joints as built: a joint with a mesh became its Object3D)
+        if objects:
+            skin = Skin([built[j] for j in joints], inverse)
+            for obj in objects:
+                obj.skin = skin
     model.materials = {m.material.name: m.material for m in materials.values() if m.material.name != "default"}
 
     for a, info in enumerate(file.json.get("animations", [])):
         name = _name(info.get("name"), f"animation {a}")
-        tracks, morph, joints = {}, False, False
+        tracks, morph = {}, False
         for channel in info.get("channels", []):
             try:
                 target = channel["target"]
@@ -597,14 +609,10 @@ def _load(path, max_texture, double_sided, scene):
                     continue
                 if not isinstance(node, int) or node not in built or attr not in ("translation", "rotation", "scale"):
                     continue
-                joints = joints or node in skinned
                 sampler = info["samplers"][channel["sampler"]]
                 tracks.setdefault(node, {})[{"translation": "position"}.get(attr, attr)] = _tracks(file, sampler, attr)
             except BROKEN as e:
                 file.warnings.append(f"animation {name}: a channel left out ({_problem(e)})")
-        if joints:
-            file.warnings.append(f"animation {name}: moves the joints of a skinned mesh, which stays as it loaded "
-                                 "(skinned animation isn't supported)")
         if morph:
             file.warnings.append(f"animation {name}: morph target weights aren't animated")
         if tracks:

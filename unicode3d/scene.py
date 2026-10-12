@@ -19,11 +19,12 @@ from .texture import alpha_kind
 from .lines import Lines
 from .particles import Particles
 from .renderer import Anchor, Pick, Renderer
+from .skinning import Skin
 from .sprites import SpriteSheet
 from .transforms import look_at, quat_from_matrix, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
 __all__ = ["Anchor", "Camera", "Light", "Lines", "Model", "Node", "Object3D", "Particles", "Pick", "PointLight", "Renderer",
-           "Sprite", "SpriteSheet", "union_bounds"]
+           "Skin", "Sprite", "SpriteSheet", "union_bounds"]
 
 
 ORTHO_BACK = 1e5  # how far back, in view sizes, the eye an orthographic view is drawn from sits (see Camera)
@@ -197,11 +198,16 @@ class Object3D(_Placed):
                                # "upright": turned only about the vertical (+y stays up the world), for things
                                # standing on the ground (a character, a tree card), even when seen from above
     outline: bool = True  # whether what is behind its edges is darkened (Renderer.outline), setting it apart
+    skin: object = None   # a Skin posing its mesh (a skinned mesh: Mesh.joints, Mesh.weights; see skinning.py): drawn
+                          # where the skin's joints carry its vertices, so its own position, rotation and scale don't
+                          # count (its visibility does, its joints' doesn't). Ray and overlap queries (Colliders) see
+                          # its mesh as it is (the pose it was bound in), placed by the object; world_bounds() the
+                          # pose drawn. Never a mirror, nor simplified (Renderer.simplify), and billboard is ignored
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
-        its parents: to put a label just above it, or frame a camera on it. None if there is nothing to box (no
-        vertices, or a pose that isn't finite). Vertices at NaN or infinity are left out."""
+        its parents (or as its skin poses it): to put a label just above it, or frame a camera on it. None if there
+        is nothing to box (no vertices, or a pose that isn't finite). Vertices at NaN or infinity are left out."""
         return union_bounds([self])
 
 
@@ -355,8 +361,9 @@ class Model:
     def copy(self):
         """Another of the same model, to place, pose, hide and animate on its own: ten goblins from one file loaded
         once. Its root, parts and nodes are new (posed as these are now), and so are its animations, with clocks of
-        their own; meshes, textures, materials and animation keyframes are shared, so a copy costs little memory
-        and no loading. Its root hangs from the same parent as this one's (move it, or set root.parent)."""
+        their own, and its skinned parts' skins, on the copy's joints (joints outside the model stay shared); meshes,
+        textures, materials and animation keyframes are shared, so a copy costs little memory and no loading. Its
+        root hangs from the same parent as this one's (move it, or set root.parent)."""
         made = {}  # id(node): its copy, for nodes under root (root's own parent and above are shared)
 
         def inside(node):
@@ -377,6 +384,8 @@ class Model:
                     twin.scale = node.scale.copy()
                 if node is not self.root:
                     twin.parent = clone(node.parent)
+                if getattr(node, "skin", None) is not None:  # (its joints in the copy, those outside it shared)
+                    twin.skin = node.skin.remapped(clone)
             return made[id(node)]
 
         animations = {}
@@ -472,11 +481,33 @@ class Model:
         return self
 
 
+def _skinned_box(part):
+    """The box (low, high) around a skinned part as its skin poses it; None if there is nothing finite to box."""
+    with np.errstate(all="ignore"):
+        points = part.skin.pose(part.mesh)[0]
+    points = points[np.isfinite(points).all(axis=1)]
+    if not len(points):
+        return None
+    return points.min(axis=0), points.max(axis=0)
+
+
 def union_bounds(objects):
     """The corners (low (3,), high (3,)) of the box around several objects (Object3Ds or Models) as they stand in
-    the world; None if there is nothing to box. Particles and Lines are left out."""
+    the world (skinned ones as their skins pose them); None if there is nothing to box. Particles and Lines are left
+    out."""
     parts = [part for obj in objects for part in ([obj] if hasattr(obj, "mesh") else obj)]
     parts = [part for part in parts if type(part) not in (Particles, Lines) and len(_finite_vertices(part.mesh))]
+    skinned = [part for part in parts if getattr(part, "skin", None) is not None]
+    if skinned:
+        boxes = [_skinned_box(part) for part in skinned]
+        boxes = [box for box in boxes if box is not None]
+        rest = [part for part in parts if getattr(part, "skin", None) is None]
+        box = union_bounds(rest) if rest else None
+        if box is not None:
+            boxes.append(box)
+        if not boxes:
+            return None
+        return np.min([lo for lo, _ in boxes], axis=0), np.max([hi for _, hi in boxes], axis=0)
     if not parts:
         return None
     rows, linear, position, _ = scene_poses(parts)  # (each shared parent once)

@@ -472,6 +472,100 @@ def gltf():
                 {"background": Sky()})
 
 
+def _write_skinned_gltf(path):
+    """A skinned figure in glTF (.glb) written to `path`: a tube bound standing straight to a chain of three joints
+    (JOINTS_0 and WEIGHTS_0, inverse bind matrices), which the file's nodes leave bent, under a turned armature; its
+    last joint has a mesh of its own (a box riding on it), and an animation turns its middle one (not played)."""
+    import json
+    from unicode3d.transforms import quat_axis_angle
+    blob, info = bytearray(), {"asset": {"version": "2.0"}, "bufferViews": [], "accessors": [], "meshes": [],
+                               "materials": [], "nodes": []}
+
+    def add(kind, item):
+        info.setdefault(kind, []).append(item)
+        return len(info[kind]) - 1
+
+    def accessor(values, component=5126, kind=None):
+        values = np.asarray(values)
+        data = np.ascontiguousarray(values, {5126: "<f4", 5125: "<u4", 5123: "<u2"}[component])
+        blob.extend(b"\0" * (-len(blob) % 4))
+        blob.extend(data.tobytes())
+        view = add("bufferViews", {"buffer": 0, "byteOffset": len(blob) - data.nbytes, "byteLength": data.nbytes})
+        kind = kind or ("SCALAR" if values.ndim == 1 else f"VEC{values.shape[1]}")
+        return add("accessors", {"bufferView": view, "componentType": component, "count": len(values), "type": kind})
+
+    def quat(axis, angle):  # glTF's order: x, y, z, w
+        q = quat_axis_angle(axis, angle)
+        return [*q[1:], q[0]]
+
+    bones, rings, segments = 3, 8, 14
+    heights = np.linspace(0.0, float(bones), rings * bones + 1)
+    turn = np.linspace(0.0, 2 * np.pi, segments, endpoint=False)
+    radius = 0.28 - 0.05 * heights / bones
+    vertices = np.array([(r * np.cos(a), y, r * np.sin(a)) for y, r in zip(heights, radius) for a in turn])
+    normals = np.c_[np.cos(np.tile(turn, len(heights))), np.zeros(len(vertices)), np.sin(np.tile(turn, len(heights)))]
+    faces = []
+    for r in range(len(heights) - 1):
+        for k in range(segments):
+            a, b = r * segments + k, r * segments + (k + 1) % segments
+            faces += [(a, a + segments, b), (b, a + segments, b + segments)]
+    along = np.clip(vertices[:, 1], 0.0, bones - 1e-9)
+    bone, part = np.floor(along).astype(int), along - np.floor(along)
+    near = np.where(part < 0.5, np.maximum(bone - 1, 0), np.minimum(bone + 1, bones - 1))  # (the joint it bends at)
+    share = 0.5 * np.clip(1.0 - np.minimum(part, 1.0 - part) / 0.35, 0.0, 1.0)
+    joints = np.c_[bone, near, np.zeros((len(bone), 2), int)]
+    weights = np.c_[1.0 - share, share, np.zeros((len(bone), 2))]
+    add("materials", {"name": "skin", "pbrMetallicRoughness": {"baseColorFactor": [0.85, 0.55, 0.4, 1.0],
+                                                              "metallicFactor": 0.0, "roughnessFactor": 0.6}})
+    add("materials", {"name": "hat", "pbrMetallicRoughness": {"baseColorFactor": [0.2, 0.35, 0.8, 1.0],
+                                                             "metallicFactor": 0.0, "roughnessFactor": 0.4}})
+    add("meshes", {"name": "Tube", "primitives": [{"attributes": {
+        "POSITION": accessor(vertices), "NORMAL": accessor(normals), "JOINTS_0": accessor(joints, 5123),
+        "WEIGHTS_0": accessor(weights)}, "indices": accessor(np.array(faces).reshape(-1), 5125), "material": 0}]})
+    hat = make_box(0.4)
+    add("meshes", {"name": "Hat", "primitives": [{"attributes": {
+        "POSITION": accessor(hat.vertices + (0.0, 1.2, 0.0)), "NORMAL": accessor(hat.vertex_normals())},
+        "indices": accessor(hat.faces.reshape(-1), 5125), "material": 1}]})
+    # Bound standing straight: joint k at height k in the armature's space.
+    inverse = np.array([np.linalg.inv(np.array([[1, 0, 0, 0], [0, 1, 0, k], [0, 0, 1, 0], [0, 0, 0, 1]], float))
+                        for k in range(bones)])
+    add("nodes", {"name": "Hip", "children": [1], "rotation": quat([1, 0, 0], 0.15)})
+    add("nodes", {"name": "Knee", "children": [2], "translation": [0.0, 1.0, 0.0], "rotation": quat([0, 0, 1], 0.55)})
+    add("nodes", {"name": "Ankle", "mesh": 1, "translation": [0.0, 1.0, 0.0],
+                  "rotation": quat([0.3, 0.2, 1.0], 0.7), "scale": [1.1, 1.1, 1.1]})
+    add("nodes", {"name": "Figure", "mesh": 0, "skin": 0, "translation": [5.0, 0.0, 0.0]})  # (its place: ignored)
+    add("nodes", {"name": "Armature", "children": [0], "translation": [0.2, 0.0, -0.3],
+                  "rotation": quat([0, 1, 0], 0.6), "scale": [1.1, 1.1, 1.1]})
+    info["skins"] = [{"joints": [0, 1, 2], "inverseBindMatrices": accessor(inverse.transpose(0, 2, 1).reshape(-1, 16),
+                                                                            kind="MAT4")}]
+    info["scenes"], info["scene"] = [{"nodes": [4, 3]}], 0
+    info["animations"] = [{"name": "Wave", "samplers": [
+        {"input": accessor(np.array([0.0, 1.0])), "output": accessor(np.array([quat([0, 0, 1], 0.55),
+                                                                               quat([0, 0, 1], -0.4)]))}],
+        "channels": [{"sampler": 0, "target": {"node": 1, "path": "rotation"}}]}]
+    blob.extend(b"\0" * (-len(blob) % 4))
+    info["buffers"] = [{"byteLength": len(blob)}]
+    text = json.dumps(info).encode()
+    text += b" " * (-len(text) % 4)
+    body = struct.pack("<II", len(text), 0x4E4F534A) + text + struct.pack("<II", len(blob), 0x004E4942) + bytes(blob)
+    with open(path, "wb") as f:
+        f.write(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+    return path
+
+
+def gltf_skinned():
+    """A skinned glTF figure as the file leaves it (added in 0.22.0; until then posed once as it loaded, now by its
+    joints as it is drawn: the two should match), its shadows from the sun and a lamp."""
+    from unicode3d.models import load_model
+    with tempfile.TemporaryDirectory() as folder:
+        loaded = load_model(_write_skinned_gltf(os.path.join(folder, "skinned.glb")))
+    ground = floor(4.0, texture=checks(64, 4))
+    sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
+    lamp = PointLight(np.array([-1.2, 2.2, 1.4]), color=(255, 210, 160), range=5.0, shadows=True)
+    return Shot([Object3D(ground, color=(255, 255, 255)), *loaded], camera((0.5, 1.9, 4.6), (0.3, 1.3, 0.0)),
+                [sun, lamp], {"background": Sky()})
+
+
 def ortho():
     """The courtyard from above and to one side through an orthographic camera (added after 0.7.1), as in an
     isometric game: everything the same size however far off, with sun shadows, mirrors, outlines and fog
@@ -685,6 +779,7 @@ SCENES = {
     "stretched": stretched,
     "model": model,
     "gltf": gltf,
+    "gltf-skinned": gltf_skinned,
     "ortho": ortho,
     "lettering": lettering,
     "detail": detail,

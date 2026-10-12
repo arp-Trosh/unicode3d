@@ -116,11 +116,12 @@ class Mirrors:
     """The Renderer's mirrors (a part of Renderer, in its own module)."""
 
     def _mirrors(self, inst):
-        """Which instances are mirrors: flat, solid (not see-through, no holes) and reflective (Object3D
-        .reflectivity), as a boolean array; each shows the scene reflected in its plane (see _reflect)."""
+        """Which instances are mirrors: flat, solid (not see-through, no holes), reflective (Object3D
+        .reflectivity) and not skinned (flat as it was bound, a cape needn't stay so), as a boolean array; each
+        shows the scene reflected in its plane (see _reflect)."""
         pack = inst["pack"]
         return ((inst["shine"] > 0.0) & (inst["alpha"] >= 1.0) & ~pack["clear"][inst["mesh"]]
-                & np.isfinite(pack["planes"][inst["mesh"], 0]))
+                & np.isfinite(pack["planes"][inst["mesh"], 0]) & (inst["bound"] < 0))  # (skinned: never flat)
 
     def _reflects(self, inst, level):
         """Whether a pass `level` mirrors deep (0: the frame itself) showing instances `inst` has mirrors to show

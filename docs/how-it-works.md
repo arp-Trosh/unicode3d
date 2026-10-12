@@ -314,6 +314,16 @@ A glTF file's animations become clips: keyframe tracks of position, rotation and
 stepped or spline), all on one clock, moving the model's nodes. A door swings on its hinge node and
 everything hanging from it follows.
 
+Characters are mostly skinned: one mesh whose vertices each follow up to four joints of a skeleton,
+weighted. Once a frame, before anything is drawn, a kernel makes each joint's matrix (its pose in the
+world times its inverse bind matrix) and a bounding sphere around each character from spheres around
+its joints; characters wholly out of view are left out there, where no shadow or mirror could show
+them. A second kernel, parallel over chunks of vertices, blends each character's vertices into rows
+already in the world, and every pass of the frame (the view, each shadow map, each mirror) reads those
+rows instead of the mesh's own, placed by the identity. The mesh stays packed once, shared by every
+character showing it, and a character whose joints' matrices haven't changed to the bit keeps last
+frame's rows, so a crowd standing idle costs no skinning at all.
+
 ## Orthographic views
 
 An orthographic camera (isometric and top-down games, board games) shows things the same size however far
@@ -430,8 +440,8 @@ is committed rather than noticed later in a demo.
 This is a software renderer, so it has a ceiling. Every visible triangle costs CPU time, and past a
 few hundred thousand triangles a frame, frames slow down in proportion. Transparency keeps a fixed
 number of layers a pixel, so a fifth pane of glass in line is dropped. Shadow maps are a fixed size
-over the whole scene, so a sun over a large world gives coarse shadows. Models play only what moves
-their nodes: skinned characters stand in the pose they were loaded in, and normal maps aren't read.
+over the whole scene, so a sun over a large world gives coarse shadows. Models play what moves their
+nodes and skeletons, but not morph targets, and normal maps aren't read.
 And the terminal is the final limit: two colours a cell, and whatever font and
 colour depth it has.
 

@@ -58,6 +58,7 @@ class Lines:
     billboard = False  # (Object3D's: each strip faces the camera of itself)
     reflectivity = 0.0
     simplify = False
+    skin = None
     specular = 0.0
     shininess = None
 
