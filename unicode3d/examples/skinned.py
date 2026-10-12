@@ -4,7 +4,8 @@
 
 A puppet hangs on strings from a control bar over the stage, and you work the bar: WASD move it about the stage
 (away, left, back, right, as the view looks), , and . turn it (Left/Right too, from the front), R/F raise and
-lower it, Q/E rock the leg bar (lifting one knee, then the other), Z/X pull the left and right hand strings.
+lower it, Q/E rock the leg bar (lifting one knee, then the other), Z/X pull the left and right hand strings,
+M (held) sings.
 Auto-walk (Space) rocks the leg bar by itself while the bar moves and turns the puppet to face where it goes.
 C opens and closes the curtains, O switches between the view from the front (orthographic; the mouse wheel
 zooms) and walking about the theatre yourself (Up/Down walk, Left/Right turn, drag the mouse to look; steps at
@@ -16,7 +17,15 @@ gravity, held up by its strings (which only pull when taut) and stopped by the s
 kernel). Each frame its skeleton's joints are turned to point along the points, and its body, one mesh skinned to
 them (Mesh.joints and Mesh.weights, Object3D(skin=Skin(joints))), bends smoothly between them. Its nose, eyes, hat
 and hands are ordinary objects whose parents are joints. The curtains are skinned too: pleated sheets, each on a row of joints along the rail and a row along the
-hem, gathered by moving and squeezing the joints (the hem's following the rail's a little late, so they sway).
+hem, gathered by moving and squeezing the joints (the hem's following the rail's a little late, so they sway), and
+billowing by two morph targets (Mesh.morph_targets): a wave running across the cloth, weighted by the cosine and sine
+of the time (Object3D.morph_weights), higher while they move and dying down to a draught after. Singing is a
+morph target too, on the body (the jaw dropping) and on the mouth (an object of its own on the head joint, morphed
+without a skin), weighted with a little vibrato. A second target squashes the head (the eyes, nose, mouth and hat,
+on its joint, moved to match): a puppet landing on the stage after dangling plays a short squash and stretch, a Clip
+of the weights; Enter makes the puppets gasp (the same target weighted below 0, stretching the head, the mouth open)
+and turns them to stone at its height. The chorus does what the lead puppet is told a moment after the one before it,
+singing included: a canon.
 """
 import argparse
 import time
@@ -27,6 +36,7 @@ from numba import njit
 
 from .hud import StatusBar
 from .rigs import figure, figure_rig, skeleton
+from ..animation import Animation, Clip, Track
 from ..background import Gradient
 from ..keys import Key, MouseEvent
 from ..mesh import Mesh, make_box
@@ -43,7 +53,7 @@ ITERATIONS = 12         # constraint passes a step
 HINGE_STIFFNESS = 0.3   # of a hinge's correction made each pass
 FOLD = np.radians(135.0)  # how far knees and elbows bend
 SPLAY = np.radians(45.0)  # how far a thigh swings out to the side
-DAMPING = 3.0           # of the limbs' velocity apart from the whole puppet's, a second (stiff joints)
+DAMPING = 2.4           # of the limbs' velocity apart from the whole puppet's, a second (stiff joints)
 AIR = 0.4               # of the whole puppet's velocity, a second
 FRICTION = 0.8          # of the floor: a point on it slides this much less a step than the floor pushes it up
 BAR_HOME = 2.55         # the bar's height over the stage to start with
@@ -52,13 +62,21 @@ BAR_SPEED = 0.6         # units a second
 BAR_TURN = 1.5          # radians a second
 STRIDE = 0.9            # bar travel for one full rock of the leg bar when walking by itself
 ROCK = 0.65             # the leg bar's rock, radians
-ROCK_SPEED = 1.5        # how fast the leg bar rocks, radians a second
+ROCK_SPEED = 2.0        # how fast the leg bar rocks, radians a second
 LEG_BAR = 0.3           # half its length
 HAND_SLACK, HAND_PULL = 0.2, 0.8  # hand strings: slack at rest, how much shorter pulled in full
 PULL_SPEED = 0.8        # how fast a hand string is pulled in or let out, units a second
 SAG = 0.05              # how much longer the head, back and hand strings are than the puppet standing needs
-WOOD = (255, 255, 255)  # (the wood texture's own colours)
-HANDS = (225, 180, 125)
+WOOD = (225, 225, 225)  # (the wood texture's colours, a little darker)
+HANDS = (200, 160, 110)
+JAW = 0.055             # how far the jaw drops singing
+SING_ATTACK, SING_RELEASE = 0.1, 0.2  # seconds to open the mouth and to close it
+VIBRATO = 4.5           # wobbles a second, while singing
+HEAD = 0.29             # the head's height, from its joint
+SQUASH_DROP, SQUASH_WIDEN = 0.06, 0.25  # a squashed head's top comes down this far, and its middle this much wider
+AIRBORNE = 0.4          # seconds with both feet off the stage (by CLEAR) that make touching it again a landing
+CLEAR = 0.08            # (walking lifts a foot less than this, or not for as long)
+GASP = 0.15             # seconds from Enter to the gasp's height, when the puppets turn to stone
 
 # The chorus.
 MAX_PUPPETS = 14        # in two rows of seven
@@ -183,6 +201,7 @@ class Doll:
                                        (-0.35, 0.0, 0.08), (LEG_BAR, 0.0, 0.18), (-LEG_BAR, 0.0, 0.18)])
         self.string_bar = np.array([0, 0, 0, 0, 0, 1, 1], np.int64)
         self.hand_strings = np.array([3, 4])  # (right, left)
+        self.feet = np.array([i[f"{n} {p}"] for n in ("right", "left") for p in ("ankle", "foot")], np.int64)
 
 
 @njit(cache=True, error_model="numpy")
@@ -486,6 +505,59 @@ def _turn_z(a):
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
+def normal_turns(mesh, targets, step=0.01):
+    """How far each of `targets` (K, V, 3: morph targets for mesh) turns each vertex's normal at full weight, for
+    Mesh.morph_normals: worked out from the mesh moved a little way (step) by each, so as a weight grows the normals
+    turn as the surface does, at first."""
+    flat = mesh.vertex_normals()
+    return np.stack([(Mesh(mesh.vertices + step * t, mesh.faces).vertex_normals() - flat) / step for t in targets])
+
+
+def squash_field(points):
+    """How far the squash target moves points (N, 3) in the head joint's space (y up the head, z forward) at full
+    weight: down, the more the higher (the top by SQUASH_DROP), and out from the head's axis, most at its middle.
+    The parts on the head (eyes, nose, mouth, hat) move by it too, so they stay on it; a weight below 0 stretches
+    the head instead, taller and narrower."""
+    s = np.clip(points[:, 1] / HEAD, 0.0, 1.0)
+    moved = np.zeros_like(points)
+    moved[:, 1] = -SQUASH_DROP * s
+    moved[:, [0, 2]] = (SQUASH_WIDEN * np.sin(np.pi * s))[:, None] * points[:, [0, 2]]
+    return moved
+
+
+def singing(mesh):
+    """The figure's mesh (figure_rig()'s, bound as skeleton() stands) with two morph targets on the head: singing,
+    the jaw (the head's lowest rings) dropped JAW and widened a little to the sides, the rings under it following
+    part of the way; and squashing (squash_field)."""
+    j = skeleton()
+    names = list(j)
+    head = names.index("head")
+    world = Skin(list(j.values())).world_matrices()[head]
+    up = (mesh.vertices - world[:3, 3]) @ world[:3, 1]  # (how far along the head each vertex is)
+    on_head = (mesh.joints[:, 0] == head) | (mesh.joints[:, 1] == head)
+    drop = np.where(on_head, np.interp(up, (-0.01, 0.0, 0.06, 0.12, 0.17), (0.0, 0.45, 1.0, 0.3, 0.0)), 0.0)
+    target = np.zeros((2, len(mesh.vertices), 3))
+    target[0, :, 1] = -JAW * drop
+    across = (mesh.vertices - world[:3, 3]) @ world[:3, 0]
+    target[0] += 0.15 * (drop * across)[:, None] * world[:3, 0]  # (wider, not deeper: the mouth stays in front)
+    local = (mesh.vertices - world[:3, 3]) @ world[:3, :3]  # (in the head's space)
+    target[1, on_head] = squash_field(local[on_head]) @ world[:3, :3].T
+    mesh.morph_targets, mesh.morph_normals = target, normal_turns(mesh, target)
+    return mesh
+
+
+def mouth_mesh():
+    """A dark mouth for the front of the head: a thin slot, with a morph target opening it (its lower edge down by
+    JAW, as the jaw goes, and narrower, an O)."""
+    mesh = block_mesh((0.0, 0.0, 0.0), (0.06, 0.014, 0.016))
+    low = mesh.vertices[:, 1] < 0.0
+    target = np.zeros((1, len(mesh.vertices), 3))
+    target[0, low, 1] = -0.9 * JAW
+    target[0, low, 0] = -0.3 * mesh.vertices[low, 0]
+    mesh.morph_targets = target
+    return mesh
+
+
 def wood_texture(res=(64, 96)):
     """Light wood: pale boards with darker grain lines running along v (up the limbs), a few knots."""
     h, w = res
@@ -521,18 +593,46 @@ class Puppet:
                             for n, node in self.joints.items()}
         self.rest_local = {n: quat_to_matrix(node.rotation) for n, node in self.joints.items()}
         head, box = self.joints["head"], make_box()
+        self.object.morph_weights = np.zeros(2)  # (singing, squashing; always an array, so the skinning plan stays put)
+        self.clip = None  # (a squash or a gasp playing)
+        self.mouth = Object3D(MOUTH, position=(0.0, 0.078, 0.097), color=(45, 15, 15), morph_weights=np.zeros(1),
+                              parent=head)
         self.parts = [
             Object3D(box, position=(0.0, 0.13, 0.1), scale=(0.03, 0.04, 0.06), color=(190, 60, 50), parent=head),
             Object3D(box, position=(0.04, 0.17, 0.095), scale=(0.025, 0.025, 0.02), color=(25, 20, 20), parent=head),
             Object3D(box, position=(-0.04, 0.17, 0.095), scale=(0.025, 0.025, 0.02), color=(25, 20, 20),
                      parent=head),
+            self.mouth,
             Object3D(box, position=(0.0, 0.265, 0.0), scale=(0.2, 0.02, 0.2), color=hat, parent=head),
             Object3D(box, position=(0.0, 0.33, 0.0), scale=(0.12, 0.13, 0.12), color=hat, parent=head),
         ] + [Object3D(HAND, position=(0.0, 0.07, 0.0), color=HANDS, specular=0.3, emissive=0.3, parent=self.joints[f"{s} wrist"])
              for s in ("right", "left")]
+        self.face_parts = [p for p in self.parts if p.parent is head]
+        self.face_home = np.array([p.position for p in self.face_parts], dtype=float)
 
     def objects(self):
         return [self.object] + self.parts
+
+    def play(self, keys, fade=0.05):
+        """Play keyframes (time, (jaw, squash)) on the head, as a Clip, easing in from where it is."""
+        self.clip = Clip([Animation(self.object, morph_weights=Track(keys, easing="ease_in_out"))])
+        self.clip.start(fade)
+
+    def face(self, dt, voice):
+        """The head's morph weights now: what the clip playing gives (then none), its jaw open at least `voice`
+        (0..1, singing); the mouth opened as far as the jaw, and the parts on the head moved with its squash."""
+        w = np.zeros(2)
+        if self.clip is not None:
+            playing = self.clip.update(dt)
+            w = np.array(self.object.morph_weights, dtype=float)
+            if not playing:
+                self.clip = None
+        w[0] = max(w[0], voice)
+        self.object.morph_weights = w
+        self.mouth.morph_weights = w[:1].copy()
+        moved = squash_field(self.face_home) * w[1]
+        for part, home, by in zip(self.face_parts, self.face_home, moved):
+            part.position = home + by
 
     def triangles(self):
         return sum(len(o.mesh.faces) for o in self.objects())
@@ -565,6 +665,7 @@ def pose_puppets(puppets, points):
 
 
 HAND = blob_mesh((0.035, 0.06, 0.02))
+MOUTH = mouth_mesh()
 
 
 # ----- a marionette: the puppet, its bar and strings -----------------------------------------------------------
@@ -587,6 +688,8 @@ class Marionette:
         self.bar = np.array([at[0], BAR_HOME, at[1]])
         self.yaw, self.rock, self.phase = yaw, 0.0, 0.0
         self.pull = np.zeros(2)  # right, left
+        self.voice, self.vibrato = 0.0, 0.0  # how far into a note (0..1), and the vibrato's phase
+        self.air = 0.0  # how long both feet have been off the stage
         self.left_over = 0.0
         self.base_len = np.linalg.norm(self.p[0, doll.string_point] - self.anchors()[0], axis=1)
         self.base_len[doll.hand_strings] += HAND_SLACK
@@ -603,10 +706,13 @@ class Marionette:
         local[leg] = local[leg] @ _turn_z(self.rock).T
         return (self.bar + (0.0, STAGE, 0.0) + local @ _turn_y(self.yaw).T)[None]
 
-    def control(self, dt, move, turn, rise, rock, pulls, auto):
+    def control(self, dt, move, turn, rise, rock, pulls, sing, auto):
         """Work the bar for dt seconds: move (x, z) a unit vector or zero (in the world), turn -1..1, rise -1..1,
-        rock -1..1 (the leg bar), pulls (right, left) 0 or 1; auto: rock the leg bar while moving, and turn to face
-        the way it goes."""
+        rock -1..1 (the leg bar), pulls (right, left) 0 or 1, sing 0 or 1; auto: rock the leg bar while moving, and
+        turn to face the way it goes."""
+        self.voice = float(np.clip(self.voice + (dt / SING_ATTACK if sing else -dt / SING_RELEASE), 0.0, 1.0))
+        self.vibrato = (self.vibrato + 2.0 * np.pi * VIBRATO * dt) % (2.0 * np.pi) if self.voice else 0.0
+
         step = np.array([move[0], 0.0, move[1]]) * BAR_SPEED * dt
         self.bar = self.bar + step
         self.bar[0] = float(np.clip(self.bar[0], -BAR_X, BAR_X))
@@ -639,6 +745,19 @@ class Marionette:
         if not np.isfinite(self.p).all():  # (never seen; but a puppet gone wrong stands up again)
             self.p[...] = self.doll.rest + (self.bar[0], STAGE + 0.03, self.bar[2])
             self.prev[...] = self.p
+        # landing: touching the stage after a while off it, the head squashes (the harder, the more)
+        low = d.feet[np.argmin(self.p[0, d.feet, 1] - d.radius[d.feet])]
+        if self.p[0, low, 1] - d.radius[low] > STAGE + CLEAR:
+            self.air += dt
+        else:
+            if self.air > AIRBORNE:
+                speed = max(0.0, (self.prev[0, low, 1] - self.p[0, low, 1]) / STEP)
+                a = float(np.clip(0.4 + 0.4 * speed, 0.4, 1.0))
+                self.puppet.play([(0.0, (0.0, 0.0)), (0.07, (0.0, a)), (0.2, (0.0, -0.35 * a)),
+                                  (0.34, (0.0, 0.12 * a)), (0.48, (0.0, 0.0))])
+            self.air = 0.0
+        o = self.voice * self.voice * (3.0 - 2.0 * self.voice)
+        self.puppet.face(dt, o * (0.85 + 0.15 * np.sin(self.vibrato)))
         place = self.bar + (0.0, STAGE, 0.0)
         q = quat_axis_angle((0, 1, 0), self.yaw)
         self.bar_obj.position, self.bar_obj.rotation = place, q
@@ -668,6 +787,10 @@ class Curtains:
     HEIGHT = OPENING_Y + 0.05
     GATHERED = 0.55         # its width, open
     SPEED = 0.45            # of opening, a second (0..1)
+    RIPPLE = 2.4            # the billow's wavelength across a curtain
+    RIPPLE_SPEED = 1.8      # how fast it runs across, radians a second
+    DRAUGHT = 0.04          # how far the hem billows at rest
+    BILLOW = 0.15           # and at most, moving
 
     def __init__(self, color=(150, 25, 35)):
         self.mesh = self._sheet()
@@ -688,6 +811,30 @@ class Curtains:
         self.open = 0.0  # 0 closed, 1 open
         self.hem_x = np.tile(self.spread, (2, 1))
         self.hem_v = np.zeros((2, self.JOINTS))
+        self.phase = np.array([0.0, 2.0])  # (the two curtains out of step)
+        self.billow = self.DRAUGHT
+        self.settle(0.0)
+
+    def settle(self, open):
+        """Put the curtains `open` (0..1) at once, hanging still."""
+        self.open = float(open)
+        o = self.open * self.open * (3.0 - 2.0 * self.open)
+        self.hem_x[:] = self.spread + (self.bunched - self.spread) * o
+        self.hem_v[:] = 0.0
+        self.update(0.0, self.open > 0.5)
+
+    def _billow(self, mesh):
+        """Two morph targets on the sheet: a wave across it, the cloth swinging out and in (z) and a little to and
+        fro (x), none at the rail and most at the hem, one a quarter of a wave on from the other. Weighted
+        (a cos t, a sin t) they make a wave of height a running across the cloth (sin(kx + t) = sin kx cos t +
+        cos kx sin t). Their normals' turns are worked out from the sheet moved a little by each."""
+        v = mesh.vertices
+        down = (-v[:, 1] / self.HEIGHT) ** 1.5
+        at = 2.0 * np.pi / self.RIPPLE * v[:, 0]
+        targets = np.zeros((2, len(v), 3))
+        targets[0, :, 0], targets[0, :, 2] = 0.4 * down * np.cos(at), down * np.sin(at)
+        targets[1, :, 0], targets[1, :, 2] = -0.4 * down * np.sin(at), down * np.cos(at)
+        return targets, normal_turns(mesh, targets)
 
     def _sheet(self):
         columns, rows = 4 * self.FOLDS + 1, 9
@@ -708,7 +855,9 @@ class Curtains:
             for c in range(columns - 1):
                 a = r * columns + c
                 faces += [(a, a + columns, a + 1), (a + 1, a + columns, a + columns + 1)]
-        return Mesh(vertices, np.array(faces), joints=np.array(joints), weights=np.array(weights))
+        mesh = Mesh(vertices, np.array(faces), joints=np.array(joints), weights=np.array(weights))
+        mesh.morph_targets, mesh.morph_normals = self._billow(mesh)
+        return mesh
 
     def update(self, dt, want_open):
         self.open = float(np.clip(self.open + (self.SPEED if want_open else -self.SPEED) * dt, 0.0, 1.0))
@@ -725,6 +874,14 @@ class Curtains:
                 swing = self.hem_x[c, j] - x[j]
                 self.hem[c][j].position = np.array([self.hem_x[c, j], -self.HEIGHT, 0.4 * abs(swing)])
                 self.top[c][j].scale = self.hem[c][j].scale = scale
+        # the billow: a wave running across the cloth, higher while it moves, dying down after
+        moving = float(np.abs(self.hem_v).max()) + 2.0 * self.SPEED * (0.0 < self.open < 1.0)
+        want = min(self.BILLOW, self.DRAUGHT + 0.15 * moving)
+        self.billow += (want - self.billow) * min(1.0, (4.0 if want > self.billow else 0.8) * dt)
+        self.phase += self.RIPPLE_SPEED * (1.0 + 2.0 * (self.billow - self.DRAUGHT) / self.BILLOW) * dt
+        height = self.billow / scale[2]  # (the folds' depth scales it too)
+        for c in range(2):
+            self.objects[c].morph_weights = height * np.array([np.cos(self.phase[c]), np.sin(self.phase[c])])
 
 
 # ----- the theatre ---------------------------------------------------------------------------------------------
@@ -960,15 +1117,16 @@ class Show:
         self.view = Choice("View (o)", ("front", "walk"), key="o")
         self.panel = Panel([self.gravity, self.crowd, self.auto, self.open, self.view], keyboard=False)
         self.theatre = Theatre()
-        self.theatre.curtains.open = 1.0
+        self.theatre.curtains.settle(1.0)
         self.doll = Doll()
         mesh, inverse_bind = figure_rig()
-        self.rig = (wooden(mesh), inverse_bind)
+        self.rig = (singing(wooden(mesh)), inverse_bind)
         self.marionettes = []
         self.clock, self.times, self.inputs = 0.0, [], []  # what the lead was told to do, and when
         self.cast()
         self.statues = Statues()
         self.note, self.note_time = "", 0.0
+        self.freezing = None  # (seconds till the gasping puppets turn to stone)
         self.x, self.z, self.yaw, self.pitch, self.eye_y = 0.0, 7.5, 0.0, 0.0, EYE
         self.zoom = 1.0
         self.drag = None
@@ -984,7 +1142,7 @@ class Show:
     def told(self, k):
         """What puppet k of the chorus does now: what the lead was told to do k * LAG seconds ago (nothing, before)."""
         i = bisect_right(self.times, self.clock - k * LAG) - 1
-        return self.inputs[i] if i >= 0 else (np.zeros(2), 0.0, 0.0, 0.0, (0.0, 0.0))
+        return self.inputs[i] if i >= 0 else (np.zeros(2), 0.0, 0.0, 0.0, (0.0, 0.0), 0.0)
 
     @staticmethod
     def _gravity(g):
@@ -1015,7 +1173,8 @@ class Show:
         self.clock += dt
         self.times.append(self.clock)
         self.inputs.append((move, float(np.clip(turn, -1, 1)), ("r" in held) - ("f" in held),
-                            ("e" in held) - ("q" in held), (float("x" in held), float("z" in held))))
+                            ("e" in held) - ("q" in held), (float("x" in held), float("z" in held)),
+                            float("m" in held)))
         keep = bisect_right(self.times, self.clock - MAX_PUPPETS * LAG - 1.0)
         del self.times[:keep], self.inputs[:keep]
         for k, m in enumerate(self.marionettes):
@@ -1034,6 +1193,22 @@ class Show:
                     self.z += fz * step
             want = self.theatre.floor(self.x, self.z) + EYE
             self.eye_y += (want - self.eye_y) * min(1.0, 10.0 * dt)
+
+    def advance(self, dt, held):
+        """Move the show on by dt seconds, with the keys `held`."""
+        self.cast()
+        self.control(dt, held)
+        for m in self.marionettes:
+            m.update(dt, self.gravity.value)
+        pose_puppets([m.puppet for m in self.marionettes], np.stack([m.p[0] for m in self.marionettes]))
+        if self.freezing is not None:
+            self.freezing -= dt
+            if self.freezing <= 0.0:
+                self.statues.freeze([m.puppet.objects() for m in self.marionettes[:len(SLOTS_X)]])
+                self.freezing = None
+        self.statues.update(dt, self.gravity.value)
+        self.note_time -= dt
+        self.theatre.curtains.update(dt, self.open.value)
 
     def camera(self, cols, rows, cell_pixels):
         if self.view.value == "walk":
@@ -1054,8 +1229,11 @@ class Show:
         for ev in self.panel.handle(self.bar.handle(events, screen)):
             if ev == Key.ESC:
                 return False
-            if ev == Key.ENTER:
-                self.statues.freeze([m.puppet.objects() for m in self.marionettes[:len(SLOTS_X)]])
+            if ev == Key.ENTER and self.freezing is None:  # (a gasp, then stone at its height)
+                self.freezing = GASP
+                for m in self.marionettes[:len(SLOTS_X)]:
+                    m.puppet.play([(0.0, (0.0, 0.0)), (GASP, (0.8, -0.9)), (GASP + 0.4, (0.8, -0.9)),
+                                   (GASP + 0.8, (0.0, 0.0))], fade=0.0)
                 self.say("Freeze!")
             if isinstance(ev, MouseEvent):
                 if ev.button in (MouseEvent.WHEEL_UP, MouseEvent.WHEEL_DOWN) and self.view.value == "front":
@@ -1084,14 +1262,7 @@ class Show:
         dt = min(dt, 0.1)
         if not self.handle(events, screen):
             return False
-        self.cast()
-        self.control(dt, screen.held)
-        for m in self.marionettes:
-            m.update(dt, self.gravity.value)
-        pose_puppets([m.puppet for m in self.marionettes], np.stack([m.p[0] for m in self.marionettes]))
-        self.statues.update(dt, self.gravity.value)
-        self.note_time -= dt
-        self.theatre.curtains.update(dt, self.open.value)
+        self.advance(dt, screen.held)
         rows, cols = screen.size()
         view_rows = max(rows - 2, 1)
         self.renderer.resize(cols, view_rows, screen.cell_pixels)
@@ -1115,7 +1286,7 @@ class Show:
         else:
             walk = "[wheel] zoom  "
             turn = "[,/. or left/right] turn"
-        self.bar.draw(screen, f"[wasd] move the bar  {turn}  [r/f] up/down  [q/e] legs  [z/x] hands  [enter] freeze  "
+        self.bar.draw(screen, f"[wasd] move the bar  {turn}  [r/f] up/down  [q/e] legs  [z/x] hands  [m] sing  [enter] freeze  "
                               f"[click] a statue  [-/=] puppets  {walk}[esc] quit")
         screen.refresh()
         return True

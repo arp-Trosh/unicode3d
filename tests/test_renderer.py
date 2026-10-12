@@ -2540,7 +2540,7 @@ class DemoTests(unittest.TestCase):
         self.assertEqual((demo.shape.value, demo.sx.value, demo.fog.value), ("sphere", 1.0, "off"))
 
     def test_skinned_marionettes(self):
-        from unicode3d.examples.skinned import LAG, Show, STAGE
+        from unicode3d.examples.skinned import GASP, LAG, Show, STAGE
         demo = Show()
         screen = Screen(glyphs="quad", color="256", size=(30, 100))
         screen.held = type("Held", (set,), {"exact": True})()
@@ -2563,8 +2563,40 @@ class DemoTests(unittest.TestCase):
         for m in demo.marionettes:  # every puppet hangs together, and stands on the stage
             self.assertTrue(np.isfinite(m.p).all())
             self.assertGreater(m.p[0, :, 1].min(), STAGE - 0.05)
-        # Enter freezes them into statues (as many as there are plinths); clicking one knocks it over, and again sweeps it away.
+        # m sings, in canon too: the lead's jaw and mouth open first (morph weights), the next one's LAG later.
+        screen.held.add("m")
+        for _ in range(int(LAG * 30) - 2):
+            demo.frame(screen, 1 / 30, [])
+        jaws = [m.puppet.object.morph_weights[0] for m in demo.marionettes]
+        self.assertGreater(jaws[0], 0.5)
+        self.assertEqual(jaws[1], 0.0)
+        self.assertEqual(demo.marionettes[0].puppet.mouth.morph_weights[0], jaws[0])
+        screen.held.clear()
+        for _ in range(int(3 * LAG * 30) + 10):
+            demo.frame(screen, 1 / 30, [])
+        self.assertTrue(all(m.puppet.object.morph_weights[0] == 0.0 for m in demo.marionettes))
+        # Lifted off the stage and let down again, a puppet lands: its head squashes (a clip of its morph weights).
+        screen.held.add("r")
+        for _ in range(45):
+            demo.frame(screen, 1 / 30, [])
+        screen.held.clear()
+        screen.held.add("f")
+        squash = 0.0
+        for _ in range(150):
+            demo.frame(screen, 1 / 30, [])
+            squash = max(squash, demo.marionettes[0].puppet.object.morph_weights[1])
+        screen.held.clear()
+        self.assertGreater(squash, 0.3)
+        for _ in range(30):
+            demo.frame(screen, 1 / 30, [])
+        self.assertIsNone(demo.marionettes[0].puppet.clip)  # (played out, the head as it was)
+        # Enter makes them gasp (the head stretched: its squash weighted below 0), and at its height turns them into
+        # statues (as many as there are plinths); clicking one knocks it over, and again sweeps it away.
         demo.frame(screen, 1 / 30, [Key.ENTER])
+        self.assertEqual(demo.statues.statues(), [])
+        for _ in range(int(GASP * 30) + 1):
+            demo.frame(screen, 1 / 30, [])
+        self.assertTrue(all(m.puppet.object.morph_weights[1] < -0.5 for m in demo.marionettes))
         statues = demo.statues.statues()
         self.assertEqual(len(statues), 3)
         self.assertEqual(demo.statues.click(statues[0].object), "Timber!")
