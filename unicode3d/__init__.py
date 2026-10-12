@@ -22,7 +22,8 @@ from .gltf import load_gltf
 from .models import Material, load_model, load_mtl, load_obj
 from .queries import Colliders, Contact, Hit
 from .raster import FrameBuffer
-from .scene import Anchor, Camera, Light, Lines, Model, Node, Object3D, Particles, Pick, PointLight, Renderer, union_bounds
+from .scene import (Anchor, Camera, Light, Lines, Model, Node, Object3D, Particles, Pick, PointLight, Renderer, Sprite,
+                    SpriteSheet, union_bounds)
 from .terminal import Screen, add_display_args, compile_kernels, display_options, frame_to_text, run
 from .texture import load_image
 from .ui import Button, Choice, DisplayControls, Panel, Slider, Toggle

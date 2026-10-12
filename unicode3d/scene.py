@@ -5,6 +5,7 @@
 Lights are in lights.py and the Renderer, which draws all this, in renderer.py; both are importable from here too.
 """
 import copy as _copy
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -18,9 +19,11 @@ from .texture import alpha_kind
 from .lines import Lines
 from .particles import Particles
 from .renderer import Anchor, Pick, Renderer
+from .sprites import SpriteSheet
 from .transforms import look_at, quat_from_matrix, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
-__all__ = ["Anchor", "Camera", "Light", "Lines", "Model", "Node", "Object3D", "Particles", "Pick", "PointLight", "Renderer", "union_bounds"]
+__all__ = ["Anchor", "Camera", "Light", "Lines", "Model", "Node", "Object3D", "Particles", "Pick", "PointLight", "Renderer",
+           "Sprite", "SpriteSheet", "union_bounds"]
 
 
 ORTHO_BACK = 1e5  # how far back, in view sizes, the eye an orthographic view is drawn from sits (see Camera)
@@ -189,8 +192,10 @@ class Object3D(_Placed):
                             # shapes that every edge matters to, such as lettering, which a level of detail can
                             # make illegible (it may move corners a pixel or two, closing the gaps in a letter),
                             # and thin plates laid on other parts, which it can sink behind them
-    billboard: bool = False  # turned to face the camera wherever it is (its +z towards it, +y up the picture),
-                             # keeping its size and place: a sprite (a textured square), a marker, a tree card
+    billboard: object = False  # True: turned to face the camera wherever it is (its +z towards it, +y up the
+                               # picture), keeping its size and place: a sprite (a textured square), a marker;
+                               # "upright": turned only about the vertical (+y stays up the world), for things
+                               # standing on the ground (a character, a tree card), even when seen from above
     outline: bool = True  # whether what is behind its edges is darkened (Renderer.outline), setting it apart
 
     def world_bounds(self):
@@ -198,6 +203,80 @@ class Object3D(_Placed):
         its parents: to put a label just above it, or frame a camera on it. None if there is nothing to box (no
         vertices, or a pose that isn't finite). Vertices at NaN or infinity are left out."""
         return union_bounds([self])
+
+
+class Sprite(Object3D):
+    """A character (or anything else) drawn from a SpriteSheet: a flat picture standing upright and turned to face
+    the camera (billboard="upright"), showing the sheet's cell for the frame of the animation playing, seen from
+    the side the camera is on. The way it faces is its own +z, turned by its rotation and its parents' as any
+    object's is: the game turns it to face where it walks, or a target, and the camera going round it sees it from
+    the front, the side, the back.
+
+        knight = Sprite(sheet, position=(2.0, 0.0, -3.0))
+        knight.play("walk")
+        ...
+        knight.rotation = quat_axis_angle((0, 1, 0), heading)   # each frame: which way it faces,
+        knight.update(dt)                                              # and its animation moved on
+
+    animation: the animation playing (a name in sheet.animations; the first by default). Every other argument is
+    an Object3D's (position, rotation, scale, parent, emissive, opacity, outline, ...), with color white (the
+    sheet as it is) and simplify off by default. In a mirror a sprite shows the side the mirror sees. Picking gives
+    the Sprite; ray and overlap queries (Colliders) see the rectangle of its first cell, standing as the sprite is
+    turned (not as it faces the camera)."""
+
+    def __init__(self, sheet, animation=None, **options):
+        options.setdefault("billboard", "upright")
+        options.setdefault("color", (255, 255, 255))
+        options.setdefault("simplify", False)
+        super().__init__(sheet.meshes[0], **options)
+        self.sheet = sheet
+        self.animation = next(iter(sheet.animations)) if animation is None else animation
+        if self.animation not in sheet.animations:
+            raise ValueError(f"no animation {self.animation!r} in the sheet (it has {', '.join(sheet.animations)})")
+        self.time = 0.0  # seconds into the animation
+        self.loop = True  # whether it starts over at its end (otherwise it stays on its last frame)
+        self.speed = 1.0  # times the animation's own frames a second
+
+    def play(self, animation, loop=True, restart=False):
+        """Play `animation` (a name in sheet.animations) from its start, or carry on with it if it is already
+        playing (unless restart). loop: start over at its end, or stay on the last frame (then `finished`)."""
+        if animation not in self.sheet.animations:
+            raise ValueError(f"no animation {animation!r} in the sheet (it has {', '.join(self.sheet.animations)})")
+        if restart or animation != self.animation:
+            self.time = 0.0
+        self.animation, self.loop = animation, bool(loop)
+
+    def update(self, dt):
+        """Move the animation on by dt seconds (times `speed`)."""
+        step = float(dt) * float(self.speed)
+        if math.isfinite(step):  # (a bad number leaves it where it was)
+            self.time = self.time + step if math.isfinite(self.time) else 0.0
+
+    def _steps(self):
+        """(frames played, as a float, and the animation's (first, frames, fps, row))."""
+        clip = self.sheet.animations.get(self.animation) or next(iter(self.sheet.animations.values()))
+        played = float(self.time) * clip[2]
+        return (played if math.isfinite(played) and played > 0.0 else 0.0), clip
+
+    @property
+    def frame(self):
+        """The frame of the animation showing, from 0."""
+        return self._frame(*self._steps())
+
+    def _frame(self, played, clip):
+        frames = clip[1]
+        return int(played % frames) if self.loop else int(min(played, frames - 1))
+
+    @property
+    def finished(self):
+        """Whether an animation played without loop has reached its last frame's end."""
+        played, (_, frames, _, _) = self._steps()
+        return not self.loop and played >= frames
+
+    def _shown(self):
+        """(the cell of the frame showing seen from the front, as an index into sheet.meshes; the sheet)."""
+        played, clip = self._steps()
+        return clip[3] * self.sheet.columns + clip[0] + self._frame(played, clip), self.sheet
 
 
 def _placed_mesh(part, linear, position):

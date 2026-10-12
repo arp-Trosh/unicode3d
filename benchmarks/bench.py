@@ -4,8 +4,8 @@
 [--threads N] [--scene NAME]
 
 Renders scenes off-screen and reports the time each stage of a frame takes:
-a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain; lines-2k a grid), and three that load the
-engine as kinds of game would (corridor, arena, board: see genres.py), each
+a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain; lines-2k a grid; sprites-300 a
+crowd of sprites), and three that load the engine as kinds of game would (corridor, arena, board: see genres.py), each
 moving its world as a game loop does and writing text over the picture:
 
   render          Renderer.render: rasterizing and shading the scene into pixels (and shadow maps)
@@ -36,7 +36,7 @@ import numpy as np
 
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
-from unicode3d.scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer
+from unicode3d.scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Sprite, SpriteSheet
 from unicode3d.mesh import Mesh, make_box
 from unicode3d.shapes import blob_mesh
 from unicode3d import __version__
@@ -167,6 +167,39 @@ def lines_scene(count=1000):
         Light(), [grid, beams], churn
 
 
+def sprites_scene(count=300):
+    """`count` sprites with eight sides (a sheet of 8 rows by 6 frames, cut-outs) walking round in circles on a
+    floor, each turned the way it walks, its frame and side picked afresh every frame: the cost of a crowd of
+    sprites."""
+    rng = np.random.default_rng(1)
+    w, h = 24, 32
+    y, x = np.mgrid[0:h, 0:w]
+    picture = np.zeros((8 * h, 6 * w, 4))
+    for row in range(8):
+        for frame in range(6):
+            cell = picture[row * h:(row + 1) * h, frame * w:(frame + 1) * w]
+            cell[((x - 11.5) / (9.0 + frame)) ** 2 + ((y - 16.0) / 15.0) ** 2 < 1.0] = (*rng.random(3), 1.0)
+    sheet = SpriteSheet(picture, columns=6, height=1.0, animations={"walk": (0, 6, 10.0)})
+    floor = Object3D(make_box(), np.array([0.0, -0.5, 0.0]), scale=(30.0, 1.0, 30.0), color=(90, 100, 80))
+    centres = rng.uniform(-12.0, 12.0, (count, 2))
+    radii, speeds = rng.uniform(0.5, 3.0, count), rng.uniform(0.3, 1.0, count) * rng.choice((-1, 1), count)
+    walkers = [Sprite(sheet) for _ in range(count)]
+    for k, s in enumerate(walkers):
+        s.update(k * 0.037)
+    objects = [floor] + walkers
+
+    def churn(frame):
+        a = speeds * frame * DT
+        for s, (cx, cz), r, angle, speed in zip(walkers, centres, radii, a, speeds):
+            s.position = np.array([cx + r * np.cos(angle), 0.0, cz + r * np.sin(angle)])
+            s.rotation = quat_axis_angle((0.0, 1.0, 0.0), np.arctan2(-np.sin(angle), np.cos(angle)) * np.sign(speed))
+            s.update(DT)
+        return objects
+
+    return objects, Camera(position=np.array([0.0, 8.0, 16.0]), target=np.array([0.0, 0.0, 0.0]), fov=60.0), \
+        Light(direction=(0.4, -1.0, -0.3), shadows=True), objects, churn
+
+
 SCENES = {
     "dice": lambda: dice_scene(3),
     "dice-sun": lambda: dice_scene(3, shadows="sun"),
@@ -178,6 +211,7 @@ SCENES = {
     "spawn-60": lambda: spawn_scene(60),
     "particles-3k": lambda: particles_scene(3000, 200),
     "lines-2k": lambda: lines_scene(1000),
+    "sprites-300": lambda: sprites_scene(300),
     "sphere-3k": lambda: sphere_scene(32, 48),
     "sphere-27k": lambda: sphere_scene(96, 144),
     **GENRES,

@@ -25,7 +25,7 @@ cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor r
 world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
 floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; after 0.7.1, the
 courtyard through an orthographic camera; after 0.17.0, sun shadows fitted to the view in a big field; and,
-after 0.20.1, particles and a billboard sprite, and lines.
+after 0.20.1, particles and a billboard sprite, lines, and sprites with eight sides.
 """
 import argparse
 import os
@@ -615,6 +615,51 @@ def lines():
     return Shot(objects, camera((-1.5, 2.6, 6.0), (0.6, 0.4, -1.0)), sun, {"background": Sky()})
 
 
+def numbered_sheet(**options):
+    """A sprite sheet of 8 rows (directions) by 2 columns (frames): each cell a rounded figure in its row's hue with
+    the row's number on it, its frames told apart by a band across the top; clear around."""
+    from unicode3d.scene import SpriteSheet
+    from unicode3d.shapes import text_bitmap
+    w, h = 16, 24
+    image = np.zeros((8 * h, 2 * w, 4))
+    y, x = np.mgrid[0:h, 0:w]
+    body = ((x - 7.5) / 7.5) ** 2 + ((y - 13.0) / 10.5) ** 4 < 1.0
+    for row in range(8):
+        hue = np.array([np.cos(row * np.pi / 4), np.cos(row * np.pi / 4 - 2.1), np.cos(row * np.pi / 4 + 2.1)])
+        for frame in range(2):
+            cell = image[row * h:(row + 1) * h, frame * w:(frame + 1) * w]
+            cell[body] = (*(0.55 + 0.4 * hue), 1.0)
+            cell[3 + 2 * frame:5 + 2 * frame, 3:13] = (0.1, 0.1, 0.1, 1.0)
+            digit = text_bitmap(str(row))[:7]
+            cell[9:16, 6:11][digit] = (1.0, 1.0, 1.0, 1.0)
+    return SpriteSheet(image, columns=2, height=1.2, animations={"wave": (0, 2, 2.0)}, **options)
+
+
+def sprites():
+    """Sprites with eight sides (added after 0.20.1): eight standing in a ring, each turned to face outwards, so
+    that the camera sees each from another side (each shows its row's number: 0 from the front, then on round
+    clockwise); one in the middle of a mirrored sheet (rows 5-7 are 3-1 flipped), seen in a mirror behind them from
+    its far side; an upright billboard and one turned square to the picture, from above; sun shadows."""
+    from unicode3d.scene import Sprite
+    sheet = numbered_sheet()
+    objects = [Object3D(floor(6.0), color=(110, 120, 100))]
+    for k in range(8):
+        a = k * np.pi / 4
+        sprite = Sprite(sheet, position=np.array([2.2 * np.sin(a), 0.0, 2.2 * np.cos(a) - 0.5]),
+                        rotation=quat_axis_angle(UP, a))
+        sprite.time = 0.5 * (k % 2)  # (every other one on its second frame)
+        objects.append(sprite)
+    objects.append(Sprite(numbered_sheet(mirrored=True, rows=8), position=np.array([0.0, 0.0, -0.5]),
+                          rotation=quat_axis_angle(UP, 2.4)))
+    card = panel(0.8, 1.2, np.dstack([np.full((8, 8, 3), (0.3, 0.7, 0.4)), np.ones((8, 8))]))
+    objects += [Object3D(card, np.array([-3.4, 0.0, 1.2]), color=(255, 255, 255), billboard="upright"),
+                Object3D(card, np.array([3.4, 0.0, 1.2]), color=(255, 255, 255), billboard=True),
+                Object3D(Mesh(np.array([(-3.0, 0, -4.0), (3, 0, -4.0), (3, 2.5, -4.0), (-3, 2.5, -4.0)]),
+                              np.array([(0, 1, 2), (0, 2, 3)])), color=(20, 20, 25), reflectivity=0.9)]
+    sun = Light(direction=np.array([-0.4, -1.0, -0.6]), shadows=True)
+    return Shot(objects, camera((0.6, 3.4, 6.5), (0.0, 0.5, -0.5)), sun, {"background": Sky()})
+
+
 SCENES = {
     "cube": cube,
     "die": die,
@@ -646,6 +691,7 @@ SCENES = {
     "level": level,
     "particles": particles,
     "lines": lines,
+    "sprites": sprites,
 }
 
 

@@ -20,15 +20,22 @@ has swung open. N puts names over the things nearby (labels anchored to points
 in the scene, hidden behind whatever is in front of them).
 
 In the north-east corner, a campfire: flames that are cut-out pictures turned to
-face the camera (billboards), each swapping between wavering frames, sparks and
-smoke (Particles), a flickering light, and a string of lights from a post by the
-fire to the corner pillar (a wire of Lines; the bulbs are Particles that never
-move). Click anything to throw a puff of chips coloured as it is drawn there.
+face the camera (sprites from a sheet of wavering frames, each flickering through
+them), sparks and smoke (Particles), a flickering light, and a string of lights
+from a post by the fire to the corner pillar (a wire of Lines; the bulbs are
+Particles that never move). Click anything to throw a puff of chips coloured as it is drawn there.
 F9, or Debug on the panel, shows what the engine knows, drawn in Lines: a floor
 grid, the world's axes, a box around each thing the walker bumps into, the
 walker's capsule (look down, or in the mirror) and the ray query from the
 walker's hand to what the crosshair is on; a pin floats over the last spot
 clicked.
+
+Before the mirror, the fighter walks a loop: a Sprite with eight sides, from a sheet
+fighter.py bakes with the engine itself. The engine picks the side the camera
+sees and the frame of the animation playing; this program decides the rest:
+he faces the way he walks, stops to face the walker who comes near (a fighting
+stance, a punch now and then), and, clicked, gathers a blast of light and
+throws it, a ball flying on until a ray query says it meets something solid.
 
 Walking feels best in a terminal that reports key releases (kitty, foot,
 Ghostty, WezTerm, Alacritty, iTerm2, Windows Terminal): elsewhere a held key is
@@ -40,13 +47,14 @@ import colorsys
 import numpy as np
 
 from .dice import make_die, orientation_showing
+from .fighter import fighter_sheet
 from .hud import StatusBar
 from ..animation import Animation, RotationTrack, Track
 from ..background import Fog, Gradient, Sky, SkyBox
 from ..color import Color, linear_to_srgb
 from ..keys import Key, MouseEvent
 from ..mesh import Mesh, make_box
-from ..scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer
+from ..scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Sprite, SpriteSheet
 from ..queries import Colliders
 from ..shapes import blob_mesh, block_mesh, text_mesh
 from ..terminal import add_display_args, display_options, run
@@ -70,6 +78,9 @@ TAG_GAP = 0.5        # objects of one name nearer each other than this are named
 FIRE_AT = np.array([8.3, 0.0, -9.5])  # the campfire, in the north-east corner
 SPARKS, PUFFS = 30.0, 5.0  # how many sparks and puffs of smoke the fire gives off a second
 BREEZE = np.array([0.3, 0.0, 0.12])  # what carries them off, a little to the south-east
+LOOP_AT, LOOP = np.array([0.0, 0.0, 8.2]), (2.6, 1.2)  # the fighter's walk: round an ellipse before the mirror
+STRIDE = 1.3         # how fast he walks, units a second
+HEED = 2.6           # how near the walker comes before he stops to face them
 
 FONT = {  # 5 rows a letter, for the sign on the north wall
     "U": ["#...#", "#...#", "#...#", "#...#", ".###."],
@@ -435,8 +446,8 @@ class Courtyard:
         self.door = Door(hinge)
 
         # A campfire in the north-east corner, in a ring of stones: crossed logs on glowing embers, flames (cut-out
-        # pictures that face the camera, billboards, each swapping between wavering frames: see animate), sparks
-        # and smoke (Particles: see burn), and a flickering light (fire_light).
+        # pictures that face the camera: sprites, each flickering through a sheet of wavering frames: see
+        # animate), sparks and smoke (Particles: see burn), and a flickering light (fire_light).
         stone = blob_mesh((0.16, 0.1, 0.13), rings=6, segments=8)
         for k in range(9):
             a = 2 * np.pi * k / 9
@@ -449,14 +460,14 @@ class Courtyard:
                               scale=(0.85, 0.1, 0.1), color=(75, 50, 32), specular=0.0), "a campfire")
         self.add(Object3D(blob_mesh((0.32, 0.04, 0.32)), FIRE_AT + (0.0, 0.03, 0.0), color=(255, 110, 40), emissive=1.0,
                           cast_shadows=False), "a campfire")
-        frames = [flame(rng) for _ in range(6)]
-        self.flames = []  # each a card's frames, one of them shown at a time
-        for w, h, dx, dz in ((0.7, 1.05, 0.0, 0.0), (0.45, 0.7, 0.14, 0.1), (0.4, 0.6, -0.15, -0.07)):
-            cards = [Object3D(picture(w, h, tex), FIRE_AT + (dx, 0.06, dz), color=(255, 255, 255), emissive=1.0,
-                              billboard=True, outline=False, cast_shadows=False) for tex in frames]
-            for card in cards:
-                self.add(card, "a campfire", solid=False)
-            self.flames.append(cards)
+        # (six frames side by side: a sprite sheet of one direction, seen the same from everywhere)
+        frames = SpriteSheet(np.concatenate([flame(rng) for _ in range(6)], axis=1), columns=6, directions=1,
+                             animations={"flicker": (0, 6, 9.0)})
+        self.flames = [Sprite(frames, position=FIRE_AT + (dx, 0.06, dz), scale=(w, h, 1.0), emissive=1.0,
+                              billboard=True, outline=False, cast_shadows=False)
+                       for w, h, dx, dz in ((0.7, 1.05, 0.0, 0.0), (0.45, 0.7, 0.14, 0.1), (0.4, 0.6, -0.15, -0.07))]
+        for card in self.flames:
+            self.add(card, "a campfire", solid=False)
         self.sparks = Particles(gravity=BREEZE + (0.0, 0.9, 0.0), drag=0.8, emissive=1.0, limit=200, seed=1)
         self.smoke = Particles(face_camera=True, gravity=BREEZE + (0.0, 0.1, 0.0), drag=0.4, limit=100, seed=2)
         self.add_effect(self.sparks, "sparks")
@@ -528,10 +539,8 @@ class Courtyard:
     def animate(self, t):
         """Everything that moves by itself, at time t seconds (the door moves with the walker: see Door; the
         fire's sparks and smoke with each frame's time: see burn)."""
-        for i, cards in enumerate(self.flames):  # (a frame of each flame shown, swapped about ten times a second)
-            shown = int(t * (9.0 + 2.0 * i) + 2 * i) % len(cards)
-            for k, card in enumerate(cards):
-                card.visible = k == shown
+        for i, card in enumerate(self.flames):  # (each flickering about ten times a second, out of step)
+            card.time = (t * (9.0 + 2.0 * i) + 2 * i) / 9.0
         for i, (d, bob) in enumerate(zip(self.dice, self.bobs)):
             d.rotation = quat_mul(quat_axis_angle(UP, 0.4 * t + i), orientation_showing(i, 0.0))
             d.position = bob.at(t + 0.55 * i)
@@ -573,6 +582,122 @@ class Courtyard:
         push = self.solid.push_out((x, KNEE, z), RADIUS, end=(x, EYE, z))
         room = HALF - RADIUS  # (and never outside the walls, whatever happens)
         return min(max(x + push[0], -room), room), min(max(z + push[2], -room), room)
+
+
+class Fighter:
+    """The fighter, a sprite with eight sides (fighter.py bakes his sheet), and what the game decides for him: he walks
+    round a loop facing the way he goes, stops to face the walker when they come near (in a fighting stance,
+    throwing a punch now and then), and, clicked, gathers a blast of light at his hip and throws it, a glowing
+    ball flying on until it meets something solid (a ray query), where it bursts."""
+
+    def __init__(self, court):
+        self.sprite = Sprite(fighter_sheet(), animation="walk", position=LOOP_AT + (LOOP[0], 0.0, 0.0))
+        # A box the walker bumps into, moved with him (in the Colliders only: not drawn).
+        self.blocker = Object3D(block_mesh((0.0, 1.0, 0.0), (0.6, 1.8, 0.6)))
+        court.add(self.sprite, "the fighter", solid=False)
+        court.solid.objects.append(self.blocker)
+        self.glow = Particles(face_camera=True, emissive=1.0, limit=400)  # (gathering at his hands, and bursting)
+        self.ball = Object3D(blob_mesh((0.2, 0.2, 0.2), rings=6, segments=10), color=(170, 225, 255),
+                             emissive=1.0, cast_shadows=False, outline=False, visible=False)
+        court.add_effect(self.glow, "a blast of light")
+        court.add(self.ball, "a blast of light", solid=False)
+        self.solid = court.solid
+        self.angle = 0.0      # how far round the loop he is
+        self.heading = 0.0    # the way he faces: turned from +z towards +x
+        self.state, self.clock = "walk", 0.0  # what he is doing, and for how long
+        self.flight = None    # the ball's (start, direction, how far it goes, time out)
+
+    def provoke(self):
+        """Clicked: gather a blast (unless already at it)."""
+        if self.state not in ("charge", "blast"):
+            self.state, self.clock = "charge", 0.0
+            self.sprite.play("charge")
+
+    def update(self, dt, walker):
+        """dt seconds on, with the walker at walker (x, z)."""
+        s, at = self.sprite, self.sprite.position
+        to = np.array([walker[0] - at[0], 0.0, walker[1] - at[2]])
+        near = np.hypot(to[0], to[2]) < HEED
+        self.clock += dt
+        if self.state == "walk":
+            if near:
+                self.state, self.clock = "watch", 0.0
+                s.play("idle")
+            else:  # (along the ellipse, turning to face the way he goes)
+                rx, rz = LOOP
+                self.angle += STRIDE * dt / np.hypot(rx * np.sin(self.angle), rz * np.cos(self.angle))
+                at = LOOP_AT + (rx * np.cos(self.angle), 0.0, rz * np.sin(self.angle))
+                face = np.arctan2(-rx * np.sin(self.angle), rz * np.cos(self.angle))
+                self.turn_to(face, dt)
+                s.position = at
+        elif self.state == "watch":  # (facing the walker; a punch every few seconds)
+            self.turn_to(np.arctan2(to[0], to[2]), dt)
+            if s.animation == "punch" and s.finished:
+                s.play("idle")
+            if self.clock > 2.5:
+                self.clock = 0.0
+                s.play("punch", loop=False, restart=True)
+            if not near and s.animation == "idle":
+                self.state = "walk"
+                s.play("walk")
+        elif self.state == "charge":  # (turning on the walker, light gathering at his hip, faster as it goes)
+            self.turn_to(np.arctan2(to[0], to[2]), dt)
+            hand = self.hand(0.15, 0.35, 0.95)  # (cupped at his right hip)
+            self.glow.emit(hand, int(60 * dt * (1 + 3 * self.clock)) + 1, speed=(0.1, 0.4), radius=0.25,
+                           life=(0.2, 0.4), size=(0.05, 0.1), size_end=0.02, color=(220, 245, 255),
+                           color_end=(60, 140, 255), opacity=0.9)
+            if self.clock > 1.4:
+                self.state, self.clock = "blast", 0.0
+                s.play("blast")
+                ahead = np.array([np.sin(self.heading), 0.0, np.cos(self.heading)])
+                start = self.hand(0.6, 0.0, 1.25)
+                hit = self.solid.raycast(start, ahead, ignore=(self.blocker,))
+                self.flight = (start, ahead, hit.distance if hit else 20.0, 0.0)
+                self.ball.visible = True
+        elif self.state == "blast":
+            if self.clock > 0.9:
+                self.state, self.clock = "watch" if near else "walk", 0.0
+                s.play("idle" if near else "walk")
+        self.fly(dt)
+        s.rotation = quat_axis_angle(UP, self.heading)
+        s.update(dt)
+        self.glow.update(dt)
+        self.blocker.position = s.position.copy()
+
+    def turn_to(self, heading, dt, rate=7.0):
+        """Turn towards heading, the short way round, at most rate radians a second."""
+        gap = (heading - self.heading + np.pi) % (2 * np.pi) - np.pi
+        self.heading += float(np.clip(gap, -rate * dt, rate * dt))
+
+    def hand(self, ahead, right=0.0, up=1.05):
+        """A point `up` above the floor, `ahead` in front of him and `right` to his right."""
+        c, s = np.cos(self.heading), np.sin(self.heading)
+        return self.sprite.position + (0.0, up, 0.0) + ahead * np.array([s, 0.0, c]) + right * np.array([-c, 0.0, s])
+
+    def fly(self, dt):
+        """The ball on its way: on along its line, bursting where its ray met something."""
+        if self.flight is None:
+            return
+        start, ahead, reach, gone = self.flight
+        gone += 6.0 * dt
+        if gone >= reach:
+            self.glow.emit(start + ahead * reach, 80, speed=(1.0, 3.0), life=(0.3, 0.7), size=(0.06, 0.14),
+                           size_end=0.0, color=(230, 250, 255), color_end=(40, 110, 255))
+            self.ball.visible, self.flight = False, None
+            return
+        self.ball.position = start + ahead * gone
+        self.glow.emit(self.ball.position, 3, radius=0.1, life=(0.2, 0.35), size=(0.1, 0.16), size_end=0.0,
+                       color=(200, 235, 255), color_end=(40, 110, 255), opacity=0.8)
+        self.flight = (start, ahead, reach, gone)
+
+    def light(self):
+        """The glow's light: at the ball while it flies, at his hands while he gathers it, or None."""
+        if self.flight is not None:
+            return PointLight(self.ball.position, color=(120, 190, 255), diffuse=1.2, range=5.0)
+        if self.state == "charge":
+            return PointLight(self.hand(0.15, 0.35, 0.95), color=(120, 190, 255), diffuse=min(self.clock, 1.0),
+                              range=4.0)
+        return None
 
 
 class DebugView:
@@ -656,6 +781,7 @@ class Walk:
         self.panel = Panel([self.lamp, self.sun, self.background, self.fog, self.fog_into, self.tags, self.debug],
                            keyboard=False)
         self.view = DebugView()
+        self.fighter = Fighter(self.court)
         # Clicking throws a puff of chips from the spot, coloured as it is drawn there, which bounce on the floor;
         # with the debug view on, a pin (a billboard) floats over the last spot clicked.
         self.chips = Particles(make_box(), gravity=(0.0, -9.8, 0.0), ground=0.0, bounce=0.35, emissive=0.5, limit=300)
@@ -683,6 +809,8 @@ class Walk:
                 self.clicked = f"clicked: {self.court.names.get(id(hit.object), '?')}" if hit else ""
                 if hit:
                     self.throw_chips(hit, ev.x, ev.y)
+                    if hit.object is self.fighter.sprite:
+                        self.fighter.provoke()
 
         held = screen.held
         turn = ((Key.RIGHT in held or "e" in held) - (Key.LEFT in held or "q" in held)) * TURN * dt
@@ -697,6 +825,7 @@ class Walk:
         self.court.animate(self.t)
         self.court.burn(dt)
         self.chips.update(dt)
+        self.fighter.update(dt, (self.x, self.z))
         near = np.hypot(self.x - DOOR_AT[0] - 0.55, self.z - DOOR_AT[2]) < DOOR_NEAR
         self.court.door.update(dt, near)
 
@@ -711,6 +840,11 @@ class Walk:
         if self.lamp.value:
             lights.append(PointLight(self.court.lamp_at, color=(255, 210, 150), diffuse=0.9, range=9.0, shadows=True))
         lights.append(self.court.fire_light(self.t))
+        # (a sprite is a flat picture turned to the camera, lit as one: from behind it, the sun leaves it in shade,
+        # so he gives off a little light of his own, less by night)
+        self.fighter.sprite.emissive = 0.45 if self.sun.value else 0.15
+        if self.fighter.light() is not None:
+            lights.append(self.fighter.light())
         self.view.show(self.debug.value)
         if self.debug.value:
             self.view.update(self.court, eye, look)  # (court.solid was updated by blocked, above)

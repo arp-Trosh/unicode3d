@@ -24,6 +24,7 @@ from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEA
                      rasterize_pixels, transform, upscale, work_plan, NO_CLIP)
 from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import SHADOW_FITS, ShadowMaps
+from .sprites import SheetCell
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
 from .transforms import normalize, perspective, scene_poses, view_axes
@@ -91,6 +92,35 @@ def _determinants(m):
     return (m[:, 0, 0] * (m[:, 1, 1] * m[:, 2, 2] - m[:, 1, 2] * m[:, 2, 1])
             - m[:, 0, 1] * (m[:, 1, 0] * m[:, 2, 2] - m[:, 1, 2] * m[:, 2, 0])
             + m[:, 0, 2] * (m[:, 1, 0] * m[:, 2, 1] - m[:, 1, 1] * m[:, 2, 0]))
+
+
+def _upright_axes(camera):
+    """(across, back): unit vectors along the ground towards the right of camera's picture and back towards the
+    camera, square to each other, for things standing upright facing it (their x and z: y is the world's up). Taken
+    from the picture's right, which stays level when the camera looks up or down, even straight down."""
+    right, _, forward = camera.basis()
+    for x, z in ((right[0], right[2]), (-forward[2], forward[0]), (1.0, 0.0)):  # (from ahead, if rolled on its side)
+        length = math.hypot(x, z)
+        if length > 1e-9:  # (False for NaN)
+            return np.array([x / length, 0.0, z / length]), np.array([-z / length, 0.0, x / length])
+
+
+def _face_camera(linear, billboard, camera):
+    """linear (N, 3, 3) with each row whose billboard (N values) is set turned to face camera, keeping the length
+    of each of its axes: True turns it square to the picture (+z towards the camera, +y up the picture), "upright"
+    only about the vertical (+y up the world, +z towards the camera along the ground)."""
+    facing = np.flatnonzero(np.fromiter(map(bool, billboard), np.bool_, len(billboard)))
+    upright = np.fromiter((isinstance(billboard[k], str) and billboard[k] == "upright" for k in facing), np.bool_,
+                          len(facing))
+    right, up, forward = camera.basis()
+    axes = np.empty((len(facing), 3, 3))
+    axes[:] = np.column_stack([right, up, -forward])
+    if upright.any():
+        across, back = _upright_axes(camera)
+        axes[upright] = np.column_stack([across, (0.0, 1.0, 0.0), back])
+    sizes = np.sqrt((linear[facing] ** 2).sum(axis=1))  # (the length of each axis: (n, 3))
+    linear[facing] = axes * sizes[:, None, :]
+    return linear
 
 
 def _immutable_color(color):
@@ -767,26 +797,36 @@ class Renderer(ShadowMaps, Mirrors):
             nodes = [nodes[k] for k in keep]
             ident = np.array(candidates, np.int32)[keep] + 1
         on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined = zip(*attrs)
-        if camera is not None and any(billboard):  # (turned to face the camera, keeping their sizes)
-            right, up, forward = camera.basis()
-            facing = np.flatnonzero(np.array(billboard, np.bool_))
-            sizes = np.sqrt((linear[facing] ** 2).sum(axis=1))  # (the length of each axis: (n, 3))
-            linear[facing] = np.column_stack([right, up, -forward])[None] * sizes[:, None, :]
         last = memo.get("meshes")
         if last is not None and _same(last[0], on):  # (the same meshes on the same objects: the same indices)
-            meshes, mesh_idx = last[1], last[2]
+            meshes, mesh_idx, sprites = last[1], last[2], last[3]
         else:
-            meshes, mesh_of, mesh_idx = [], {}, []
-            for mesh in on:
+            meshes, mesh_of, mesh_idx, sprites = [], {}, [], []
+            for k, mesh in enumerate(on):
                 m = mesh_of.get(id(mesh))
                 if m is None:
-                    m = mesh_of[id(mesh)] = len(meshes)
-                    meshes.append(mesh)
+                    if type(mesh) is SheetCell:  # (a sprite sheet's cells, all of them packed, in order)
+                        for cell in mesh.sheet.meshes:
+                            mesh_of[id(cell)] = len(meshes)
+                            meshes.append(cell)
+                        m = mesh_of[id(mesh)]
+                    else:
+                        m = mesh_of[id(mesh)] = len(meshes)
+                        meshes.append(mesh)
+                if type(mesh) is SheetCell and mesh.index == 0:
+                    sprites.append(k)
                 mesh_idx.append(m)
             if id(STRIPS[0]) in mesh_of:  # (Lines: each segment takes the strip it needs, all of them packed)
                 meshes += [strip for strip in STRIPS[1:] if id(strip) not in mesh_of]
             mesh_idx = np.array(mesh_idx, np.int64)
-            memo["meshes"] = (on, meshes, mesh_idx)
+            sprites = np.array(sprites, np.int64)
+            memo["meshes"] = (on, meshes, mesh_idx, sprites)
+        if len(sprites):  # (each sprite's cell: its animation's frame, from the side the camera sees it from)
+            mesh_idx, flipped = self._sprite_cells(nodes, sprites, mesh_idx, linear, where, camera)
+        if camera is not None and any(billboard):  # (turned to face the camera, keeping their sizes)
+            linear = _face_camera(linear, billboard, camera)
+        if len(sprites) and flipped.any():  # (mirrored sheets: the other half of the turn, flipped)
+            linear[sprites[flipped], :, 0] *= -1.0
         keys = list(map(_mesh_key, meshes))  # (afresh: a mesh's arrays may have been replaced)
         rgb = self._linear_colors(colors)
         emissive, shine, spec, shiny = _numbers((emissive, shine, spec, shiny))
@@ -830,8 +870,9 @@ class Renderer(ShadowMaps, Mirrors):
                 "ident": ident,
                 "emissive": emissive, "cast": cast, "pack": arrays,
                 "outline": outlined,
-                # (rows turned to the camera, which a mirror's pass turns to its own: see Mirrors._reflect)
-                "facing": camera is not None and (bool(swarms) or any(billboard)),
+                # (rows turned to the camera, or sprites' cells picked for it, which a mirror's pass makes afresh
+                # for its own: see Mirrors._reflect)
+                "facing": camera is not None and (bool(swarms) or any(billboard) or len(sprites) > 0),
                 "keys": keys, "mesh_keys": mesh_keys}
 
     def _particle_rows(self, nodes, swarms, per_object, camera, meshes):
@@ -869,6 +910,40 @@ class Renderer(ShadowMaps, Mirrors):
             rgb[at] = colour[:n] * rgb[at]
             alpha[at] = opacity[:n] * alpha[at]
         return out
+
+    def _sprite_cells(self, nodes, sprites, mesh_idx, linear, where, camera):
+        """(mesh_idx, flipped): mesh_idx (N,) with each sprite's row (rows `sprites` of the instances, showing the
+        first cell of their sheet's block of meshes) on the cell it shows now: its animation's frame seen from the
+        side the camera is on (from the front if there is no camera); flipped (S,) whether that cell is drawn
+        flipped left to right (the far half of a mirrored sheet's turn)."""
+        shown = [node._shown() if hasattr(node, "_shown") else (0, node.mesh.sheet)
+                 for node in map(nodes.__getitem__, sprites)]
+        first = np.array([cell for cell, _ in shown], np.int64)
+        sheets = [sheet for _, sheet in shown]
+        columns, directions, held = (np.array([getattr(sheet, a) for sheet in sheets], np.int64)
+                                     for a in ("columns", "directions", "held"))
+        mirrored, clockwise = (np.array([getattr(sheet, a) for sheet in sheets], np.bool_)
+                               for a in ("mirrored", "clockwise"))
+        turn = np.zeros(len(sprites))  # (how far round from its front the camera is, counter-clockwise from above)
+        if camera is not None:
+            _, back = _upright_axes(camera)
+            if camera.projection == "ortho":  # (the same way to the camera from everywhere)
+                to = np.broadcast_to(back, (len(sprites), 3))
+            else:
+                to = np.asarray(camera.position, np.float64) - where[sprites]
+                level = to[:, 0] ** 2 + to[:, 2] ** 2
+                to = np.where((level > 1e-18)[:, None], to, back)  # (straight above or below: as for an ortho view)
+            ahead = linear[sprites, :, 2]  # (its own +z: the way it faces)
+            turn = np.arctan2(ahead[:, 2] * to[:, 0] - ahead[:, 0] * to[:, 2],
+                              ahead[:, 0] * to[:, 0] + ahead[:, 2] * to[:, 2])
+            turn = np.where(clockwise, turn, -turn)
+        steps = np.nan_to_num(turn * directions / (2.0 * np.pi) + 0.5, nan=0.0, posinf=0.0, neginf=0.0)
+        side = np.floor(np.clip(steps, -1e6, 1e6)).astype(np.int64) % directions
+        flipped = mirrored & (side >= held)
+        side = np.where(flipped, directions - side, side)
+        mesh_idx = mesh_idx.copy()
+        mesh_idx[sprites] += first + side * columns
+        return mesh_idx, flipped
 
     def _detail(self, meshes, keys, flat, mesh_idx, linear, where, shiny, simplified, camera):
         """Levels of detail (detail.py) for the instances seen from camera: (meshes, keys, mesh_idx, version), with

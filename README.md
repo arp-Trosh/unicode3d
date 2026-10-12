@@ -129,8 +129,11 @@ and quality aren't drawn there, but F7 and F8 still work). A small font and a la
   F9 (or the panel) shows what the engine knows, in lines: a floor grid, the world's axes, a box
   around each thing you bump into (the one standing in for the pool too), your own capsule (look
   down, or in the mirror), and the ray query from your hand to what the crosshair is on, with the
-  surface's normal there; a pin floats over the last spot clicked. Esc quits. Shows: nearly
-  everything, ray and overlap queries, labels, particles, sprites and lines included.
+  surface's normal there; a pin floats over the last spot clicked. Before the mirror, the fighter (a
+  sprite with eight sides, his sheet baked by unicode3d from a figure of blobs) walks a loop; come
+  near and he turns to face you in a fighting stance, throwing punches; click him and he gathers a
+  blast of light at his hip and throws it. Esc quits. Shows: nearly everything, ray and overlap
+  queries, labels, particles, sprites and lines included.
 - **workshop**: one object on a turntable, and a panel to change it: the object (a sphere, a cube, a
   die, a sign, a blob), its colour, its material (specular, shininess, reflectivity, opacity), its
   scale along x, y and z (0 squashes it flat, below 0 mirrors it), the fog (off, or fading into the
@@ -202,8 +205,10 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
   at a slant as glass does, and cast shadows tinted by their colour. Textures with holes (leaves,
   fences) are cut out with smooth edges, and cast shadows with holes in them.
 - **Particles and sprites:** sparks, smoke, dust, debris and rain by the thousand, moved in one
-  kernel and drawn as instances of a small mesh (any mesh, or flat sprites facing the camera), and
-  single objects that always face the camera.
+  kernel and drawn as instances of a small mesh (any mesh, or flat sprites facing the camera),
+  single objects that always face the camera (or stand upright, turning only about the vertical),
+  and characters from sprite sheets drawn from eight sides (or any number), the engine picking the
+  side the camera sees and the frame of the animation playing.
 - **Lines:** grids, axes, wireframes, laser beams and debug drawing, thousands of segments as one
   object, a set number of pixels wide however far off, or a width in the world.
 - **Reflections:** flat objects can be mirrors (a wall mirror, a polished floor, still water),
@@ -600,9 +605,62 @@ renderer.render(objects + [sparks, smoke], camera, lights)
 **Sprites.** `Object3D(..., billboard=True)` turns any object to face the camera wherever it is, its
 +z towards the camera and +y up the picture, keeping its size and place: a textured square for a
 sprite, a tree card, a marker over a unit. Like any object it is outlined (see `Renderer`'s
-`outline`); `outline=False` on an object leaves its edges plain. In a mirror, sprites, particles
-facing the camera and [lines](#lines) face the reflected view, so they look the same in a
-reflection as they would from where it is seen from.
+`outline`); `outline=False` on an object leaves its edges plain. `billboard="upright"` turns it
+only about the vertical, so that it keeps standing (+y up the world) when seen from above: for
+characters and trees on the ground. In a mirror, sprites, particles facing the camera and
+[lines](#lines) face the reflected view, so they look the same in a reflection as they would from
+where it is seen from.
+
+**Sprites with eight sides.** A `SpriteSheet` cuts a picture into a grid of cells: one row for each
+side a character is drawn from, one column for each frame of its animations. A `Sprite` shows it:
+an upright billboard that, every frame, takes the cell for the frame of its animation playing, seen
+from the side the camera is on. The game decides which way it faces (its rotation, as for any
+object), which animation plays, and how it moves; the engine works out the rest.
+
+```python
+from unicode3d import Sprite, SpriteSheet
+from unicode3d.transforms import UP, quat_axis_angle
+
+sheet = SpriteSheet("knight.png", columns=8, height=1.8,       # 8 rows of directions by 8 frames
+                    animations={"idle": (0, 1, 4.0),           # (first column, frames, frames a second)
+                                "walk": (1, 4, 8.0),
+                                "attack": (5, 3, 10.0)})
+knight = Sprite(sheet, position=(2.0, 0.0, -3.0))
+knight.play("walk")                                            # play("attack", loop=False) for once
+
+# every frame:
+knight.rotation = quat_axis_angle(UP, heading)                # facing (sin heading, 0, cos heading)
+knight.update(dt)                                             # the animation moved on
+renderer.render(objects + [knight], camera, lights)
+```
+
+- **The rows** go round the character: row 0 shows its front (facing the viewer), and each row after
+  it shows it turned a further 360 / `directions` degrees clockwise as seen from above (with 8:
+  front, front-left, left, back-left, back, back-right, right, front-right, left and right as the
+  picture shows them). `clockwise=False` for sheets drawn the other way round; `directions=4`, or 16,
+  or 1 (an animated sprite seen the same from everywhere). `mirrored=True` takes classic sheets
+  holding only the front-to-back half (5 rows of 8 directions) and flips them for the other side.
+- **Which way it faces** is its own +z, turned by its rotation and its parents': a sprite riding on
+  a turning platform turns with it. The side is picked from where the camera is, so sprites across
+  the picture are each seen from their own side, and a mirror shows the side it sees.
+- **Animations** are runs of columns, each from its first row of directions (a fourth number, for
+  sheets stacking several blocks of rows). `play(name)` carries on if it is already playing
+  (`restart=True` starts it over); `frame` is the frame showing, `finished` whether an animation
+  played without `loop` has reached its end; `time` and `speed` can be set too.
+- **The picture**: `height` is how tall a cell stands in the world, `origin` the point of a cell at
+  the sprite's position ((0.5, 0) by default: the middle of its bottom, where its feet are), and
+  `margin` and `spacing` the pixels around and between cells to leave out. Clear parts are cut out;
+  each cell is its own texture, so a small sprite never blurs into the next cell on the sheet.
+- **Like an object**, a sprite takes `scale`, `emissive`, `opacity`, `color`, `outline`, shadows,
+  picking (which gives the `Sprite`) and a parent. It is a flat picture lit as one, turned to the
+  camera: with the light behind it, a little `emissive` keeps it from going dark. Ray and overlap
+  queries see the rectangle of its first cell as the sprite is turned (not as it faces the
+  camera): stand a box in for it in `Colliders` if things should bump into it.
+- **Cost:** a few microseconds of Python a sprite a frame (300 walking sprites draw in about 6 ms at
+  180x50); every cell of a sheet is packed once, so changing frames and sides costs nothing more.
+
+`python -m unicode3d.examples.fighter fighter.png` saves the room demo's sheet: a figure built of
+blobs and posed frame by frame, drawn from eight sides by unicode3d itself.
 
 </details>
 
@@ -1395,9 +1453,10 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 For work on the engine itself (see also `CLAUDE.md`):
 
 - `python -m unittest`: the tests.
-- `python -m benchmarks.gallery diff [REV]`: draws 24 reference scenes (a cube, dice in every glyph
+- `python -m benchmarks.gallery diff [REV]`: draws 31 reference scenes (a cube, dice in every glyph
   set and colour mode, glass, shadows, cut-outs, mirrors, a textured floor to the horizon, many
-  balls, the room demo, fog, materials, stretched shapes, OBJ and glTF models, an orthographic view) with the engine as of a git revision
+  balls, the room demo, fog, materials, stretched shapes, OBJ and glTF models, an orthographic view,
+  lettering, levels of detail, particles, lines and sprites) with the engine as of a git revision
   (default `HEAD`) and as it is now, and says for each whether it came out identical, within
   rounding, or changed, with pictures of what changed. `save DIR` keeps a set, `compare OLD NEW`
   compares two.
