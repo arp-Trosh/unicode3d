@@ -19,6 +19,17 @@ capsule pushed out of whatever it walks into (Colliders), the door too until it
 has swung open. N puts names over the things nearby (labels anchored to points
 in the scene, hidden behind whatever is in front of them).
 
+In the north-east corner, a campfire: flames that are cut-out pictures turned to
+face the camera (billboards), each swapping between wavering frames, sparks and
+smoke (Particles), a flickering light, and a string of lights from a post by the
+fire to the corner pillar (a wire of Lines; the bulbs are Particles that never
+move). Click anything to throw a puff of chips coloured as it is drawn there.
+F9, or Debug on the panel, shows what the engine knows, drawn in Lines: a floor
+grid, the world's axes, a box around each thing the walker bumps into, the
+walker's capsule (look down, or in the mirror) and the ray query from the
+walker's hand to what the crosshair is on; a pin floats over the last spot
+clicked.
+
 Walking feels best in a terminal that reports key releases (kitty, foot,
 Ghostty, WezTerm, Alacritty, iTerm2, Windows Terminal): elsewhere a held key is
 worked out from its repeats, and a tap walks for about half a second.
@@ -32,14 +43,14 @@ from .dice import make_die, orientation_showing
 from .hud import StatusBar
 from ..animation import Animation, RotationTrack, Track
 from ..background import Fog, Gradient, Sky, SkyBox
-from ..color import Color
+from ..color import Color, linear_to_srgb
 from ..keys import Key, MouseEvent
 from ..mesh import Mesh, make_box
-from ..scene import Camera, Light, Node, Object3D, PointLight, Renderer
+from ..scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer
 from ..queries import Colliders
 from ..shapes import blob_mesh, block_mesh, text_mesh
 from ..terminal import add_display_args, display_options, run
-from ..transforms import UP, quat_axis_angle, quat_mul
+from ..transforms import UP, quat_axis_angle, quat_mul, scene_poses
 from ..ui import Choice, Panel, Slider, Toggle
 
 HALF = 11.0          # the courtyard runs from -HALF to HALF in x and z
@@ -48,6 +59,7 @@ DIE_SIZE = 0.34      # of the dice in the glass case
 EYE = 1.6
 RADIUS = 0.35        # how close the walker gets to walls and things
 KNEE = 0.45          # the height of the walker's lowest point, plus RADIUS: what they step over
+WAIST = 1.0          # how high the debug view draws the walker's capsule
 WALK, TURN, LOOK = 3.0, 1.8, 1.2  # units a second, radians a second
 MIST = (225, 228, 232)  # the fog's colour when it is mist rather than the background
 DOOR_AT = np.array([0.85, 0.0, 1.0])  # the door's hinge; it is 1.1 wide, along +x
@@ -55,6 +67,9 @@ DOOR_NEAR = 2.3      # how close the walker comes before the door opens
 TAG_REACH = 10.0     # how near things are to have their names shown (the Names toggle)
 TAG_LIFT = 0.15      # how far above the top of a thing its name is
 TAG_GAP = 0.5        # objects of one name nearer each other than this are named once, as one thing
+FIRE_AT = np.array([8.3, 0.0, -9.5])  # the campfire, in the north-east corner
+SPARKS, PUFFS = 30.0, 5.0  # how many sparks and puffs of smoke the fire gives off a second
+BREEZE = np.array([0.3, 0.0, 0.12])  # what carries them off, a little to the south-east
 
 FONT = {  # 5 rows a letter, for the sign on the north wall
     "U": ["#...#", "#...#", "#...#", "#...#", ".###."],
@@ -121,6 +136,45 @@ def stained_glass(rng, res=96, panes=14):
     lead = (d[..., 1] - d[..., 0] < 2.2) | (x < 3) | (x > res - 3) | (y < 3) | (y > res - 3)
     tex[lead] = (0.08, 0.07, 0.06, 1.0)
     return tex
+
+
+def flame(rng, res=64):
+    """A tongue of flame on clear ground (a cut-out): round at the bottom, pointed and wavering at the top,
+    white-yellow at its heart and red at its edges. Each call wavers differently: frames to swap between."""
+    y, x = np.mgrid[0:res, 0:res] + 0.5
+    v, u = 1.0 - y / res, x / res * 2.0 - 1.0  # (v 1 at the top; u -1..1 across)
+    phase = rng.uniform(0, 2 * np.pi, 3)
+    middle = v * (0.16 * np.sin(5.0 * v + phase[0]) + 0.07 * np.sin(13.0 * v + phase[1]))
+    width = 0.8 * (1.0 - v) ** 0.9 * np.sqrt(np.clip(v / 0.22, 0.0, 1.0)) * (1.0 + 0.12 * np.sin(19.0 * v + phase[2]))
+    r = np.abs(u - middle) / np.maximum(width, 1e-6)
+    heat = np.clip((1.0 - r) * (1.15 - 0.8 * v), 0.0, 1.0)
+    rgb = np.where((heat > 0.45)[..., None], (1.0, 0.93, 0.6),
+                   np.where((heat > 0.2)[..., None], (1.0, 0.62, 0.12), (0.92, 0.25, 0.05)))
+    return np.concatenate([rgb, (r < 1.0)[..., None]], axis=2).astype(float)
+
+
+def pin(res=48):
+    """A map pin on clear ground (a cut-out): a round yellow head with a dark rim, its point down."""
+    y, x = np.mgrid[0:res, 0:res] + 0.5
+    u, v = x / res - 0.5, 1.0 - y / res  # (v 1 at the top)
+    head = np.hypot(u, v - 0.66) / 0.3
+    point = (v < 0.66) & (np.abs(u) < 0.26 * (v / 0.66) ** 1.4)
+    tex = np.zeros((res, res, 4))
+    tex[..., :3] = np.where((head < 0.45)[..., None], (1.0, 1.0, 1.0), (1.0, 0.8, 0.1))
+    tex[(head > 0.82) & (head < 1.0)] = (0.25, 0.15, 0.0, 1.0)
+    tex[..., 3] = np.maximum(tex[..., 3], (head < 1.0) | point)
+    return tex
+
+
+def sagging(a, b, sag, step=0.15):
+    """Points along a wire hung from a to b, sagging `sag` in the middle, about `step` apart."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    s = np.linspace(0.0, 1.0, max(int(np.linalg.norm(b - a) / step), 2) + 1)[:, None]
+    return a + s * (b - a) - 4.0 * sag * s * (1.0 - s) * UP
+
+
+CORNERS = np.array([(i & 1, i >> 1 & 1, i >> 2 & 1) for i in range(8)], float)  # (of a box from 0 to 1)
+EDGES = np.array([(i, i | 1 << k) for i in range(8) for k in range(3) if not i & 1 << k])  # (12 pairs of corners)
 
 
 def starry_sky_box(rng, res=128):
@@ -223,8 +277,8 @@ class Courtyard:
         wall = np.tile(plaster(rng), (1, 4, 1))
         floor = tiles(256, (0.75, 0.72, 0.68), (0.4, 0.38, 0.36), int(2 * HALF))
         # Plaster and stone are matte (specular 0): no highlight sliding over them as you walk.
-        self.add(Object3D(inward_box(HALF, WALL_HEIGHT, (wall, floor)), color=(255, 255, 255), specular=0.0),
-                 "the courtyard")
+        self.ground = Object3D(inward_box(HALF, WALL_HEIGHT, (wall, floor)), color=(255, 255, 255), specular=0.0)
+        self.add(self.ground, "the courtyard")
         for x, z in ((-HALF + 0.6, -HALF + 0.6), (HALF - 0.6, -HALF + 0.6), (-HALF + 0.6, HALF - 0.6), (HALF - 0.6, HALF - 0.6)):
             self.add(Object3D(block_mesh((x, WALL_HEIGHT / 2 + 0.3, z), (0.8, WALL_HEIGHT + 0.6, 0.8)), color=(170, 160, 150),
                               specular=0.1), "a pillar")
@@ -380,6 +434,58 @@ class Courtyard:
                               specular=2.5, shininess=90.0, parent=hinge), "a brass handle")
         self.door = Door(hinge)
 
+        # A campfire in the north-east corner, in a ring of stones: crossed logs on glowing embers, flames (cut-out
+        # pictures that face the camera, billboards, each swapping between wavering frames: see animate), sparks
+        # and smoke (Particles: see burn), and a flickering light (fire_light).
+        stone = blob_mesh((0.16, 0.1, 0.13), rings=6, segments=8)
+        for k in range(9):
+            a = 2 * np.pi * k / 9
+            grey = int(rng.integers(110, 150))
+            self.add(Object3D(stone, FIRE_AT + (0.55 * np.cos(a), 0.08, 0.55 * np.sin(a)),
+                              quat_axis_angle(UP, rng.uniform(0, np.pi)), color=(grey, grey - 4, grey - 8),
+                              specular=0.1), "a campfire")
+        for k in range(3):
+            self.add(Object3D(box, FIRE_AT + (0.0, 0.12, 0.0), quat_axis_angle(UP, 0.3 + k * np.pi / 3),
+                              scale=(0.85, 0.1, 0.1), color=(75, 50, 32), specular=0.0), "a campfire")
+        self.add(Object3D(blob_mesh((0.32, 0.04, 0.32)), FIRE_AT + (0.0, 0.03, 0.0), color=(255, 110, 40), emissive=1.0,
+                          cast_shadows=False), "a campfire")
+        frames = [flame(rng) for _ in range(6)]
+        self.flames = []  # each a card's frames, one of them shown at a time
+        for w, h, dx, dz in ((0.7, 1.05, 0.0, 0.0), (0.45, 0.7, 0.14, 0.1), (0.4, 0.6, -0.15, -0.07)):
+            cards = [Object3D(picture(w, h, tex), FIRE_AT + (dx, 0.06, dz), color=(255, 255, 255), emissive=1.0,
+                              billboard=True, outline=False, cast_shadows=False) for tex in frames]
+            for card in cards:
+                self.add(card, "a campfire", solid=False)
+            self.flames.append(cards)
+        self.sparks = Particles(gravity=BREEZE + (0.0, 0.9, 0.0), drag=0.8, emissive=1.0, limit=200, seed=1)
+        self.smoke = Particles(face_camera=True, gravity=BREEZE + (0.0, 0.1, 0.0), drag=0.4, limit=100, seed=2)
+        self.add_effect(self.sparks, "sparks")
+        self.add_effect(self.smoke, "smoke")
+        self.puffing = [0.0, 0.0]  # sparks and puffs owed (see burn)
+
+        # A string of lights from a hook on the north wall, over a post by the fire, to the corner pillar and on to a
+        # hook on the east wall: a thin wire (Lines, in world units, so thinner further off) with glowing bulbs
+        # hanging from it (Particles that are never moved, so stay where they are put).
+        post = (6.6, -9.9)
+        self.add(Object3D(block_mesh((post[0], 1.35, post[1]), (0.12, 2.7, 0.12)), color=(95, 70, 45), specular=0.0),
+                 "a post")
+        stops = [(4.6, 3.2, -HALF + 0.04), (post[0], 2.72, post[1]), (HALF - 1.0, 3.9, -HALF + 1.0),
+                 (HALF - 0.04, 3.2, -6.4)]
+        for hook in (stops[0], stops[-1]):
+            self.add(Object3D(block_mesh(hook, (0.08, 0.08, 0.08)), color=(40, 40, 40)), "a string of lights",
+                     solid=False)
+        self.bulbs = Particles(emissive=1.0, limit=100)
+        wire = []
+        for a, b, sag in zip(stops, stops[1:], (0.3, 0.45, 0.5)):
+            points = sagging(a, b, sag)
+            wire += list(zip(points[:-1], points[1:]))
+            for i, at in enumerate(points[2:-2:3]):
+                self.bulbs.emit(at - (0.0, 0.06, 0.0), life=1e9, size=0.09,
+                                color=((255, 220, 140), (255, 80, 60), (90, 220, 120), (90, 140, 255))[i % 4])
+        self.add_effect(Lines([s for s, e in wire], [e for s, e in wire], width=0.012, units="world",
+                              color=(40, 35, 30)), "a string of lights")
+        self.add_effect(self.bulbs, "a string of lights")
+
         # The sign on the north wall.
         sign = rainbow_text("UNICODE3D")
         self.add(Object3D(sign, np.array([0.0, 2.3, -HALF + 0.4]), scale=0.14, color=(255, 255, 255)), "the sign")
@@ -391,8 +497,41 @@ class Courtyard:
         if solid:
             self.solid.objects.append(obj)
 
+    def add_effect(self, obj, name):
+        """Particles or Lines: drawn and named, but neither solid nor labelled (they have no box to put a name on)."""
+        self.objects.append(obj)
+        self.names[id(obj)] = name
+
+    def burn(self, dt):
+        """The fire's sparks and smoke, dt seconds on: new ones given off, the others moved on."""
+        self.puffing[0] += SPARKS * dt
+        self.puffing[1] += PUFFS * dt
+        sparks, puffs = int(self.puffing[0]), int(self.puffing[1])
+        self.puffing = [self.puffing[0] - sparks, self.puffing[1] - puffs]
+        # Sparks fly up out of the flames, yellow, dimming to red as they go; smoke rises above them, growing
+        # and thinning, and drifts off on the breeze.
+        self.sparks.emit(FIRE_AT + (0.0, 0.35, 0.0), sparks, velocity=(0.0, 1.0, 0.0), speed=(0.3, 1.2), radius=0.2,
+                         life=(0.6, 1.6), size=(0.03, 0.05), size_end=0.01, color=(255, 230, 120),
+                         color_end=(220, 40, 10))
+        self.smoke.emit(FIRE_AT + (0.0, 0.95, 0.0), puffs, velocity=(0.0, 0.45, 0.0), speed=0.1, radius=0.12,
+                        life=(3.0, 4.5), size=(0.25, 0.35), size_end=(1.0, 1.4), color=(120, 116, 112),
+                        color_end=(190, 190, 195), opacity=0.4, opacity_end=0.0, spin=(-0.4, 0.4))
+        self.sparks.update(dt)
+        self.smoke.update(dt)
+
+    def fire_light(self, t):
+        """The fire's light at time t: flickering, as sines out of step with each other."""
+        flicker = 0.75 + 0.12 * np.sin(11.0 * t) + 0.08 * np.sin(23.7 * t + 1.0) + 0.05 * np.sin(37.1 * t + 2.0)
+        return PointLight(FIRE_AT + (0.0, 0.6 + 0.03 * np.sin(17.0 * t), 0.0), color=(255, 150, 70),
+                          diffuse=1.1 * flicker, range=7.0)
+
     def animate(self, t):
-        """Everything that moves by itself, at time t seconds (the door moves with the walker: see Door)."""
+        """Everything that moves by itself, at time t seconds (the door moves with the walker: see Door; the
+        fire's sparks and smoke with each frame's time: see burn)."""
+        for i, cards in enumerate(self.flames):  # (a frame of each flame shown, swapped about ten times a second)
+            shown = int(t * (9.0 + 2.0 * i) + 2 * i) % len(cards)
+            for k, card in enumerate(cards):
+                card.visible = k == shown
         for i, (d, bob) in enumerate(zip(self.dice, self.bobs)):
             d.rotation = quat_mul(quat_axis_angle(UP, 0.4 * t + i), orientation_showing(i, 0.0))
             d.position = bob.at(t + 0.55 * i)
@@ -436,6 +575,70 @@ class Courtyard:
         return min(max(x + push[0], -room), room), min(max(z + push[2], -room), room)
 
 
+class DebugView:
+    """What the engine knows, drawn over the scene in lines (F9): a floor grid a metre square, the world's axes
+    (x red, y green, z blue) at the centre, a box around each thing the walker bumps into (the Colliders, the box
+    standing in for the pool included), the walker's capsule up to the waist (higher, it would cross the picture
+    from inside: look down, or in the mirror), and the ray query from the walker's hand to what the crosshair is on,
+    with the surface's normal there."""
+    def __init__(self):
+        r = np.arange(-HALF, HALF + 0.5)
+        n = len(r)
+        across = np.c_[r, np.zeros(n), np.full(n, -HALF)], np.c_[r, np.zeros(n), np.full(n, HALF)]
+        along = np.c_[np.full(n, -HALF), np.zeros(n), r], np.c_[np.full(n, HALF), np.zeros(n), r]
+        self.grid = Lines(np.r_[across[0], along[0]], np.r_[across[1], along[1]], color=(110, 170, 210),
+                          position=(0.0, 0.01, 0.0))
+        self.axes = Lines(np.zeros((3, 3)), np.eye(3) * 1.5, colors=[(255, 60, 60), (60, 255, 60), (70, 110, 255)],
+                          width=3, position=(0.0, 0.02, 0.0))
+        self.boxes = Lines(color=(255, 170, 40))
+        self.capsule = Lines(color=(120, 255, 120))
+        self.ray = Lines(colors=np.zeros((0, 3)), width=2)
+        self.lines = [self.grid, self.axes, self.boxes, self.capsule, self.ray]
+        self.hit = None
+        self.corners = {}  # id(mesh) -> the corners of the box around it, in its own space (8, 3)
+
+    def show(self, on):
+        for lines in self.lines:
+            lines.visible = on
+
+    def update(self, court, eye, look):
+        """Follow the walker (at eye, looking along look) and whatever moved. court.solid has been updated."""
+        # Each solid thing's box, turning with it: the box around its mesh, placed as the thing is (all at once).
+        solid = [obj for obj in court.solid.objects if obj is not court.ground]
+        for obj in solid:
+            if id(obj.mesh) not in self.corners:
+                lo, hi = obj.mesh.vertices.min(axis=0), obj.mesh.vertices.max(axis=0)
+                self.corners[id(obj.mesh)] = lo + CORNERS * (hi - lo)
+        rows, linear, position, _ = scene_poses(solid)
+        at = [rows[id(obj)] for obj in solid]
+        corners = np.array([self.corners[id(obj.mesh)] for obj in solid])  # (n, 8, 3)
+        corners = np.einsum("nij,nkj->nki", linear[at], corners) + position[at][:, None]
+        self.boxes.set(corners[:, EDGES[:, 0]].reshape(-1, 3), corners[:, EDGES[:, 1]].reshape(-1, 3))
+        # The capsule (blocked) up to the waist: rings round it at knee and waist height, sides between them, and
+        # half rings under its end.
+        a = np.linspace(0.0, 2.0 * np.pi, 25)
+        ring = np.c_[np.cos(a), np.zeros(25), np.sin(a)] * RADIUS
+        half = np.linspace(0.0, np.pi, 13)
+        arcs = [np.c_[np.cos(half) * np.cos(turn), -np.sin(half), np.cos(half) * np.sin(turn)] * RADIUS + (0, KNEE, 0)
+                for turn in (0.0, np.pi / 2)]
+        rings = [ring + (0.0, KNEE, 0.0), ring + (0.0, WAIST, 0.0)]
+        sides = [np.array([p + (0.0, KNEE, 0.0), p + (0.0, WAIST, 0.0)]) for p in ring[:24:3]]
+        feet = np.array([eye[0], 0.0, eye[2]])
+        self.capsule.set(np.concatenate([c[:-1] for c in rings + arcs + sides]) + feet,
+                         np.concatenate([c[1:] for c in rings + arcs + sides]) + feet)
+        # The ray: from the walker's right hand to the nearest hit, and the surface's normal there.
+        self.hit = court.solid.raycast(eye, look, max_distance=60.0)
+        if self.hit is None:
+            self.ray.set(np.zeros((0, 3)), np.zeros((0, 3)), np.zeros((0, 3)))
+            return
+        right = np.cross(look, UP)
+        right /= max(np.linalg.norm(right), 1e-9)
+        hand, at, normal = eye + 0.25 * right - (0.0, 0.3, 0.0) + 0.3 * look, self.hit.position, self.hit.normal
+        self.ray.set([hand, at, at - (0.1, 0, 0), at - (0, 0.1, 0), at - (0, 0, 0.1)],
+                     [at, at + 0.5 * normal, at + (0.1, 0, 0), at + (0, 0.1, 0), at + (0, 0, 0.1)],
+                     [(255, 60, 60), (60, 255, 60), (255, 255, 255), (255, 255, 255), (255, 255, 255)])
+
+
 class Walk:
     def __init__(self, seed=None):
         self.court = Courtyard(seed)
@@ -449,10 +652,23 @@ class Walk:
         self.fog = Slider("Fog", 0.3, 0.0, 0.9, step=0.05, keys="[]", length=8, fmt=lambda v: f"{v:.2f}")
         self.fog_into = Choice("fades into (f)", ("background", "mist"), key="f")
         self.tags = Toggle("Names (n)", False, key="n")
-        self.panel = Panel([self.lamp, self.sun, self.background, self.fog, self.fog_into, self.tags], keyboard=False)
+        self.debug = Toggle("Debug (F9)", False, key=Key.F9)
+        self.panel = Panel([self.lamp, self.sun, self.background, self.fog, self.fog_into, self.tags, self.debug],
+                           keyboard=False)
+        self.view = DebugView()
+        # Clicking throws a puff of chips from the spot, coloured as it is drawn there, which bounce on the floor;
+        # with the debug view on, a pin (a billboard) floats over the last spot clicked.
+        self.chips = Particles(make_box(), gravity=(0.0, -9.8, 0.0), ground=0.0, bounce=0.35, emissive=0.5, limit=300)
+        self.court.names[id(self.chips)] = "chips"
+        self.pin = Object3D(picture(0.3, 0.42, pin()), color=(255, 255, 255), emissive=0.6, billboard=True,
+                            cast_shadows=False, visible=False)
+        self.stem = Lines(color=(255, 210, 40), visible=False)
+        self.court.names[id(self.pin)] = self.court.names[id(self.stem)] = "the last spot clicked"
+        self.pinned = None  # where the pin is over
         self.x, self.z, self.yaw, self.pitch = 0.0, 5.5, 0.0, 0.0
         self.t = 0.0
         self.clicked = ""
+        self.drawn = []  # what the last frame drew
 
     def frame(self, screen, dt, events):
         dt = min(dt, 0.1)
@@ -463,8 +679,10 @@ class Walk:
             if ev == Key.ESC:
                 return False
             if isinstance(ev, MouseEvent) and ev.pressed and ev.button == MouseEvent.LEFT and not ev.moved:
-                hit = self.renderer.pick(ev.x, ev.y)
+                hit = self.pick(ev.x, ev.y)
                 self.clicked = f"clicked: {self.court.names.get(id(hit.object), '?')}" if hit else ""
+                if hit:
+                    self.throw_chips(hit, ev.x, ev.y)
 
         held = screen.held
         turn = ((Key.RIGHT in held or "e" in held) - (Key.LEFT in held or "q" in held)) * TURN * dt
@@ -477,6 +695,8 @@ class Walk:
                                             self.z + (fz * ahead + fx * side) * WALK * dt)
         self.t += dt
         self.court.animate(self.t)
+        self.court.burn(dt)
+        self.chips.update(dt)
         near = np.hypot(self.x - DOOR_AT[0] - 0.55, self.z - DOOR_AT[2]) < DOOR_NEAR
         self.court.door.update(dt, near)
 
@@ -486,10 +706,19 @@ class Walk:
         lights = [Light(direction=np.array([0.5, -1.0, -0.35]), ambient=0.3, diffuse=0.6, color=(255, 245, 230),
                         shadows=True)
                   if self.sun.value else Light(ambient=0.08, diffuse=0.0, specular=0.0)]
-        objects = list(self.court.objects)
+        objects = self.court.objects + [self.chips, self.pin, self.stem] + self.view.lines
         self.court.bulb.visible = self.lamp.value
         if self.lamp.value:
             lights.append(PointLight(self.court.lamp_at, color=(255, 210, 150), diffuse=0.9, range=9.0, shadows=True))
+        lights.append(self.court.fire_light(self.t))
+        self.view.show(self.debug.value)
+        if self.debug.value:
+            self.view.update(self.court, eye, look)  # (court.solid was updated by blocked, above)
+        self.pin.visible = self.stem.visible = self.debug.value and self.pinned is not None
+        if self.pin.visible:  # (bobbing over the spot, on a stem down to it)
+            top = self.pinned + (0.0, 0.45 + 0.06 * np.sin(3.0 * self.t), 0.0)
+            self.pin.position = top
+            self.stem.set([self.pinned], [top])
         self.renderer.background = self.backgrounds[self.background.value]
         # Fog in the world, fading into the background (the sky's horizon, say) or into white mist: thicker further
         # up the slider.
@@ -499,6 +728,7 @@ class Walk:
 
         self.renderer.resize(cols, view_rows, screen.cell_pixels)
         fb = self.renderer.render(objects, camera, lights)
+        self.drawn = objects  # (what fb.ids number, from 1)
         screen.erase()
         screen.draw_frame(fb)
         if self.tags.value:  # a name over each thing nearby, hidden behind whatever is in front of it
@@ -506,7 +736,7 @@ class Walk:
                 screen.label(self.renderer, point, name, Color.WHITE, owner=objects, dim=True)
         cy, cx = view_rows // 2, cols // 2
         screen.text(cy, cx, "+", Color.WHITE, bold=True)
-        hit = self.renderer.pick(cx, cy)
+        hit = self.pick(cx, cy)
         seeing = self.court.names.get(id(hit.object), "?") + f" ({hit.distance:.1f} m)" if hit else "the sky"
         self.panel.draw(screen, rows - 2, 1)
         keys = "exact" if held.exact else "estimated from repeats"
@@ -514,6 +744,30 @@ class Walk:
                               f"held keys: {keys}")
         screen.refresh()
         return True
+
+    def pick(self, x, y):
+        """What is drawn in cell (x, y) of the last frame (a Pick, or a Hit), seeing through the debug view's lines
+        and pin: where they are in the way, the ray query through the cell (which knows only the solid things)."""
+        hit = self.renderer.pick(x, y)
+        if hit is not None and hit.object in (self.pin, self.stem, *self.view.lines):
+            origin, direction = self.renderer.ray(x + 0.5, y + 0.5)
+            hit = self.court.solid.raycast(origin, direction)
+        return hit
+
+    def throw_chips(self, hit, x, y):
+        """A puff of chips from where a click hit (of cell (x, y)), coloured as the thing hit is drawn there (or as
+        it is coloured, if not drawn there), and the pin moved over it."""
+        fb, (pw, ph) = self.renderer.framebuffer, self.renderer.cell_pixels
+        cell = (slice(y * ph, (y + 1) * ph), slice(x * pw, (x + 1) * pw))
+        drawn = np.isin(fb.ids[cell], [i + 1 for i, obj in enumerate(self.drawn) if obj is hit.object])
+        if drawn.any():
+            colour = tuple(linear_to_srgb(fb.rgb[cell][drawn].mean(axis=0)) * 255)
+        else:
+            colour = getattr(hit.object, "color", (200, 200, 200))
+        out = self.renderer.ray(x + 0.5, y + 0.5)[1]  # (back towards the walker, and up)
+        self.chips.emit(hit.position - 0.05 * out, 24, velocity=-1.5 * out + (0.0, 2.0, 0.0), speed=(0.8, 2.2),
+                        life=(1.5, 2.5), size=(0.03, 0.07), color=colour, spin=(4.0, 12.0))
+        self.pinned = hit.position.copy()
 
 
 def main():

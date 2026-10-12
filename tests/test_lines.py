@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from unicode3d import Camera, Colliders, Light, Lines, Node, Object3D, Renderer, make_box, union_bounds
+from unicode3d import Camera, Colliders, Light, Lines, Mesh, Node, Object3D, Renderer, make_box, union_bounds
 from unicode3d.color import to_linear_rgb
 
 CAMERA = Camera(position=np.array([0.0, 0.0, 5.0]), target=np.zeros(3))
@@ -97,6 +97,26 @@ class LinesTest(unittest.TestCase):
         objects = [Object3D(make_box(), np.array([0.0, 0.5, 0.0])), lines]
         for a, b in zip(frame(objects, FLAT), frame(objects, FLAT, Renderer(80, 40, simplify=2.0))):
             np.testing.assert_array_equal(a, b)
+
+    def test_facing_the_camera_in_mirrors_too(self):
+        # Seen only in a mirror, which the camera looks into at an angle: a line as wide in the reflection as from
+        # the reflected eye, and a billboard as big (turned to the frame's camera, both were seen from the side).
+        mirror = Object3D(Mesh(np.array([(-20.0, -20, 0), (20, -20, 0), (20, 20, 0), (-20, 20, 0)]),
+                               np.array([(0, 1, 2), (0, 2, 3)])), color=(0, 0, 0), reflectivity=1.0, specular=0.0)
+        at, along = np.array([-3.6, 0.0, 4.8]), np.array([0.8, 0.0, 0.6])  # (6 beyond the mirror; across the view)
+        line = Lines([at + (0, 1.2, 0) - 1.5 * along], [at + (0, 1.2, 0) + 1.5 * along], width=3, color=(255, 0, 0))
+        card = Object3D(make_box(), at - (0, 1.0, 0), scale=(1.0, 1.0, 0.0), color=(0, 255, 0), emissive=1.0,
+                        billboard=True)
+        seen = Camera(position=np.array([3.0, 0.0, 4.0]), target=np.zeros(3))
+        rgb = Renderer(80, 40).render([mirror, line, card], seen, Light()).rgb
+        direct = Renderer(80, 40).render([line, card], Camera(position=np.array([3.0, 0.0, -4.0]), target=np.zeros(3)),
+                                         Light()).rgb  # (from the reflected eye)
+        # (how wide in each column: the mirror passes on less light at some angles than at others)
+        red, alone = (c[..., 0].sum(axis=0) / np.maximum(c[..., 0].max(axis=0), 1e-9) for c in (rgb, direct))
+        self.assertGreater((red > 0.5).sum(), 15)
+        np.testing.assert_allclose(red[red > 0.5][1:-1], 3.0, atol=0.15)
+        np.testing.assert_allclose(alone[alone > 0.5][1:-1], 3.0, atol=0.15)
+        self.assertAlmostEqual((rgb[..., 1] > 0.5).sum() / (direct[..., 1] > 0.5).sum(), 1.0, delta=0.1)
 
     def test_left_out_of_queries_and_bounds(self):
         lines = Lines([(-3, 0, 0)], [(3, 0, 0)], width=0.5, units="world")

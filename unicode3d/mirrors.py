@@ -2,6 +2,8 @@
 # Copyright (C) 2026 arp-Trosh
 """Mirrors: flat, solid, reflective objects show the scene reflected in their plane, drawn in extra passes
 (Renderer's Mirrors part, and its kernels)."""
+import copy
+
 import numpy as np
 from numba import njit, prange
 
@@ -11,6 +13,18 @@ from .raster import CUT, SAMPLE_PATTERNS, SOLID
 MAX_BOUNCES = 4          # the deepest Renderer.mirror_bounces goes
 MIRROR_MIN_PIXELS = 50   # a mirror seen in a mirror smaller than this shows no reflection
 MIRROR_MIN_WEIGHT = 0.05  # nor one whose reflection would count for less of the frame's colour than this
+
+
+def _reflected(camera, mirror):
+    """The camera reflected by `mirror` (a (4, 4) matrix): where a mirror's pass sees the scene from, as a
+    camera with the same view (its picture the reflection's, unmirrored). None for None."""
+    if camera is None:
+        return None
+    seen = copy.copy(camera)
+    seen.position = (mirror @ np.r_[camera.position, 1.0])[:3]
+    seen.target = (mirror @ np.r_[camera.target, 1.0])[:3]
+    seen.up = mirror[:3, :3] @ np.asarray(camera.up, float)
+    return seen
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
@@ -174,9 +188,22 @@ class Mirrors:
             axes = scene["axes"] @ mirror[:3, :3]  # (each pixel's direction, reflected: the matrix is symmetric)
             keep = np.arange(len(inst["mesh"])) != i
             sub = {k: (v[keep] if isinstance(v, np.ndarray) and len(v) == len(keep) else v) for k, v in inst.items()}
+            seen_from = _reflected(scene.get("camera"), mirror)
+            left_out = scene.get("left_out", ()) + (ident,)  # (by id: the mirrors this pass and those before it are in)
+            if inst.get("facing") and seen_from is not None:
+                # Billboards, particles facing the camera and lines face the reflected camera in the reflection
+                # (turned to the frame's camera, they would be seen from the side): the objects' rows afresh, less
+                # those left out of this pass (this mirror, and those it is seen in).
+                faced = self._instances(self._objects, seen_from)
+                if faced is not None:
+                    keep = ~np.isin(faced["ident"], left_out)
+                    sub = {k: (v[keep] if isinstance(v, np.ndarray) and len(v) == len(keep) else v)
+                           for k, v in faced.items()}
             prefix = f"mirror{level}_"
             child = self._view(sub, view_proj, (mirror @ np.r_[eye, 1.0])[:3], scene["near"], np.r_[normal, d],
                                self._pass_shine(sub, level + 1), scene["shading"], prefix, axes)
+            if child is not None:
+                child["camera"], child["left_out"] = seen_from, left_out
             shown = pixels[on]
             seen = (buf.get(prefix + "rgb_frame", (fb.width * fb.height, 3), np.float32),  # (as the framebuffer's)
                     buf.get(prefix + "alpha_frame", (fb.width * fb.height,), np.float32),

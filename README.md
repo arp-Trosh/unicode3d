@@ -122,7 +122,15 @@ and quality aren't drawn there, but F7 and F8 still work). A small font and a la
   thick the fog is and whether it fades things into the background or into white mist. Walking is
   smooth in terminals that report key releases (see [Input](#input)); elsewhere a tap walks for
   about half a second. You bump into things and slide along them, and n puts names over the things
-  nearby. Esc quits. Shows: nearly everything, ray and overlap queries and labels included.
+  nearby. In the north-east corner a campfire burns in a ring of stones: flames that are cut-out
+  pictures facing the camera (sprites) swapping between wavering frames, sparks and smoke
+  (particles), a flickering light, and a string of lights strung over a post to the corner pillar
+  (a wire drawn as lines). Clicking anything throws a puff of chips coloured as it is drawn there.
+  F9 (or the panel) shows what the engine knows, in lines: a floor grid, the world's axes, a box
+  around each thing you bump into (the one standing in for the pool too), your own capsule (look
+  down, or in the mirror), and the ray query from your hand to what the crosshair is on, with the
+  surface's normal there; a pin floats over the last spot clicked. Esc quits. Shows: nearly
+  everything, ray and overlap queries, labels, particles, sprites and lines included.
 - **workshop**: one object on a turntable, and a panel to change it: the object (a sphere, a cube, a
   die, a sign, a blob), its colour, its material (specular, shininess, reflectivity, opacity), its
   scale along x, y and z (0 squashes it flat, below 0 mirrors it), the fog (off, or fading into the
@@ -592,7 +600,9 @@ renderer.render(objects + [sparks, smoke], camera, lights)
 **Sprites.** `Object3D(..., billboard=True)` turns any object to face the camera wherever it is, its
 +z towards the camera and +y up the picture, keeping its size and place: a textured square for a
 sprite, a tree card, a marker over a unit. Like any object it is outlined (see `Renderer`'s
-`outline`); `outline=False` on an object leaves its edges plain.
+`outline`); `outline=False` on an object leaves its edges plain. In a mirror, sprites, particles
+facing the camera and [lines](#lines) face the reflected view, so they look the same in a
+reflection as they would from where it is seen from.
 
 </details>
 

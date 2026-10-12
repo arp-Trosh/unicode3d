@@ -830,6 +830,8 @@ class Renderer(ShadowMaps, Mirrors):
                 "ident": ident,
                 "emissive": emissive, "cast": cast, "pack": arrays,
                 "outline": outlined,
+                # (rows turned to the camera, which a mirror's pass turns to its own: see Mirrors._reflect)
+                "facing": camera is not None and (bool(swarms) or any(billboard)),
                 "keys": keys, "mesh_keys": mesh_keys}
 
     def _particle_rows(self, nodes, swarms, per_object, camera, meshes):
@@ -1040,6 +1042,7 @@ class Renderer(ShadowMaps, Mirrors):
                 self._light_rows = light_rows(lights, self.shadows)
         scene = self._geometry(inst, camera, lights) if inst is not None else None
         if scene is not None:
+            scene["camera"] = camera  # (for mirrors, whose passes see the scene from it reflected)
             self._shade_scene(scene)  # (which writes every pixel)
         else:
             fb.clear()
