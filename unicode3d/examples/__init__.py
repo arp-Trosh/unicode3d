@@ -9,5 +9,7 @@ viewer.py  spinning model viewer: python -m unicode3d.examples.viewer [model.obj
 balls.py   balls bouncing around a room: python -m unicode3d.examples.balls
 maze.py    the Windows 98 maze screensaver: python -m unicode3d.examples.maze
 room.py    walk around a courtyard (WASD): python -m unicode3d.examples.room
+skinned.py  a marionette theatre (skinned meshes): python -m unicode3d.examples.skinned
+rigs.py    skinned figures built in code (for skinned.py, the bench and the gallery)
 workshop.py  try materials, scale, fog and animation by hand: python -m unicode3d.examples.workshop
 """

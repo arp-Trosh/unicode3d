@@ -42,7 +42,7 @@ Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it.
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.21.0
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.22.0
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
@@ -70,6 +70,7 @@ python3 -m unicode3d.examples.balls [-n BALLS]           # balls bouncing around
 python3 -m unicode3d.examples.maze [--size N]            # the Windows 98 maze screensaver
 python3 -m unicode3d.examples.room                       # walk around a courtyard of things to look at (WASD)
 python3 -m unicode3d.examples.workshop                   # try materials, scale, fog and animation on one object
+python3 -m unicode3d.examples.skinned                   # a marionette theatre: rag-doll puppets on strings (skinned meshes)
 python3 -m unicode3d.examples.tactics [--seed N]         # an isometric tactics board (orthographic camera; o compares)
 ```
 
@@ -754,8 +755,9 @@ of dozens of small parts, which draws quicker: a new `Model` whose root is posed
 original's, with the parts that look alike (the same `specular`, `shininess`, `emissive`,
 `double_sided`, `cast_shadows`) merged into one mesh in root's space, each part's colour multiplied
 into its mesh's colours. See-through and reflective parts, and those with holes in their textures,
-keep a mesh each; hidden parts are left out. A baked model has no nodes or animations, so bake a
-pose (a tower, a fallen tree), and `copy()` the result for more of it. Castle Panic's 64-part tower
+keep a mesh each; hidden parts are left out; skinned parts are baked as their skins pose them now. A
+baked model has no nodes or animations, so bake a pose (a tower, a fallen tree, a character in
+mid-stride), and `copy()` the result for more of it. Castle Panic's 64-part tower
 bakes into 6 parts that draw the same, to within a sample at the parts' edges.
 
 ```python
@@ -859,15 +861,19 @@ knee.rotation = quat_axis_angle((1, 0, 0), 0.6)  # the leg bends at the knee
 `Skin(joints, inverse_bind=None)`: `inverse_bind` holds a matrix for each joint (4x4) taking the
 mesh's vertices into that joint's space as it stood when the mesh was bound to it (glTF gives
 them); without it, the joints' poses when the `Skin` is made are taken as that pose. Weights are
-scaled to add up to 1 (NaN and negative ones count as 0).
+scaled to add up to 1 (NaN and negative ones count as 0). From glTF, a vertex on more than four
+joints (`JOINTS_1`, `WEIGHTS_1`, ...) keeps its four strongest, and weights on joints the skin
+doesn't have are left out, each with a warning in `model.warnings`; missing inverse bind matrices
+are the identity, as glTF says, and ones that aren't finite leave the mesh unskinned.
 
 The joints place a skinned object, so its own position, rotation and scale don't count; its
 visibility does (its joints' doesn't), and so do its colour and material. It is skinned once a
 frame, for every pass that draws it (the view, shadows, mirrors), and only when its joints' matrices
 changed since the last frame, so idle characters cost nothing to skin. Out of view, it isn't
 skinned at all, where nothing could show it (no shadowed sun, no mirrors, no shadowed lamp within
-reach). `world_bounds()` boxes it as it is drawn, and `skin.pose(mesh)` gives its vertices and
-normals in the world; `model.copy()` gives each copy's parts a skin on the copy's joints. Ray and
+reach). `world_bounds()` boxes it as it is drawn (and `model.bounds()` and `fit()` too), and
+`skin.pose(mesh)` gives its vertices and normals in the world; `model.copy()` gives each copy's
+parts a skin on the copy's joints, and `model.bake()` a still of the pose it is in. Ray and
 overlap queries (`Colliders`) see its mesh as it was bound, placed by the object, not as it is
 posed. A skinned object is never simplified (`Renderer.simplify`) nor a mirror, and ignores
 `billboard`.

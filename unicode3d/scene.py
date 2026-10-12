@@ -285,18 +285,22 @@ class Sprite(Object3D):
         return clip[3] * self.sheet.columns + clip[0] + self._frame(played, clip), self.sheet
 
 
-def _placed_mesh(part, linear, position):
+def _placed_mesh(part, linear, position, posed=None):
     """A copy of the part's mesh moved by linear and position (p -> linear @ p + position), its normals turned to
     match and its faces wound the other way where linear mirrors (as the renderer draws such a part), with the
-    part's colour multiplied into the mesh's colours (in linear light, as drawing does)."""
+    part's colour multiplied into the mesh's colours (in linear light, as drawing does). posed: instead, (positions,
+    normals, flip) of a skinned part's vertices as its skin poses them (flip: its joints mirror it, on the whole)."""
     mesh = part.mesh
     faces = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
-    c0, c1, c2 = linear[:, 0], linear[:, 1], linear[:, 2]
-    cofactor = np.stack([np.cross(c1, c2), np.cross(c2, c0), np.cross(c0, c1)], axis=1)  # det * inverse transpose
-    flip = float(np.linalg.det(linear)) < 0.0
-    placed = Mesh(np.asarray(mesh.vertices, dtype=float).reshape(-1, 3) @ linear.T + position,
-                  faces[:, [0, 2, 1]] if flip else faces, textures=list(mesh.textures),
-                  normals=mesh.vertex_normals() @ cofactor.T * (-1.0 if flip else 1.0))
+    if posed is not None:
+        vertices, normals, flip = posed
+    else:
+        c0, c1, c2 = linear[:, 0], linear[:, 1], linear[:, 2]
+        cofactor = np.stack([np.cross(c1, c2), np.cross(c2, c0), np.cross(c0, c1)], axis=1)  # det * inverse transpose
+        flip = float(np.linalg.det(linear)) < 0.0
+        vertices = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3) @ linear.T + position
+        normals = mesh.vertex_normals() @ cofactor.T * (-1.0 if flip else 1.0)
+    placed = Mesh(vertices, faces[:, [0, 2, 1]] if flip else faces, textures=list(mesh.textures), normals=normals)
     if mesh.materials is not None and mesh.textures:
         uvs = np.asarray(mesh.uvs, dtype=float).reshape(-1, 3, 2)
         placed.uvs, placed.materials = (uvs[:, [0, 2, 1]] if flip else uvs), mesh.materials
@@ -408,14 +412,23 @@ class Model:
         alike (the same specular, shininess, emissive, double_sided, cast_shadows and simplify) merged into one mesh
         (merge_meshes: textures and normals kept, each part's colour multiplied into its mesh's colours), and
         those that can't merge (see-through, with holes in their textures, or reflective) each moved into a mesh
-        of its own. Hidden parts are left out; it has no nodes or animations (its parts no longer move apart).
+        of its own. Hidden parts are left out; skinned parts are baked as their skins pose them now (a still of a
+        character), each vertex where it is drawn; it has no nodes or animations (its parts no longer move apart).
         This model is left as it is; copy() the result for more of it."""
         parts = [o for o in self.objects if o.mesh is not None and len(o.mesh.faces)]
         rows, linear, position, visible = scene_poses(parts, top=self.root)
-        groups = {}  # look: (part, linear, position)
+        groups = {}  # look: (part, linear, position, posed)
         for part in parts:
             r = rows[id(part)]
-            if not (visible[r] and np.isfinite(linear[r]).all() and np.isfinite(position[r]).all()):
+            posed = None
+            if getattr(part, "skin", None) is not None:  # (placed by its joints, not by its own pose)
+                with np.errstate(all="ignore"):
+                    vertices, normals = part.skin.pose(part.mesh, top=self.root)
+                    flip = bool(np.linalg.det(part.skin.palette(top=self.root)[:, :3, :3]).sum() < 0.0)
+                posed = (vertices, normals, flip)
+                if not (visible[r] and np.isfinite(vertices).all()):
+                    continue
+            elif not (visible[r] and np.isfinite(linear[r]).all() and np.isfinite(position[r]).all()):
                 continue
             mesh = part.mesh
             corner = mesh.corner_colors()
@@ -426,7 +439,7 @@ class Model:
             look = ((id(part),) if alone else ()) + (
                 float(part.specular), part.shininess, float(part.emissive), bool(part.double_sided),
                 bool(part.cast_shadows), bool(part.simplify))
-            groups.setdefault(look, []).append((part, linear[r], position[r]))
+            groups.setdefault(look, []).append((part, linear[r], position[r], posed))
         root = Node(np.array(self.root.position, dtype=float), np.array(self.root.rotation, dtype=float),
                     _copy.copy(self.root.scale), self.root.visible, self.root.parent)
         objects = []
@@ -453,6 +466,12 @@ class Model:
     def _bounds(self):
         lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
         for obj in self.objects:
+            if getattr(obj, "skin", None) is not None:  # (as its skin poses it)
+                v = obj.skin.pose(obj.mesh, top=self.root)[0]
+                v = v[np.isfinite(v).all(axis=1)]
+                if len(v):
+                    lo, hi = np.minimum(lo, v.min(axis=0)), np.maximum(hi, v.max(axis=0))
+                continue
             linear, position = np.eye(3), np.zeros(3)
             node = obj
             while node is not None and node is not self.root:

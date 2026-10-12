@@ -227,6 +227,15 @@ class SkinningTests(unittest.TestCase):
         box = Object3D(make_box(), position=np.array([0.0, -3.0, 0.0]))
         lo, hi = union_bounds([obj, box])
         np.testing.assert_allclose((lo[1], hi[1]), (-3.5, 5.0))
+        root = Node(np.array([5.0, 0.0, 0.0]), scale=2.0)  # Model.bounds() and fit(): in root's space, as posed
+        joints = chain(3, parent=root)
+        model = Model(root, [Object3D(tube_mesh(), skin=Skin(joints), parent=root)])
+        joints[0].position = np.array([0.0, 1.0, 0.0])
+        lo, hi = model.bounds()
+        np.testing.assert_allclose((lo[1], hi[1]), (1.0, 2.5))  # (bound where it stood in the world: 0..3)
+        model.fit(2.0)
+        lo, hi = model.world_bounds()
+        np.testing.assert_allclose((lo[1], hi[1]), (-1.0, 1.0), atol=1e-12)
 
     def test_copies_follow_their_own_joints(self):
         outside = Node(position=np.array([0.0, 1.0, 0.0]))  # (a joint outside the model: shared)
@@ -245,6 +254,27 @@ class SkinningTests(unittest.TestCase):
         twin.root.position = np.array([3.0, 0.0, 0.0])
         np.testing.assert_allclose(copied.skin.pose(copied.mesh)[0][:, 0] - obj.skin.pose(obj.mesh)[0][:, 0], 3.0,
                                    atol=1e-12)
+
+    def test_baked_as_posed_now(self):
+        root = Node(np.array([0.3, 0.2, 0.0]), quat_axis_angle((0, 1, 0), 0.7), 0.8)
+        joints = chain(3, parent=root)
+        obj = Object3D(tube_mesh(), skin=Skin(joints), parent=root, color=(220, 160, 120))
+        box = Object3D(make_box(), position=np.array([1.2, 0.5, 0.0]), parent=root, color=(220, 160, 120))
+        model = Model(root, [obj, box])
+        for joint in joints[1:]:
+            joint.rotation = quat_axis_angle((0.0, 0.0, 1.0), 0.6)
+        for mirrored in (False, True):
+            joints[0].scale = (-1.0, 1.0, 1.0) if mirrored else 1.0
+            still = model.bake()
+            self.assertEqual(len(still.objects), 1)  # (the figure and the box alike: one mesh)
+            for part in still.objects:
+                part.simplify = False  # (skinned parts aren't simplified)
+            live, baked_ = self.render([*model, floor()]), self.render([*still, floor()])
+            live.ids = np.array([0, 1, 1, 2])[live.ids]  # (the figure and the box drawn as one object)
+            self.assert_same_picture(live, baked_)
+            joints[0].position = np.array([0.0, 1.0, 0.0])  # (the still stays as it was)
+            self.assertFalse(np.allclose(union_bounds(still.objects)[1], union_bounds(model.objects)[1]))
+            joints[0].position = np.zeros(3)
 
 
 if __name__ == "__main__":

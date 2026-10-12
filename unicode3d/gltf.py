@@ -6,8 +6,9 @@ node hierarchy and animations. models.load_model() calls load_gltf() for these f
 What is read:
 - Meshes: positions, normals (flat, as glTF asks, where a mesh has none), texture coordinates, vertex colours,
   triangles, strips and fans (points and lines are skipped), sparse accessors, and morph targets at their
-  default weights. Skinned meshes keep their vertices as bound, with their joints and weights (JOINTS_0,
-  WEIGHTS_0), and their objects a Skin on the joints' Nodes: they are posed by the joints as they move.
+  default weights. Skinned meshes keep their vertices as bound, with their joints and weights (JOINTS_n,
+  WEIGHTS_n: past four joints, the four strongest), and their objects a Skin on the joints' Nodes: they are posed
+  by the joints as they move.
 - Materials (PBR, mapped approximately onto an Object3D's): base colour and its texture to color and the texture;
   roughness to highlights (specular, shininess); metallic, much less for rough metal, to reflectivity; emissive to
   emissive; alphaMode OPAQUE, MASK and BLEND to solid, cut-out and see-through; doubleSided. Extensions:
@@ -51,6 +52,7 @@ COMPRESSION = {"KHR_draco_mesh_compression": "Draco-compressed meshes",
                "EXT_meshopt_compression": "meshopt-compressed data", "KHR_meshopt_compression": "meshopt-compressed data",
                "KHR_texture_basisu": "KTX2/Basis textures"}
 MAX_ZEROS = 1 << 24  # the most numbers an accessor without data of its own may give
+WEIGHT_SUM_SLACK = 0.02  # how far a vertex's skin weights may add up from 1 before a warning (bytes round them)
 MAX_NODES = 100_000  # deeper or larger node trees than this are taken as broken (a cycle)
 # What a broken part of a file raises as it is read: that part is left out, with a warning.
 BROKEN = (KeyError, ValueError, TypeError, IndexError, AttributeError, ArithmeticError, struct.error)  # (int(inf))
@@ -343,10 +345,10 @@ def _primitive(file, prim, material, weights, skin):
     positions = positions[:, :3]
     count = len(positions)
 
-    def attribute(name, width):
+    def attribute(name, width, as_float=True):
         if name not in attributes:
             return None
-        values = file.accessor(attributes[name])
+        values = file.accessor(attributes[name], as_float)
         if len(values) != count or values.shape[1] < width:
             file.warnings.append(f"{name} ignored: {len(values)} values for {count} vertices")
             return None
@@ -363,12 +365,7 @@ def _primitive(file, prim, material, weights, skin):
                 normals = normals + weight * file.accessor(target["NORMAL"])[:count, :3]
     joints = weights4 = None
     if skin is not None:
-        joints, weights4 = attribute("JOINTS_0", 4), attribute("WEIGHTS_0", 4)
-        if joints is None or weights4 is None:
-            joints = weights4 = None
-        else:
-            joints = np.clip(joints[:, :4].astype(np.int64), 0, skin - 1)
-            weights4 = weights4[:, :4]
+        joints, weights4 = _influences(file, attribute, skin)
     colors = attribute("COLOR_0", 3)
     if colors is not None:
         rgb = _srgb(colors[:, :3])
@@ -405,6 +402,50 @@ def _primitive(file, prim, material, weights, skin):
         mesh.materials = np.zeros(len(faces), np.int64)
         mesh.textures = [material.material.texture]
     return mesh
+
+
+def _influences(file, attribute, skin):
+    """A skinned primitive's (joints (V, 4), weights (V, 4)) from its JOINTS_n and WEIGHTS_n, or (None, None) if
+    it has none. Past 4 a vertex keeps its 4 strongest; weights that aren't finite or are below 0, or on a joint
+    the skin (of `skin` joints) doesn't have, are left out; each vertex's are scaled to add up to 1 (one with none
+    left follows joint 0, as Skin does). Each of these is a warning."""
+    joints, weights = [], []
+    while True:
+        n = len(joints)
+        j, w = attribute(f"JOINTS_{n}", 4, as_float=False), attribute(f"WEIGHTS_{n}", 4)
+        if j is None or w is None:
+            break
+        joints.append(j[:, :4])
+        weights.append(w[:, :4])
+    if not joints:
+        file.warnings.append("no JOINTS_0 and WEIGHTS_0 for its skin: not skinned")
+        return None, None
+    joints, weights = np.concatenate(joints, axis=1), np.concatenate(weights, axis=1)
+    with np.errstate(invalid="ignore"):
+        bad = ~(weights >= 0.0)  # (NaN too)
+    if bad.any():
+        file.warnings.append(f"{int(bad.any(axis=1).sum())} vertices with weights that aren't numbers at or above 0:"
+                             f" those left out")
+    weights = np.where(bad, 0.0, weights)
+    outside = (joints < 0) | (joints >= skin)
+    if (outside & (weights > 0.0)).any():
+        file.warnings.append(f"{int((outside & (weights > 0.0)).any(axis=1).sum())} vertices weighted to joints the "
+                             f"skin's {skin} don't include: those weights left out")
+    weights, joints = np.where(outside, 0.0, weights), np.where(outside, 0, joints)
+    if joints.shape[1] > 4:
+        strongest = np.argsort(-weights, axis=1, kind="stable")[:, :4]
+        more = (weights > 0.0).sum(axis=1) > 4
+        if more.any():
+            file.warnings.append(f"{int(more.sum())} vertices on more than 4 joints: the 4 strongest kept")
+        joints, weights = np.take_along_axis(joints, strongest, 1), np.take_along_axis(weights, strongest, 1)
+    total = weights.sum(axis=1)
+    if (total == 0.0).any():
+        file.warnings.append(f"{int((total == 0.0).sum())} vertices without weights: they follow joint 0")
+    off = (total > 0.0) & ~(np.abs(total - 1.0) <= WEIGHT_SUM_SLACK)
+    if off.any():
+        file.warnings.append(f"{int(off.sum())} vertices whose weights don't add up to 1: scaled")
+    weights = np.where(total[:, None] > 0.0, weights / np.where(total > 0.0, total, 1.0)[:, None], weights)
+    return joints.astype(np.int64), weights
 
 
 # ----- nodes ---------------------------------------------------------------------------------
@@ -549,6 +590,8 @@ def _load(path, max_texture, double_sided, scene):
                 if not joints or len(inverse) < len(joints) or not all(j in built for j in joints):
                     raise ValueError(f"{len(joints)} joints, {len(inverse)} inverse bind matrices, "
                                      f"joints {[j for j in joints if j not in built]} not in the scene")
+                if not np.isfinite(inverse[:len(joints)]).all():
+                    raise ValueError("inverse bind matrices with numbers that aren't finite")
                 skin = (list(joints), np.ascontiguousarray(inverse[:len(joints)]))
                 parent = root  # posed by its joints, in the scene's space: the node's own place doesn't count
             except BROKEN as e:
@@ -574,7 +617,8 @@ def _load(path, max_texture, double_sided, scene):
                     built[c].parent = obj
             objects = [obj]
         else:
-            objects = [Object3D(mesh, parent=parent, **mat.options()) for mesh, mat in parts]
+            objects = [Object3D(mesh, parent=parent if mesh.joints is not None else node, **mat.options())
+                       for mesh, mat in parts]  # (a part without joints is placed by its node, unskinned)
         if double_sided:
             for obj in objects:
                 obj.double_sided = True

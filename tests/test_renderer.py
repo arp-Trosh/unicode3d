@@ -2533,6 +2533,51 @@ class DemoTests(unittest.TestCase):
         demo.frame(screen, 1 / 30, [ord("r")])
         self.assertEqual((demo.shape.value, demo.sx.value, demo.fog.value), ("sphere", 1.0, "off"))
 
+    def test_skinned_marionettes(self):
+        from unicode3d.examples.skinned import LAG, Show, STAGE
+        demo = Show()
+        screen = Screen(glyphs="quad", color="256", size=(30, 100))
+        screen.held = type("Held", (set,), {"exact": True})()
+        # The chorus: = adds puppets behind the lead (they start off the stage's centre line), - takes them away.
+        demo.frame(screen, 1 / 30, [ord("=")] * 2)
+        self.assertEqual(len(demo.marionettes), 3)
+        self.assertEqual(len({tuple(m.bar[::2].round(3)) for m in demo.marionettes}), 3)
+        start = [m.bar[0] for m in demo.marionettes]
+        screen.held.add("d")  # the lead's bar goes right for a second; each puppet repeats it LAG later than the last
+        for _ in range(30):
+            demo.frame(screen, 1 / 30, [])
+        screen.held.clear()
+        moved = [m.bar[0] - x for m, x in zip(demo.marionettes, start)]
+        self.assertGreater(moved[0], moved[1] + 0.05)
+        self.assertGreater(moved[1], moved[2] + 0.05)
+        for _ in range(int(3 * LAG * 30) + 10):
+            demo.frame(screen, 1 / 30, [])
+        moved = [m.bar[0] - x for m, x in zip(demo.marionettes, start)]
+        np.testing.assert_allclose(moved, moved[0], atol=0.02)  # all the same distance in the end
+        for m in demo.marionettes:  # every puppet hangs together, and stands on the stage
+            self.assertTrue(np.isfinite(m.p).all())
+            self.assertGreater(m.p[0, :, 1].min(), STAGE - 0.05)
+        # Enter freezes them into statues (as many as there are plinths); clicking one knocks it over, and again sweeps it away.
+        demo.frame(screen, 1 / 30, [Key.ENTER])
+        statues = demo.statues.statues()
+        self.assertEqual(len(statues), 3)
+        self.assertEqual(demo.statues.click(statues[0].object), "Timber!")
+        self.assertEqual(demo.statues.click(demo.marionettes[0].puppet.object), None)  # (a live puppet isn't one)
+        for _ in range(120):
+            demo.frame(screen, 1 / 30, [])
+        self.assertEqual(statues[0].state, "down")
+        self.assertEqual(demo.statues.click(statues[0].object), "Swept away.")
+        self.assertEqual(len(demo.statues.statues()), 2)
+        demo.frame(screen, 1 / 30, [ord("-")] * 5)  # (down to the lead alone, and no lower)
+        self.assertEqual(len(demo.marionettes), 1)
+        # The other view, walking, and the curtains.
+        demo.frame(screen, 1 / 30, [ord("o"), ord("c")])
+        screen.held.add(Key.UP)
+        for _ in range(10):
+            demo.frame(screen, 1 / 30, [])
+        self.assertLess(demo.z, 7.5)
+        self.assertIs(demo.frame(screen, 1 / 30, [Key.ESC]), False)
+
 
 class Terminal:
     """What a terminal shows after the escape sequences Screen sends: characters, packed colours (as the Screen's grid

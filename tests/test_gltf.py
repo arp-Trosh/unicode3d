@@ -418,6 +418,42 @@ class GltfTests(unittest.TestCase):
         self.assertFalse(any("skinned" in w for w in model.warnings))
         self.assertTrue(any("morph" in w for w in model.warnings))
 
+    def test_skin_weights_past_four_joints_and_broken_ones(self):
+        b = Builder()
+        # Vertex 0 on 6 joints (the 4 strongest kept), 1 with a NaN and a weight below 0, 2 on a joint the skin
+        # lacks, 3 with weights adding up to 2; JOINTS_1 as bytes, WEIGHTS_1 as normalized bytes.
+        j0 = b.accessor([[0, 1, 2, 3], [0, 1, 0, 0], [0, 7, 0, 0], [0, 1, 0, 0]], UBYTE)
+        w0 = b.accessor([[0.1, 0.3, 0.05, 0.2], [np.nan, 1.0, 0, 0], [0.5, 0.5, 0, 0], [1.0, 1.0, 0, 0]])
+        j1 = b.accessor([[4, 5, 0, 0]] + [[0, 0, 0, 0]] * 3, UBYTE)
+        w1 = b.accessor([[51, 102, 0, 0]] + [[0, 0, 0, 0]] * 3, UBYTE, normalized=True)  # 0.2, 0.4
+        mesh = b.mesh(JOINTS_0=j0, WEIGHTS_0=w0, JOINTS_1=j1, WEIGHTS_1=w1)
+        bones = [b.node(name=f"B{i}", translation=[i, 0, 0]) for i in range(6)]
+        skin = b.add("skins", {"joints": bones})  # no inverse bind matrices: each the identity
+        b.node(name="Skinned", mesh=mesh, skin=skin)
+        bad = b.add("skins", {"joints": bones[:1],
+                              "inverseBindMatrices": b.accessor(np.full((1, 16), np.nan), kind="MAT4")})
+        b.node(name="BadSkin", mesh=b.mesh(), skin=bad, translation=[0, 5, 0])
+        b.node(name="NoJoints", mesh=b.mesh(), skin=skin, translation=[0, 7, 0])
+        b.scene(*bones, 6, 7, 8)
+        model = load_gltf(b.glb(self.path("weights.glb")))
+        mesh = model.names["Skinned"][0].mesh
+        order = np.argsort(-mesh.weights[0])
+        np.testing.assert_array_equal(mesh.joints[0][order], [5, 1, 3, 4])  # 0.4, 0.3, 0.2, 0.2: 0 and 2 dropped
+        np.testing.assert_allclose(mesh.weights[0][order], np.array([0.4, 0.3, 0.2, 0.2]) / 1.1)
+        self.assertEqual(mesh.weights[1][mesh.joints[1] == 1].sum(), 1.0)  # (the NaN left out)
+        np.testing.assert_allclose(mesh.weights[2].sum(), 1.0)
+        self.assertEqual(mesh.weights[2][mesh.joints[2] == 0].sum(), 1.0)  # (joint 7 left out)
+        np.testing.assert_allclose(mesh.weights[3][:2], [0.5, 0.5])
+        np.testing.assert_allclose(model.names["Skinned"][0].skin.inverse_bind, np.tile(np.eye(4), (6, 1, 1)))
+        for words in ("more than 4 joints", "aren't numbers", "don't include", "don't add up", "skin left out",
+                      "not skinned"):
+            self.assertTrue(any(words in w for w in model.warnings), (words, model.warnings))
+        for name, y in (("BadSkin", 5), ("NoJoints", 7)):  # unskinned, and placed by their nodes
+            obj = model.names[name][0]
+            self.assertIsNone(obj.skin)
+            np.testing.assert_allclose(obj.world_bounds()[0], (-1, y - 1, 0))
+        Renderer(20, 10).render(list(model), Camera(position=np.array([0.0, 3.0, 20.0])), Light())  # (and it draws)
+
     def test_animations(self):
         b = Builder()
         door = b.node(mesh=b.mesh(), name="Door")

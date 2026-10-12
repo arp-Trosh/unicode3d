@@ -5,8 +5,9 @@
 
 Renders scenes off-screen and reports the time each stage of a frame takes:
 a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain; lines-2k a grid; sprites-300 a
-crowd of sprites), and three that load the engine as kinds of game would (corridor, arena, board: see genres.py), each
-moving its world as a game loop does and writing text over the picture:
+crowd of sprites; skinned-20 crowd-20's figures as skinned meshes), and three that load the engine as kinds of
+game would (corridor, arena, board: see genres.py), each moving its world as a game loop does and writing text over
+the picture:
 
   render          Renderer.render: rasterizing and shading the scene into pixels (and shadow maps)
   draw_frame      Screen.draw_frame: pixels into glyphs and terminal colours
@@ -36,7 +37,9 @@ import numpy as np
 
 from unicode3d.color import Color
 from unicode3d.examples.dice import make_die, orientation_showing
-from unicode3d.scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Sprite, SpriteSheet
+from unicode3d.examples.rigs import chain_rings, tubes
+from unicode3d.scene import (Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Skin, Sprite,
+                             SpriteSheet)
 from unicode3d.mesh import Mesh, make_box
 from unicode3d.shapes import blob_mesh
 from unicode3d import __version__
@@ -99,6 +102,36 @@ def crowd_scene(count, parts=60, chain=6):
                                     scale=0.95 if p % 2 else (1.0, 0.9, 1.0), color=(200, 120 + p, 60),
                                     parent=parent))
     return objects, Camera(position=np.array([0.0, 6.0, 10.0]), fov=50.0), Light()
+
+
+def skinned_scene(count, chains=10, bones=6):
+    """crowd_scene's figures, each one mesh skinned to its joints instead of `chains` * `bones` boxes on them (a
+    tube along each chain, about as many triangles), every joint turning each frame: the cost of skinning, against
+    crowd-20's of a part per joint."""
+    root = Node()
+    joints = []
+    for p in range(chains * bones):
+        joints.append(Node(np.array([0.0, 0.3, 0.0]) if p % bones else np.zeros(3),
+                           quat_axis_angle([np.cos(p), 0.5, np.sin(p)], 0.4 + 0.1 * (p // bones)),
+                           0.95 if p % 2 else (1.0, 0.9, 1.0), parent=root if p % bones == 0 else joints[-1]))
+    limbs = [chain_rings(list(range(c * bones, (c + 1) * bones)), [0.12] * (bones + 1), 0.3) for c in range(chains)]
+    mesh = tubes(joints, limbs, segments=6)
+    inverse_bind = Skin(joints).inverse_bind
+    objects, skeletons = [], []
+    for f in range(count):
+        root = Node(position=np.array([(f % 5) * 2.0 - 4.0, 0.0, (f // 5) * 2.0 - 3.0]))
+        own = []
+        for p, joint in enumerate(joints):
+            own.append(Node(np.array(joint.position), np.array(joint.rotation), joint.scale,
+                            parent=root if p % bones == 0 else own[-1]))
+        objects.append(Object3D(mesh, skin=Skin(own, inverse_bind), color=(200, 140, 60)))
+        skeletons += own
+
+    def turn(frame):  # (every joint, as crowd-20 turns every part)
+        for joint in skeletons:
+            joint.rotation = quat_mul(SPIN, joint.rotation)
+        return objects
+    return objects, Camera(position=np.array([0.0, 6.0, 10.0]), fov=50.0), Light(), objects, turn
 
 
 def spawn_scene(count=60, textures=6):
@@ -208,6 +241,7 @@ SCENES = {
     "dice-mirror": lambda: dice_scene(3, shadows="sun", polished=True),
     "balls-400": lambda: balls_scene(400),
     "crowd-20": lambda: crowd_scene(20),
+    "skinned-20": lambda: skinned_scene(20),
     "spawn-60": lambda: spawn_scene(60),
     "particles-3k": lambda: particles_scene(3000, 200),
     "lines-2k": lambda: lines_scene(1000),

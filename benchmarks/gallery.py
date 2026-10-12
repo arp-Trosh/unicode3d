@@ -566,6 +566,41 @@ def gltf_skinned():
                 [sun, lamp], {"background": Sky()})
 
 
+def skinned():
+    """Figures built in code, each one mesh skinned to a skeleton of its own (added in 0.22.0), sharing the mesh:
+    one standing as bound, one striding, one waving with its body turned, and a small one crouching; shadows from
+    the sun and a lamp."""
+    from unicode3d.examples.rigs import bend, figure, figure_rig
+    rig = figure_rig()
+    standing, _ = figure(rig, (-1.35, 0.0, -0.4), 0.3, color=(200, 170, 140))
+    striding, j = figure(rig, (-0.45, 0.0, 0.1), -0.5, color=(120, 160, 210))
+    for side, step in (("right", 1.0), ("left", -1.0)):
+        bend(j[f"{side} hip"], (1, 0, 0), 0.45 * step)
+        bend(j[f"{side} knee"], (1, 0, 0), -0.15 if step > 0 else -0.7)
+        bend(j[f"{side} shoulder"], (1, 0, 0), -0.45 * step)
+        bend(j[f"{side} elbow"], (1, 0, 0), 0.5)
+    bend(j["spine"], (1, 0, 0), 0.1)
+    waving, j = figure(rig, (0.55, 0.0, -0.2), -0.25, color=(210, 120, 110))
+    bend(j["spine"], (0, 1, 0), 0.45)
+    bend(j["neck"], (0, 0, 1), 0.2)
+    bend(j["right shoulder"], (0, 0, 1), 2.1)
+    bend(j["right elbow"], (0, 0, 1), 0.8)
+    bend(j["left shoulder"], (1, 0, 0), 0.2)
+    small, j = figure(rig, (1.45, 0.0, 0.4), -0.7, color=(150, 190, 120))
+    j["hips"].scale = 0.6
+    j["hips"].position = j["hips"].position * (1.0, 0.0, 1.0) + (0.0, 0.32, 0.0)
+    for side in ("right", "left"):
+        bend(j[f"{side} hip"], (1, 0, 0), 1.3)
+        bend(j[f"{side} knee"], (1, 0, 0), -2.0)
+        bend(j[f"{side} shoulder"], (1, 0, 0), 1.0)
+    bend(j["spine"], (1, 0, 0), 0.5)
+    ground = floor(4.0, texture=checks(64, 4))
+    sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
+    lamp = PointLight(np.array([-1.0, 2.4, 1.6]), color=(255, 210, 160), range=6.0, shadows=True)
+    return Shot([Object3D(ground, color=(255, 255, 255)), standing, striding, waving, small],
+                camera((0.1, 1.35, 3.5), (0.05, 0.8, 0.0)), [sun, lamp], {"background": Sky()})
+
+
 def ortho():
     """The courtyard from above and to one side through an orthographic camera (added after 0.7.1), as in an
     isometric game: everything the same size however far off, with sun shadows, mirrors, outlines and fog
@@ -780,6 +815,7 @@ SCENES = {
     "model": model,
     "gltf": gltf,
     "gltf-skinned": gltf_skinned,
+    "skinned": skinned,
     "ortho": ortho,
     "lettering": lettering,
     "detail": detail,

@@ -58,28 +58,28 @@ class Skin:
             raise ValueError(f"Skin.inverse_bind must be ({len(self.joints)}, 4, 4), one for each joint, not "
                              f"{self.inverse_bind.shape}")
 
-    def world_matrices(self):
-        """Each joint's pose in the world now, as (J, 4, 4) matrices."""
-        rows, linear, place, _ = scene_poses(self.joints)
+    def world_matrices(self, top=None):
+        """Each joint's pose in the world now, as (J, 4, 4) matrices (with top, a node above them: in its space)."""
+        rows, linear, place, _ = scene_poses(self.joints, top=top)
         r = np.array([rows[id(joint)] for joint in self.joints], np.int64)
         world = np.zeros((len(self.joints), 4, 4))
         world[:, :3, :3], world[:, :3, 3], world[:, 3, 3] = linear[r], place[r], 1.0
         return world
 
-    def palette(self):
-        """Each joint's matrix now (J, 4, 4): its pose in the world times its inverse bind matrix, which takes a
-        vertex of the mesh to where that joint alone would carry it."""
+    def palette(self, top=None):
+        """Each joint's matrix now (J, 4, 4): its pose in the world (or top's space) times its inverse bind matrix,
+        which takes a vertex of the mesh to where that joint alone would carry it."""
         with np.errstate(all="ignore"):
-            return self.world_matrices() @ self.inverse_bind
+            return self.world_matrices(top) @ self.inverse_bind
 
-    def pose(self, mesh):
-        """(positions (V, 3), unit normals (V, 3)) of a skinned mesh's vertices in the world, as this skin poses it
-        now: what the renderer draws (worked out here in numpy, rather than in its kernels). A normal blended to
-        nothing stays 0."""
+    def pose(self, mesh, top=None):
+        """(positions (V, 3), unit normals (V, 3)) of a skinned mesh's vertices in the world (with top, a node
+        above the joints: in its space), as this skin poses it now: what the renderer draws (worked out here in
+        numpy, rather than in its kernels). A normal blended to nothing stays 0."""
         joints, weights = skin_arrays(mesh)
         _check_joints(joints, self)
         with np.errstate(all="ignore"):
-            m = self.palette()[:, :3, :]
+            m = self.palette(top)[:, :3, :]
             normal = _normal_matrices(m[:, :, :3])
             blend = np.einsum("vk,vkij->vij", weights, m[joints])
             vertices = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3)
