@@ -485,7 +485,7 @@ class Courtyard:
         for hook in (stops[0], stops[-1]):
             self.add(Object3D(block_mesh(hook, (0.08, 0.08, 0.08)), color=(40, 40, 40)), "a string of lights",
                      solid=False)
-        self.bulbs = Particles(emissive=1.0, limit=100)
+        self.bulbs = Particles(emissive=1.0, limit=100, seed=3)
         wire = []
         for a, b, sag in zip(stops, stops[1:], (0.3, 0.45, 0.5)):
             points = sagging(a, b, sag)
