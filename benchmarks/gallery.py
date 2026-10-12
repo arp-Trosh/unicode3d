@@ -567,6 +567,108 @@ def gltf_skinned():
                 [sun, lamp], {"background": Sky()})
 
 
+def _write_morph_gltf(path):
+    """Morph targets in glTF (.glb) written to `path`, at the weights the file gives: a smooth ball (with normals,
+    its second target turning them) shared by two nodes, one at the mesh's weights and one at its own; a wedge
+    without normals (flat, its one target turning them); and a bar skinned to two joints, bent, with a bulge; an
+    animation of the first ball's weights (not played)."""
+    import json
+    blob, info = bytearray(), {"asset": {"version": "2.0"}, "bufferViews": [], "accessors": [], "meshes": [],
+                               "materials": [], "nodes": []}
+
+    def add(kind, item):
+        info.setdefault(kind, []).append(item)
+        return len(info[kind]) - 1
+
+    def accessor(values, component=5126, kind=None):
+        values = np.asarray(values)
+        data = np.ascontiguousarray(values, {5126: "<f4", 5125: "<u4", 5123: "<u2"}[component])
+        blob.extend(b"\0" * (-len(blob) % 4))
+        blob.extend(data.tobytes())
+        view = add("bufferViews", {"buffer": 0, "byteOffset": len(blob) - data.nbytes, "byteLength": data.nbytes})
+        kind = kind or ("SCALAR" if values.ndim == 1 else f"VEC{values.shape[1]}")
+        return add("accessors", {"bufferView": view, "componentType": component, "count": len(values), "type": kind})
+
+    for name, rgb in (("ball", (0.3, 0.55, 0.85)), ("wedge", (0.85, 0.6, 0.2)), ("bar", (0.8, 0.35, 0.45))):
+        add("materials", {"name": name, "pbrMetallicRoughness": {"baseColorFactor": [*rgb, 1.0], "metallicFactor": 0.0,
+                                                                 "roughnessFactor": 0.5}})
+    rings, around = 14, 20
+    lat, lon = np.linspace(0.0, np.pi, rings + 1), np.linspace(0.0, 2.0 * np.pi, around, endpoint=False)
+    unit = np.array([(np.sin(a) * np.cos(b), np.cos(a), np.sin(a) * np.sin(b)) for a in lat for b in lon])
+    faces = [(r * around + k, r * around + (k + 1) % around, (r + 1) * around + k) for r in range(rings)
+             for k in range(around)]
+    faces += [(r * around + (k + 1) % around, (r + 1) * around + (k + 1) % around, (r + 1) * around + k)
+              for r in range(rings) for k in range(around)]
+    faces = np.array(faces)
+    ball = unit * 0.4
+    squash = ball * (0.3, -0.4, 0.3)
+    egg = ball * (-0.25, 0.6, -0.25) * np.where(unit[:, 1:2] > 0.0, 1.0, 0.2)
+    egg_turn = Mesh(ball + egg, faces).vertex_normals() - unit
+    add("meshes", {"name": "Ball", "weights": [0.6, 0.3], "primitives": [{"attributes": {
+        "POSITION": accessor(ball), "NORMAL": accessor(unit)}, "indices": accessor(faces.reshape(-1), 5125),
+        "targets": [{"POSITION": accessor(squash)}, {"POSITION": accessor(egg), "NORMAL": accessor(egg_turn)}],
+        "material": 0}]})
+    box = make_box(0.5)
+    corners = box.vertices[box.faces.reshape(-1)]  # (each face its own corners: no normals, so flat)
+    lift = np.where(corners[:, 1:2] > 0.0, np.where(corners[:, 2:3] > 0.0, (0.0, 0.5, 0.0), (0.0, -0.3, 0.0)), 0.0)
+    add("meshes", {"name": "Wedge", "weights": [1.0], "primitives": [{"attributes": {"POSITION": accessor(corners)},
+                                                                      "targets": [{"POSITION": accessor(lift)}],
+                                                                      "material": 1}]})
+    segments, steps = 12, 13
+    heights = np.linspace(0.0, 1.2, steps)
+    turn = np.linspace(0.0, 2 * np.pi, segments, endpoint=False)
+    bar = np.array([(0.12 * np.cos(a), y, 0.12 * np.sin(a)) for y in heights for a in turn])
+    bar_normals = np.c_[np.cos(np.tile(turn, steps)), np.zeros(len(bar)), np.sin(np.tile(turn, steps))]
+    bar_faces = [(r * segments + k, (r + 1) * segments + k, r * segments + (k + 1) % segments)
+                 for r in range(steps - 1) for k in range(segments)]
+    bar_faces += [(r * segments + (k + 1) % segments, (r + 1) * segments + k, (r + 1) * segments + (k + 1) % segments)
+                  for r in range(steps - 1) for k in range(segments)]
+    bulge = bar * (1.0, 0.0, 1.0) * (1.2 * np.exp(-((bar[:, 1] - 0.9) / 0.18) ** 2))[:, None]
+    share = np.clip((bar[:, 1] - 0.45) / 0.3, 0.0, 1.0)
+    add("meshes", {"name": "Bar", "weights": [0.7], "primitives": [{"attributes": {
+        "POSITION": accessor(bar), "NORMAL": accessor(bar_normals),
+        "JOINTS_0": accessor(np.c_[np.zeros(len(bar), int), np.ones(len(bar), int), np.zeros((len(bar), 2), int)], 5123),
+        "WEIGHTS_0": accessor(np.c_[1.0 - share, share, np.zeros((len(bar), 2))])},
+        "indices": accessor(np.array(bar_faces).reshape(-1), 5125), "targets": [{"POSITION": accessor(bulge)}],
+        "material": 2}]})
+    q = quat_axis_angle((0, 0, 1), -0.6)
+    add("nodes", {"name": "Ball", "mesh": 0, "translation": [-1.0, 0.45, 0.0]})
+    add("nodes", {"name": "Egg", "mesh": 0, "translation": [-0.1, 0.45, -0.6], "weights": [0.0, 1.0]})
+    add("nodes", {"name": "Wedge", "mesh": 1, "translation": [0.0, 0.25, 0.7],
+                  "rotation": [0.0, float(np.sin(0.3)), 0.0, float(np.cos(0.3))]})
+    add("nodes", {"name": "Root", "translation": [1.0, 0.0, -0.2], "children": [4]})
+    add("nodes", {"name": "Elbow", "translation": [0.0, 0.6, 0.0], "rotation": [*q[1:], q[0]]})
+    add("nodes", {"name": "Bar", "mesh": 2, "skin": 0})
+    inverse = np.array([np.eye(4), np.array([[1, 0, 0, 0], [0, 1, 0, -0.6], [0, 0, 1, 0], [0, 0, 0, 1]], float)])
+    info["skins"] = [{"joints": [3, 4], "inverseBindMatrices": accessor(inverse.transpose(0, 2, 1).reshape(-1, 16),
+                                                                         kind="MAT4")}]
+    info["scenes"], info["scene"] = [{"nodes": [0, 1, 2, 3, 5]}], 0
+    info["animations"] = [{"name": "Breathe", "samplers": [
+        {"input": accessor(np.array([0.0, 1.0])), "output": accessor(np.array([0.6, 0.3, 0.0, 1.0]))}],
+        "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}]}]
+    blob.extend(b"\0" * (-len(blob) % 4))
+    info["buffers"] = [{"byteLength": len(blob)}]
+    text = json.dumps(info).encode()
+    text += b" " * (-len(text) % 4)
+    body = struct.pack("<II", len(text), 0x4E4F534A) + text + struct.pack("<II", len(blob), 0x004E4942) + bytes(blob)
+    with open(path, "wb") as f:
+        f.write(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+    return path
+
+
+def gltf_morph():
+    """glTF morph targets at the file's weights (added in 0.23.0; until then morphed once as they loaded, now as
+    they are drawn: the two should match, the flat wedge's normals closely), shadows from the sun and a lamp."""
+    from unicode3d.models import load_model
+    with tempfile.TemporaryDirectory() as folder:
+        loaded = load_model(_write_morph_gltf(os.path.join(folder, "morph.glb")))
+    ground = floor(4.0, texture=checks(64, 4))
+    sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
+    lamp = PointLight(np.array([-1.2, 2.2, 1.4]), color=(255, 210, 160), range=5.0, shadows=True)
+    return Shot([Object3D(ground, color=(255, 255, 255)), *loaded], camera((0.4, 1.8, 3.6), (0.0, 0.5, 0.0)),
+                [sun, lamp], {"background": Sky()})
+
+
 def skinned():
     """Figures built in code, each one mesh skinned to a skeleton of its own (added in 0.22.0), sharing the mesh:
     one standing as bound, one striding, one waving with its body turned, and a small one crouching; shadows from
@@ -871,6 +973,7 @@ SCENES = {
     "model": model,
     "gltf": gltf,
     "gltf-skinned": gltf_skinned,
+    "gltf-morph": gltf_morph,
     "skinned": skinned,
     "morph": morph,
     "ortho": ortho,

@@ -352,7 +352,9 @@ class Model:
 
     From glTF files also nodes: the file's nodes by name, each a Node, or the part itself where a node has one
     part (move, turn or hide one and what hangs from it goes too: a door, a wheel, an arm); and animations: its
-    animations by name, each an animation.Clip moving those nodes (call its update(dt) each frame).
+    animations by name, each an animation.Clip moving those nodes (call its update(dt) each frame); and
+    morph_names: the names of the morph targets of each node's and mesh's parts, by the node's and mesh's names
+    (where the file names them), in the order of their morph_weights.
     """
     root: Node
     objects: list
@@ -361,6 +363,7 @@ class Model:
     warnings: list = field(default_factory=list)
     nodes: dict = field(default_factory=dict)
     animations: dict = field(default_factory=dict)
+    morph_names: dict = field(default_factory=dict)
 
     def __iter__(self):
         return iter(self.objects)
@@ -411,7 +414,8 @@ class Model:
             animations[name].time = clip.time
         return Model(clone(self.root), [clone(o) for o in self.objects],
                      {name: [clone(o) for o in parts] for name, parts in self.names.items()}, dict(self.materials),
-                     list(self.warnings), {name: clone(n) for name, n in self.nodes.items()}, animations)
+                     list(self.warnings), {name: clone(n) for name, n in self.nodes.items()}, animations,
+                     {name: list(targets) for name, targets in self.morph_names.items()})
 
     def bake(self):
         """The model as it stands now, in as few parts as draw it the same: for things that stand still (scenery, a

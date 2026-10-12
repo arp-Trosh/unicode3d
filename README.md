@@ -776,8 +776,10 @@ numpy), and keeps a model's parts, their hierarchy and its animations:
   parent. `model.nodes` has them by name: move, turn or hide `model.nodes["Door"]` and what hangs
   from it goes too. `model.names` lists the parts by node, mesh and material name.
 - **Meshes:** positions, normals (flat where a mesh has none, as glTF asks), texture coordinates,
-  vertex colours, triangles, strips and fans, sparse and quantized data, and morph targets at their
-  default weights. Skinned meshes keep their joints and weights, and their parts a `Skin` on the
+  vertex colours, triangles, strips and fans, sparse and quantized data, and morph targets (each
+  part's `morph_weights` its node's or mesh's weights, None where those are all 0; their names, where
+  the mesh's `extras.targetNames` gives them, in `model.morph_names` by node and mesh name; see
+  [Morph targets](#morph-targets)). Skinned meshes keep their joints and weights, and their parts a `Skin` on the
   joints' nodes, so they bend as the joints move (see [Skinned meshes](#skinned-meshes)). Points and
   lines are skipped. Two nodes using one mesh share it.
 - **Materials** are physically based in glTF, and map approximately onto unicode3d's: the base colour
@@ -790,9 +792,11 @@ numpy), and keeps a model's parts, their hierarchy and its animations:
   `EXT_texture_webp`. Normal, occlusion and metallic-roughness maps are ignored (a terminal's pixels
   would show little of them), and textures repeat whatever their sampler says.
 - **Animations** come as `model.animations`, by name: each a `Clip` (see [Animation](#animation))
-  moving the nodes along their translation, rotation and scale keyframes, with linear, step or
-  cubic-spline interpolation; skinned meshes follow the joints they move. Morph-target animation
-  isn't supported: those meshes keep their default weights, and `model.warnings` says so.
+  moving the nodes along their translation, rotation, scale and morph weights keyframes, with linear,
+  step or cubic-spline interpolation; skinned meshes follow the joints they move, and a node's
+  weights move the `morph_weights` of each of its parts. A mesh without normals gets flat ones that
+  its targets turn as they turn its faces at full weight (exact for one target at a time; mixed,
+  between the targets').
 - **Refused:** a file that needs Draco or meshopt compression or KTX2 textures raises `ValueError`
   saying which, rather than loading wrong; so does one that isn't glTF 2 or is broken in its
   structure. Smaller problems (a missing image, a broken accessor) leave that piece out, with a

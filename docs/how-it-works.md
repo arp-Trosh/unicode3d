@@ -447,7 +447,7 @@ This is a software renderer, so it has a ceiling. Every visible triangle costs C
 few hundred thousand triangles a frame, frames slow down in proportion. Transparency keeps a fixed
 number of layers a pixel, so a fifth pane of glass in line is dropped. Shadow maps are a fixed size
 over the whole scene, so a sun over a large world gives coarse shadows. Models play what moves their
-nodes and skeletons, but not morph targets, and normal maps aren't read.
+nodes, skeletons and morph targets, but normal maps aren't read.
 And the terminal is the final limit: two colours a cell, and whatever font and
 colour depth it has.
 

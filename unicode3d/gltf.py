@@ -5,10 +5,11 @@ node hierarchy and animations. models.load_model() calls load_gltf() for these f
 
 What is read:
 - Meshes: positions, normals (flat, as glTF asks, where a mesh has none), texture coordinates, vertex colours,
-  triangles, strips and fans (points and lines are skipped), sparse accessors, and morph targets at their
-  default weights. Skinned meshes keep their vertices as bound, with their joints and weights (JOINTS_n,
-  WEIGHTS_n: past four joints, the four strongest), and their objects a Skin on the joints' Nodes: they are posed
-  by the joints as they move.
+  triangles, strips and fans (points and lines are skipped), sparse accessors, and morph targets
+  (Mesh.morph_targets and morph_normals; each object's morph_weights the node's or mesh's weights, None where
+  those are all 0; their names, from the mesh's extras.targetNames, in Model.morph_names). Skinned meshes keep
+  their vertices as bound, with their joints and weights (JOINTS_n, WEIGHTS_n: past four joints, the four
+  strongest), and their objects a Skin on the joints' Nodes: they are posed by the joints as they move.
 - Materials (PBR, mapped approximately onto an Object3D's): base colour and its texture to color and the texture;
   roughness to highlights (specular, shininess); metallic, much less for rough metal, to reflectivity; emissive to
   emissive; alphaMode OPAQUE, MASK and BLEND to solid, cut-out and see-through; doubleSided. Extensions:
@@ -16,13 +17,13 @@ What is read:
   KHR_mesh_quantization and EXT_texture_webp.
 - Nodes: each becomes a Node, or an Object3D where it has a mesh of one part, under the Model's root, with its
   translation, rotation and scale (or matrix): Model.nodes has them by name.
-- Animations: translation, rotation and scale channels, with LINEAR, STEP or CUBICSPLINE interpolation, each an
-  animation.Clip in Model.animations (skinned meshes follow the joints these move).
+- Animations: translation, rotation, scale and morph weights channels, with LINEAR, STEP or CUBICSPLINE
+  interpolation, each an animation.Clip in Model.animations (skinned meshes follow the joints these move; a node's
+  weights animate the morph_weights of each of its objects).
 
 Not read: cameras, lights, normal, occlusion and metallic-roughness textures (which a terminal's pixels can't show
-much of), morph animation (those meshes keep their default weights), and compressed meshes and
-textures (Draco, meshopt, KTX2/Basis): a file that requires those is refused with a ValueError rather than loaded
-wrong. What else can't be loaded (an image that isn't there, a broken accessor) is left out with a warning.
+much of), morph targets' tangents and texture coordinates, and compressed meshes and textures (Draco, meshopt,
+KTX2/Basis): a file that requires those is refused with a ValueError rather than loaded wrong. What else can't be loaded (an image that isn't there, a broken accessor) is left out with a warning.
 """
 import base64
 import json
@@ -330,9 +331,10 @@ def _triangles(indices, mode):
     return np.stack([indices[i + 1], indices[i + 2], np.full(n - 2, indices[0])], axis=1)  # a fan
 
 
-def _primitive(file, prim, material, weights, skin):
-    """A primitive as a Mesh (None if it has no triangles). weights: the mesh's morph target weights; skin: None, or
-    how many joints its skin has (its vertices keep their joints and weights, Mesh.joints and Mesh.weights)."""
+def _primitive(file, prim, material, skin):
+    """A primitive as a Mesh (None if it has no triangles), with its morph targets (Mesh.morph_targets, and
+    Mesh.morph_normals where they turn normals). skin: None, or how many joints its skin has (its vertices keep
+    their joints and weights, Mesh.joints and Mesh.weights)."""
     mode = prim.get("mode", TRIANGLES)
     if mode not in (TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN):
         return None
@@ -345,10 +347,11 @@ def _primitive(file, prim, material, weights, skin):
     positions = positions[:, :3]
     count = len(positions)
 
-    def attribute(name, width, as_float=True):
-        if name not in attributes:
+    def attribute(name, width, as_float=True, of=None):
+        of = attributes if of is None else of
+        if name not in of:
             return None
-        values = file.accessor(attributes[name], as_float)
+        values = file.accessor(of[name], as_float)
         if len(values) != count or values.shape[1] < width:
             file.warnings.append(f"{name} ignored: {len(values)} values for {count} vertices")
             return None
@@ -356,13 +359,16 @@ def _primitive(file, prim, material, weights, skin):
 
     normals = attribute("NORMAL", 3)
     normals = None if normals is None else normals[:, :3]
-    targets = prim.get("targets", [])
-    for target, weight in zip(targets, weights or []):  # morph targets, at their default weights
-        if weight:
-            if "POSITION" in target:
-                positions = positions + weight * file.accessor(target["POSITION"])[:count, :3]
-            if "NORMAL" in target and normals is not None:
-                normals = normals + weight * file.accessor(target["NORMAL"])[:count, :3]
+    targets = prim.get("targets") or []
+    moves = turns = None
+    if targets:  # (a target's attribute that can't be read moves nothing)
+        moves, turns = np.zeros((len(targets), count, 3)), np.zeros((len(targets), count, 3))
+        for k, target in enumerate(targets):
+            for name, into in (("POSITION", moves), ("NORMAL", turns)):
+                values = attribute(name, 3, of=target)
+                if values is not None:
+                    into[k] = values[:, :3]
+        turns = turns if normals is not None and any("NORMAL" in t for t in targets) else None
     joints = weights4 = None
     if skin is not None:
         joints, weights4 = _influences(file, attribute, skin)
@@ -388,11 +394,16 @@ def _primitive(file, prim, material, weights, skin):
         colors = None if colors is None else colors[corners]
         uv = None if uv is None else uv[corners]
         joints, weights4 = (None, None) if joints is None else (joints[corners], weights4[corners])
+        if moves is not None:  # (each target turns the flat normals as far as it turns its faces at full weight)
+            moves = moves[:, corners]
+            turns = _flat_turns(positions, moves)
     used, local = np.unique(faces, return_inverse=True)  # only the vertices the triangles use
     faces = local.reshape(-1, 3).astype(np.int64)
     mesh = Mesh(positions[used], faces, vertex_colors=None if colors is None else colors[used],
                 normals=None if normals is None else normals[used],
-                joints=None if joints is None else joints[used], weights=None if joints is None else weights4[used])
+                joints=None if joints is None else joints[used], weights=None if joints is None else weights4[used],
+                morph_targets=None if moves is None else moves[:, used],
+                morph_normals=None if turns is None else turns[:, used])
     if uv is not None:
         uv = uv[used][:, :2]
         if material.uv_matrix is not None:
@@ -504,6 +515,65 @@ def _tracks(file, sampler, path):
     return RotationTrack(keys, easing=easing) if path == "rotation" else Track(keys, easing=easing)
 
 
+def _flat_turns(corners, moves):
+    """Morph normals (K, C, 3) for a flat mesh (corners (C, 3), each triangle's three in turn) and its morph
+    targets (K, C, 3): how far each target turns each triangle's unit normal at full weight. Exact for one target
+    at a weight of 0 or 1; mixed, the normals lean between the targets' (glTF has flat normals worked out after
+    morphing, which a per-frame pass over the triangles would cost)."""
+
+    def unit_normals(points):
+        tri = points.reshape(-1, 3, 3)
+        n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        length = np.linalg.norm(n, axis=1, keepdims=True)
+        n = np.where(length > 1e-12, n / np.where(length > 1e-12, length, 1.0), 0.0)
+        return np.repeat(n, 3, axis=0)
+
+    base = unit_normals(corners)
+    turns = np.stack([unit_normals(corners + move) - base for move in moves])
+    return np.where(np.isfinite(turns), turns, 0.0)
+
+
+def _morph_weights(file, name, weights, k):
+    """A morphing object's morph_weights: the node's or its mesh's weights for its k targets (0 for those it
+    leaves out), or None where they are all 0 (the mesh as it is, drawn without morphing it)."""
+    try:
+        given = np.array(weights if weights is not None else [], dtype=float).reshape(-1)
+    except BROKEN:
+        given = np.zeros(0)
+    problem = f"node {name}: {len(given)} morph weights for {k} targets"
+    if weights is not None and len(given) != k and problem not in file.warnings:  # (once for the node's parts)
+        file.warnings.append(problem)
+    w = np.zeros(k)
+    w[:min(k, len(given))] = given[:k]
+    w[~np.isfinite(w)] = 0.0
+    return w if w.any() else None
+
+
+def _weight_track(file, sampler, k):
+    """A Track of morph weights (k a keyframe) for an animation sampler moving a node's weights: keys of as many
+    numbers as the file gives each, cut to k or padded with 0s."""
+    times = file.accessor(sampler["input"])[:, 0]
+    values = file.accessor(sampler["output"])[:, 0]
+    if not len(times):
+        raise ValueError("no keyframes")
+    spline = sampler.get("interpolation", "LINEAR") == "CUBICSPLINE"
+    given, rest = divmod(len(values), len(times) * (3 if spline else 1))
+    if rest or not given:
+        raise ValueError(f"{len(values)} weights for {len(times)} keyframes")
+    values = values.reshape(len(times), 3 if spline else 1, given)
+    if given != k:
+        problem = f"morph weights animated for {given} targets of {k}"
+        if problem not in file.warnings:
+            file.warnings.append(problem)
+        fitted = np.zeros(values.shape[:2] + (k,))
+        fitted[:, :, :min(k, given)] = values[:, :, :k]
+        values = fitted
+    if spline:  # (in-tangents, values, out-tangents)
+        return SplineTrack([(t, values[n, 1], values[n, 0], values[n, 2]) for n, t in enumerate(times)])
+    easing = step if sampler.get("interpolation") == "STEP" else "linear"
+    return Track([(t, values[n, 0]) for n, t in enumerate(times)], easing=easing)
+
+
 def load_gltf(path, max_texture=MAX_TEXTURE, double_sided=False, scene=None):
     """A glTF 2.0 file (.gltf or .glb) as a Model: its nodes as Nodes and Object3Ds under the model's root, its
     materials (models.Material) and its animations (animation.Clip). See the module's notes for what is read.
@@ -567,6 +637,7 @@ def _load(path, max_texture, double_sided, scene):
         order.append(i)
         todo += [(c, built[i], world[i]) for c in reversed(info.get("children", []))]
 
+    parts_of = {}  # each mesh node's objects (what its morph weights animate)
     skins = []  # (objects, the skin's joints (node indices), inverse bind matrices): given Skins once nodes are built
     for i in order:
         info, node = nodes[i], built[i]
@@ -599,10 +670,10 @@ def _load(path, max_texture, double_sided, scene):
         parts = []
         for p, prim in enumerate(mesh_info.get("primitives", [])):
             mat = material(prim.get("material"))
-            key = (info["mesh"], p, repr(info.get("skin") if skin is not None else None), repr(weights))
+            key = (info["mesh"], p, repr(info.get("skin") if skin is not None else None))
             try:
                 if key not in meshes:
-                    meshes[key] = _primitive(file, prim, mat, weights, None if skin is None else len(skin[0]))
+                    meshes[key] = _primitive(file, prim, mat, None if skin is None else len(skin[0]))
             except BROKEN as e:
                 file.warnings.append(f"mesh {_name(mesh_info.get('name'), info['mesh'])} part {p}: {_problem(e)}")
                 meshes[key] = None
@@ -619,14 +690,23 @@ def _load(path, max_texture, double_sided, scene):
         else:
             objects = [Object3D(mesh, parent=parent if mesh.joints is not None else node, **mat.options())
                        for mesh, mat in parts]  # (a part without joints is placed by its node, unskinned)
-        if double_sided:
-            for obj in objects:
-                obj.double_sided = True
+        for obj in objects:
+            obj.double_sided = obj.double_sided or double_sided
+            if obj.mesh.morph_targets is not None:
+                obj.morph_weights = _morph_weights(file, name, weights, len(obj.mesh.morph_targets))
+        parts_of[i] = objects
         model.nodes.setdefault(name, built[i])
         model.objects += objects
         for label in (name, _name(mesh_info.get("name"), None)):
             if label:
                 model.names.setdefault(label, []).extend(objects)
+        extras = mesh_info.get("extras")
+        target_names = extras.get("targetNames") if isinstance(extras, dict) else None  # (a common convention)
+        if (isinstance(target_names, list) and all(isinstance(t, str) for t in target_names)
+                and any(obj.mesh.morph_targets is not None for obj in objects)):
+            for label in (name, _name(mesh_info.get("name"), None)):
+                if label:
+                    model.morph_names.setdefault(label, list(target_names))
         for obj, (_, mat) in zip(objects, parts):
             model.names.setdefault(mat.material.name, []).append(obj)
         if skin is not None:
@@ -643,23 +723,28 @@ def _load(path, max_texture, double_sided, scene):
 
     for a, info in enumerate(file.json.get("animations", [])):
         name = _name(info.get("name"), f"animation {a}")
-        tracks, morph = {}, False
+        tracks = {}  # id(target): (target, {attribute: track})
         for channel in info.get("channels", []):
             try:
                 target = channel["target"]
                 node, attr = target.get("node"), target.get("path")
-                if attr == "weights":
-                    morph = True
-                    continue
-                if not isinstance(node, int) or node not in built or attr not in ("translation", "rotation", "scale"):
+                if not isinstance(node, int) or node not in built or attr not in ("translation", "rotation", "scale",
+                                                                                   "weights"):
                     continue
                 sampler = info["samplers"][channel["sampler"]]
-                tracks.setdefault(node, {})[{"translation": "position"}.get(attr, attr)] = _tracks(file, sampler, attr)
+                if attr == "weights":
+                    morphing = [obj for obj in parts_of.get(node, []) if obj.mesh.morph_targets is not None]
+                    if not morphing:
+                        raise ValueError(f"node {node} has no morph targets")
+                    for obj in morphing:
+                        track = _weight_track(file, sampler, len(obj.mesh.morph_targets))
+                        tracks.setdefault(id(obj), (obj, {}))[1]["morph_weights"] = track
+                    continue
+                tracks.setdefault(id(built[node]), (built[node], {}))[1][{"translation": "position"}.get(attr, attr)] \
+                    = _tracks(file, sampler, attr)
             except BROKEN as e:
                 file.warnings.append(f"animation {name}: a channel left out ({_problem(e)})")
-        if morph:
-            file.warnings.append(f"animation {name}: morph target weights aren't animated")
         if tracks:
-            model.animations[name] = Clip([Animation(built[n], **t) for n, t in tracks.items()], name=name)
+            model.animations[name] = Clip([Animation(target, **t) for target, t in tracks.values()], name=name)
     model.warnings = file.warnings
     return model

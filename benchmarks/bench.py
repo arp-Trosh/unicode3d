@@ -5,7 +5,8 @@
 
 Renders scenes off-screen and reports the time each stage of a frame takes:
 a few fixed, spinning set pieces (dice ... sphere-27k; particles-3k a fountain; lines-2k a grid; sprites-300 a
-crowd of sprites; skinned-20 crowd-20's figures as skinned meshes), and three that load the engine as kinds of
+crowd of sprites; skinned-20 crowd-20's figures as skinned meshes; morph-20 those with 4 morph targets each,
+their weights changing every frame), and three that load the engine as kinds of
 game would (corridor, arena, board: see genres.py), each moving its world as a game loop does and writing text over
 the picture:
 
@@ -104,10 +105,11 @@ def crowd_scene(count, parts=60, chain=6):
     return objects, Camera(position=np.array([0.0, 6.0, 10.0]), fov=50.0), Light()
 
 
-def skinned_scene(count, chains=10, bones=6):
+def skinned_scene(count, chains=10, bones=6, targets=0):
     """crowd_scene's figures, each one mesh skinned to its joints instead of `chains` * `bones` boxes on them (a
     tube along each chain, about as many triangles), every joint turning each frame: the cost of skinning, against
-    crowd-20's of a part per joint."""
+    crowd-20's of a part per joint. targets: morph targets on the mesh (swellings along it), every figure's weights
+    changing each frame too: the cost of morphing, against skinned-20's."""
     root = Node()
     joints = []
     for p in range(chains * bones):
@@ -116,6 +118,10 @@ def skinned_scene(count, chains=10, bones=6):
                            0.95 if p % 2 else (1.0, 0.9, 1.0), parent=root if p % bones == 0 else joints[-1]))
     limbs = [chain_rings(list(range(c * bones, (c + 1) * bones)), [0.12] * (bones + 1), 0.3) for c in range(chains)]
     mesh = tubes(joints, limbs, segments=6)
+    if targets:
+        along = np.linspace(0.0, 1.0, len(mesh.vertices))
+        mesh.morph_targets = np.stack([0.3 * mesh.vertices * np.sin(np.pi * (k + 1) * along)[:, None]
+                                       for k in range(targets)])
     inverse_bind = Skin(joints).inverse_bind
     objects, skeletons = [], []
     for f in range(count):
@@ -124,12 +130,15 @@ def skinned_scene(count, chains=10, bones=6):
         for p, joint in enumerate(joints):
             own.append(Node(np.array(joint.position), np.array(joint.rotation), joint.scale,
                             parent=root if p % bones == 0 else own[-1]))
-        objects.append(Object3D(mesh, skin=Skin(own, inverse_bind), color=(200, 140, 60)))
+        objects.append(Object3D(mesh, skin=Skin(own, inverse_bind), color=(200, 140, 60),
+                                morph_weights=np.zeros(targets) if targets else None))
         skeletons += own
 
-    def turn(frame):  # (every joint, as crowd-20 turns every part)
+    def turn(frame):  # (every joint, as crowd-20 turns every part; and every weight)
         for joint in skeletons:
             joint.rotation = quat_mul(SPIN, joint.rotation)
+        for f, obj in enumerate(objects if targets else ()):
+            obj.morph_weights = 0.5 + 0.5 * np.sin(0.1 * frame + f + np.arange(targets))
         return objects
     return objects, Camera(position=np.array([0.0, 6.0, 10.0]), fov=50.0), Light(), objects, turn
 
@@ -242,6 +251,7 @@ SCENES = {
     "balls-400": lambda: balls_scene(400),
     "crowd-20": lambda: crowd_scene(20),
     "skinned-20": lambda: skinned_scene(20),
+    "morph-20": lambda: skinned_scene(20, targets=4),
     "spawn-60": lambda: spawn_scene(60),
     "particles-3k": lambda: particles_scene(3000, 200),
     "lines-2k": lambda: lines_scene(1000),

@@ -18,6 +18,8 @@ from unicode3d import (Animation, Camera, Clip, Light, Node, Object3D, Renderer,
                        load_model)
 from unicode3d.animation import RotationTrack, step
 from unicode3d.color import linear_to_srgb
+from unicode3d.mesh import Mesh
+from unicode3d.skinning import morphed
 from unicode3d.texture import BLEND, CUTOUT, alpha_kind, build_mipmaps
 from unicode3d.transforms import quat_axis_angle, quat_to_matrix
 
@@ -382,7 +384,7 @@ class GltfTests(unittest.TestCase):
         lo, hi = model.bounds()
         self.assertAlmostEqual(float((hi - lo).max()) * model.root.scale, 2.0)
 
-    def test_skins_load_with_their_joints_and_morph_targets_posed(self):
+    def test_skins_load_with_their_joints_and_morph_targets(self):
         b = Builder()
         joints = b.accessor(np.zeros((4, 4)), USHORT)
         weights = b.accessor(np.tile([1.0, 0, 0, 0], (4, 1)))
@@ -398,9 +400,11 @@ class GltfTests(unittest.TestCase):
         b.node(name="Morph", mesh=morph)
         b.scene(bone, skinned, 2)
         rotate = b.add("animations", {"channels": [{"sampler": 0, "target": {"node": bone, "path": "translation"}},
-                                                   {"sampler": 0, "target": {"node": 2, "path": "weights"}}],
+                                                   {"sampler": 1, "target": {"node": 2, "path": "weights"}}],
                                       "samplers": [{"input": b.accessor([0.0, 1.0]),
-                                                    "output": b.accessor(np.zeros((2, 3)))}]})
+                                                    "output": b.accessor(np.zeros((2, 3)))},
+                                                   {"input": b.accessor([0.0, 1.0]),
+                                                    "output": b.accessor([0.5, 1.0])}]})
         model = load_gltf(b.glb(self.path("skin.glb")))
         skinned_obj = model.names["Skinned"][0]
         self.assertIs(skinned_obj.parent, model.root)
@@ -413,10 +417,113 @@ class GltfTests(unittest.TestCase):
         lo, hi = skinned_obj.world_bounds()
         np.testing.assert_allclose(lo, (-1, 2, 0))
         np.testing.assert_allclose(hi, (1, 4, 0))
-        np.testing.assert_allclose(model.nodes["Morph"].mesh.vertices[:, 2], 1.0)  # half way to its target
+        morph_obj = model.nodes["Morph"]  # its target kept, at its weight, and animated
+        np.testing.assert_allclose(morph_obj.mesh.vertices, QUAD[QUAD_FACES])  # (flat: corners of their own)
+        np.testing.assert_allclose(morph_obj.mesh.morph_targets, [np.tile([0.0, 0.0, 2.0], (6, 1))])
+        np.testing.assert_allclose(morph_obj.morph_weights, [0.5])
+        np.testing.assert_allclose(morphed(morph_obj.mesh, morph_obj.morph_weights)[0][:, 2], 1.0)
+        model.animations["animation 0"].apply(1.0)
+        np.testing.assert_allclose(morph_obj.morph_weights, [1.0])
+        np.testing.assert_allclose(model.nodes["Bone"].position, 0.0)
         self.assertEqual(rotate, 0)
-        self.assertFalse(any("skinned" in w for w in model.warnings))
-        self.assertTrue(any("morph" in w for w in model.warnings))
+        self.assertEqual(model.warnings, [])
+
+    def test_morph_targets_keep_their_weights_and_animate(self):
+        b = Builder()
+        up, out = np.tile([0.0, 1.0, 0.0], (4, 1)), np.tile([0.0, 0.0, 1.0], (4, 1))
+        turn = np.tile([1.0, 0.0, 0.0], (4, 1))
+
+        def primitive(normals):
+            prim = {"attributes": {"POSITION": b.accessor(QUAD)}, "indices": b.accessor(QUAD_FACES, USHORT),
+                    "targets": [{"POSITION": b.accessor(up)}, {"POSITION": b.accessor(out)}]}
+            if normals:
+                prim["attributes"]["NORMAL"] = b.accessor(np.tile([0.0, 0.0, 1.0], (4, 1)))
+                prim["targets"][0]["NORMAL"] = b.accessor(turn)
+            return prim
+
+        smooth = b.add("meshes", {"name": "Face", "weights": [0.25, 0.0], "primitives": [primitive(True)],
+                                  "extras": {"targetNames": ["up", "out"]}})
+        flat = b.add("meshes", {"primitives": [primitive(False)]})
+        two = b.add("meshes", {"primitives": [primitive(True), primitive(False)]})
+        own = b.node(name="Own", mesh=smooth, weights=[0.0, 1.0])
+        meshes = b.node(name="Mesh's", mesh=smooth)
+        b.node(name="Flat", mesh=flat)
+        parts = b.node(name="Parts", mesh=two)
+        short = b.node(name="Short", mesh=smooth, weights=[0.5])
+        plain = b.node(name="Plain", mesh=b.mesh())
+        b.scene(own, meshes, 2, parts, short, plain)
+        times = b.accessor([0.0, 1.0])
+        b.add("animations", {"name": "Linear", "channels": [{"sampler": 0, "target": {"node": parts, "path": "weights"}}],
+                             "samplers": [{"input": times, "output": b.accessor([0.0, 0.0, 1.0, 0.5])}]})
+        b.add("animations", {"name": "Spline", "channels": [{"sampler": 0, "target": {"node": own, "path": "weights"}}],
+                             "samplers": [{"input": times, "interpolation": "CUBICSPLINE",  # (in, value, out) each key
+                                           "output": b.accessor([0, 0, 0, 0, 0, 2, 1, 1, 1, 0, 0, 0])}]})
+        b.add("animations", {"name": "Step", "channels": [{"sampler": 0, "target": {"node": 2, "path": "weights"}}],
+                             "samplers": [{"input": times, "interpolation": "STEP",
+                                           "output": b.accessor([1.0, 0.0, 0.0, 1.0])}]})
+        b.add("animations", {"name": "Broken", "channels": [
+            {"sampler": 0, "target": {"node": plain, "path": "weights"}},  # (no targets)
+            {"sampler": 1, "target": {"node": own, "path": "weights"}}],  # (5 numbers for 2 keyframes)
+            "samplers": [{"input": times, "output": b.accessor([0.0, 1.0])},
+                         {"input": times, "output": b.accessor([0.0, 1.0, 2.0, 3.0, 4.0])}]})
+        model = load_gltf(b.glb(self.path("morph.glb")))
+        own_obj, mesh_obj, flat_obj = model.nodes["Own"], model.nodes["Mesh's"], model.nodes["Flat"]
+        self.assertIs(own_obj.mesh, mesh_obj.mesh)  # one mesh, whatever weights each node gives it
+        np.testing.assert_allclose(own_obj.morph_weights, [0.0, 1.0])
+        np.testing.assert_allclose(mesh_obj.morph_weights, [0.25, 0.0])
+        self.assertIsNone(flat_obj.morph_weights)  # (all 0: drawn unmorphed)
+        np.testing.assert_allclose(model.nodes["Short"].morph_weights, [0.5, 0.0])  # padded
+        self.assertIsNone(model.nodes["Plain"].morph_weights)
+        self.assertEqual(model.morph_names["Face"], ["up", "out"])  # by mesh and node names
+        self.assertEqual(model.morph_names["Own"], ["up", "out"])
+        self.assertNotIn("Flat", model.morph_names)
+        self.assertEqual(model.copy().morph_names["Own"], ["up", "out"])
+        np.testing.assert_allclose(own_obj.mesh.morph_normals[0], turn)
+        np.testing.assert_allclose(own_obj.mesh.morph_normals[1], 0.0)
+
+        # A flat mesh's targets turn its normals as they turn its faces.
+        v, n = morphed(flat_obj.mesh, [0.0, 1.0])  # (moved out: still facing +z)
+        np.testing.assert_allclose(n, np.tile([0.0, 0.0, 1.0], (len(n), 1)), atol=1e-12)
+        flat_b = Builder()  # (the top edge 2 forward: the quad tilted 45 degrees, facing down a little)
+        prim = {"attributes": {"POSITION": flat_b.accessor(QUAD)}, "indices": flat_b.accessor(QUAD_FACES, USHORT),
+                "targets": [{"POSITION": flat_b.accessor(np.where(QUAD[:, 1:2] > 0, (0.0, 0.0, 2.0), 0.0))}]}
+        flat_b.node(mesh=flat_b.add("meshes", {"primitives": [prim]}), weights=[1.0])
+        tilt = load_gltf(flat_b.glb(self.path("tilt.glb"))).objects[0]
+        v, n = morphed(tilt.mesh, tilt.morph_weights)
+        np.testing.assert_allclose(n, np.tile(np.array([0.0, -2.0, 2.0]) / np.sqrt(8.0), (len(n), 1)), atol=1e-12)
+
+        parts_objs = model.names["Parts"]  # both parts of a node of two
+        self.assertEqual(len(parts_objs), 2)
+        model.animations["Linear"].apply(0.5)
+        for obj in parts_objs:
+            np.testing.assert_allclose(obj.morph_weights, [0.5, 0.25])
+        spline = model.animations["Spline"]
+        spline.apply(0.0)
+        np.testing.assert_allclose(own_obj.morph_weights, [0.0, 0.0])
+        spline.apply(0.5)  # Hermite: values 0 -> 1 and 0 -> 0, out-tangents (0, 2), in-tangents (1, 1)
+        np.testing.assert_allclose(own_obj.morph_weights, [0.5 - 0.125, 0.25 - 0.125])
+        spline.apply(1.0)
+        np.testing.assert_allclose(own_obj.morph_weights, [1.0, 0.0])
+        step_clip = model.animations["Step"]
+        step_clip.apply(0.5)
+        np.testing.assert_allclose(flat_obj.morph_weights, [1.0, 0.0])
+        step_clip.apply(1.0)
+        np.testing.assert_allclose(flat_obj.morph_weights, [0.0, 1.0])
+        self.assertNotIn("Broken", model.animations)
+        self.assertEqual(sum("channel left out" in w for w in model.warnings), 2)
+        self.assertTrue(any("1 morph weights for 2 targets" in w for w in model.warnings))
+
+        # Drawn as the targets move it: the same as the mesh morphed in numpy.
+        cam = Camera(position=np.array([0.0, 0.0, 6.0]), target=np.zeros(3))
+        model.animations["Linear"].apply(1.0)
+        got = Renderer(80, 40).render(model.objects, cam, [Light(direction=np.array([0.3, -0.5, -1.0]))]).rgb.copy()
+        for obj in model.objects:
+            if obj.morph_weights is not None:
+                vertices, normals = morphed(obj.mesh, obj.morph_weights)
+                obj.mesh = Mesh(vertices, obj.mesh.faces, normals=normals)
+                obj.morph_weights = None
+        want = Renderer(80, 40).render(model.objects, cam, [Light(direction=np.array([0.3, -0.5, -1.0]))]).rgb
+        np.testing.assert_allclose(got, want, atol=2e-3)
 
     def test_skin_weights_past_four_joints_and_broken_ones(self):
         b = Builder()
