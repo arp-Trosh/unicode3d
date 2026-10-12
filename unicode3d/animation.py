@@ -195,13 +195,16 @@ class SplineTrack(Track):
 
 class Animation:
     """Moves an object (an Object3D, a Node, or anything with those attributes) by tracks: position and scale
-    Tracks and a rotation RotationTrack, any of them None to leave that alone. Plays from time 0: call
-    update(dt) each frame, or apply(t) for a time of your own. speed scales time (2 plays twice as fast)."""
+    Tracks and a rotation RotationTrack, and morph_weights a Track (or SplineTrack) of an Object3D's morph weights
+    (each keyframe's value as many numbers as its mesh has morph targets); any of them None to leave that alone.
+    Plays from time 0: call update(dt) each frame, or apply(t) for a time of your own. speed scales time (2 plays
+    twice as fast)."""
 
-    def __init__(self, target, position=None, rotation=None, scale=None, speed=1.0):
+    def __init__(self, target, position=None, rotation=None, scale=None, speed=1.0, morph_weights=None):
         self.target = target
         self.tracks = {name: track for name, track in (("position", position), ("rotation", rotation),
-                                                        ("scale", scale)) if track is not None}
+                                                        ("scale", scale), ("morph_weights", morph_weights))
+                       if track is not None}
         self.speed = speed
         self.time = 0.0
 
@@ -233,13 +236,15 @@ class Animation:
 # copies) and samples them all in one call of _sample, with the arithmetic of Track.at, between and blend, and of
 # lerp, quat_slerp, normalize and the easing curves, in the same order. What the kernel can't do exactly (a Track
 # subclass or easing function of the program's own, values not all numbers or all 3- or 4-vectors, two tracks
-# moving the same attribute, an Animation subclass) leaves the clip on Track.at, as before.
+# moving the same attribute, an Animation subclass) leaves the clip on Track.at, as before. Tracks of morph weights,
+# any number of them a keyframe (_WIDE), are played as pieces of 4 side by side (_wide_pieces), rows of out4.
 
 _LERP, _SLERP, _SPLINE, _SPLINE_ROTATION = 0, 1, 2, 3  # kinds of track
 _LOOP_CODES = {"once": 0, "loop": 1, "pingpong": 2}
 _EASING_CODES = {f: i for i, f in enumerate((linear, ease_in, ease_out, ease_in_out, ease_out_back, ease_out_bounce,
                                              step))}
 _WIDTHS = (1, 3, 4)  # the values of each group: numbers, 3-vectors (positions, scales), 4-vectors (rotations)
+_WIDE = ("morph_weights",)  # attributes whose values are any number of numbers (see _wide_pieces)
 
 
 @njit(cache=True, error_model="numpy")
@@ -424,6 +429,37 @@ def _track_piece(track):
     return piece
 
 
+def _wide_pieces(track):
+    """A track of K numbers a keyframe (morph weights; K may be 1, given as numbers) as _sample takes it, worked out
+    once and kept on the track: (pieces, K), ceil(K / 4) pieces as _track_piece gives them, each 4 of the numbers
+    (the last padded with 0s); or None if the kernel can't play it."""
+    wide = track.__dict__.get("_wide", False)
+    if wide is not False:
+        return wide
+    wide = None
+    kind = {Track: _LERP, SplineTrack: _SPLINE}.get(type(track))
+    values = list(track.values) + ([t for pair in track.tangents for t in pair] if kind == _SPLINE else [])
+    shapes = {np.shape(value) for value in values}
+    easings = [_EASING_CODES.get(e) for e in track.easings] if kind == _LERP else [0] * len(track.easings)
+    if (kind is not None and not (kind == _SPLINE and track.rotation) and len(shapes) == 1 and len(shapes.pop()) <= 1
+            and None not in easings and track.loop in _LOOP_CODES and len(track.times) == len(track.values)):
+        n = len(track.times)
+        values = np.array(track.values, dtype=float).reshape(n, -1)
+        k = values.shape[1]
+        width = -(-k // 4) * 4
+        packed = np.zeros((n, width))
+        packed[:, :k] = values
+        tangents = np.zeros((n, 2, width))
+        if kind == _SPLINE:
+            tangents[:, :, :k] = np.array(track.tangents, dtype=float).reshape(n, 2, k)
+        times, codes = np.array(track.times, dtype=float), np.array(easings, dtype=np.int8)
+        if k:
+            wide = ([(kind, 4, _LOOP_CODES[track.loop], times, packed[:, c:c + 4].copy(), tangents[:, :, c:c + 4].copy(),
+                      codes) for c in range(0, width, 4)], k)
+    track._wide = wide
+    return wide
+
+
 class _PackedClip:
     """A Clip's tracks as _sample takes them (ok False: some can't be, and Track.at plays the clip), with what it
     was made from, so the clip can tell when that changes."""
@@ -434,15 +470,30 @@ class _PackedClip:
         self.tracks = [dict(a.tracks) for a in animations]
         self.duration = max((track.end for a in animations for track in a.tracks.values()), default=0.0)
         self.ok = False
-        self.slots = ([], [], [])  # (target, attribute) of each row of each group
-        self.where = {}            # (id(target), attribute): (group, row)
+        self.slots = ([], [], [])  # (target, attribute) of each row of each group (None: a piece of a wide one)
+        self.where = {}            # (id(target), attribute): (group, row), or for a wide one ("wide", rows, K)
+        self.wide = []             # (target, attribute, rows of out4, K) of each wide one (see _wide_pieces)
         columns = [[] for _ in range(8)]  # kinds, loops, firsts, counts, groups, rows, fade_slerp, pieces
         for a in animations:
             if type(a) is not Animation:
                 return
             for name, track in a.tracks.items():
-                piece = _track_piece(track)
                 key = (id(a.target), name)
+                if name in _WIDE:  # (side by side in group 2, never slerped)
+                    wide = _wide_pieces(track)
+                    if wide is None or key in self.where:
+                        return
+                    rows = []
+                    for piece in wide[0]:
+                        rows.append(len(self.slots[2]))
+                        self.slots[2].append(None)
+                        for column, value in zip(columns, (piece[0], piece[2], sum(len(p[3]) for p in columns[7]),
+                                                           len(piece[3]), 2, rows[-1], False, piece)):
+                            column.append(value)
+                    self.where[key] = ("wide", np.array(rows, np.int64), wide[1])
+                    self.wide.append((a.target, name, self.where[key][1], wide[1]))
+                    continue
+                piece = _track_piece(track)
                 if piece is None or key in self.where:
                     return
                 group = _WIDTHS.index(piece[1])
@@ -478,10 +529,17 @@ class _PackedClip:
     def starts(self, pose):
         """A fade's starting pose (see Clip.start) as _sample's start1/3/4, or None if it doesn't fit the tracks."""
         starts = (np.zeros(len(self.slots[0])), np.zeros((len(self.slots[1]), 3)), np.zeros((len(self.slots[2]), 4)))
-        if len(pose) != len(self.kinds):
+        if len(pose) != len(self.where):
             return None
         for target, name, start in pose:
             where = self.where.get((id(target), name))
+            if where is not None and where[0] == "wide":
+                if start.shape != (where[2],):
+                    return None
+                padded = np.zeros(4 * len(where[1]))
+                padded[:where[2]] = start
+                starts[2][where[1]] = padded.reshape(-1, 4)
+                continue
             if where is None or start.shape != ((), (3,), (4,))[where[0]]:
                 return None
             starts[where[0]][where[1]] = start
@@ -498,8 +556,20 @@ class _PackedClip:
             setattr(target, name, value)
         for (target, name), value in zip(self.slots[1], out3):  # each its own row of this frame's array
             setattr(target, name, value)
-        for (target, name), value in zip(self.slots[2], out4):
-            setattr(target, name, value)
+        for slot, value in zip(self.slots[2], out4):
+            if slot is not None:
+                setattr(slot[0], slot[1], value)
+        for target, name, rows, k in self.wide:
+            setattr(target, name, out4[rows].reshape(-1)[:k])
+
+
+def _now(target, name, track):
+    """target's attribute `name` now, as a float array, where a fade starts from (morph weights that are None: 0s, as
+    many as the track's)."""
+    value = getattr(target, name)
+    if value is None and name in _WIDE:
+        value = np.zeros(np.shape(track.values[0]))
+    return np.array(value, dtype=float).reshape(-1) if name in _WIDE else np.array(value, dtype=float)
 
 
 class Clip:
@@ -553,8 +623,8 @@ class Clip:
         self._fade = None
         fade = float(fade)
         if fade > 0.0 and math.isfinite(fade):
-            pose = [(a.target, name, np.array(getattr(a.target, name), dtype=float))
-                    for a in self.animations for name in a.tracks]
+            pose = [(a.target, name, _now(a.target, name, track))
+                    for a in self.animations for name, track in a.tracks.items()]
             self._fade = [pose, 0.0, fade, None]
         self.apply(0.0)
 

@@ -25,7 +25,8 @@ cut-out and stained-glass textures; a mirror; facing mirrors; a textured floor r
 world fog, materials, and shapes stretched unevenly; and, after 0.5.0, a model loaded from an OBJ file on a
 floor whose texture repeats, and fog over a starry sky box; after 0.6.0, a glTF model; after 0.7.1, the
 courtyard through an orthographic camera; after 0.17.0, sun shadows fitted to the view in a big field; and,
-after 0.20.1, particles and a billboard sprite, lines, and sprites with eight sides.
+after 0.20.1, particles and a billboard sprite, lines, and sprites with eight sides; after 0.21.0, skinned
+figures (from glTF and built in code); and, after 0.22.0, morph targets.
 """
 import argparse
 import os
@@ -601,6 +602,61 @@ def skinned():
                 camera((0.1, 1.35, 3.5), (0.05, 0.8, 0.0)), [sun, lamp], {"background": Sky()})
 
 
+def morph():
+    """Morph targets (added in 0.23.0), built in code and set with constructor arguments: a ball, posed by itself
+    and turned, both squashed and grown spiky; a flag rippling one way and creased the other, its normals turned
+    with it; and a skinned figure whose head is swollen and whose body is thinned while it waves (a morph before
+    the skin); shadows from the sun and a lamp."""
+    from unicode3d.examples.rigs import bend, figure_rig, skeleton
+    from unicode3d.scene import Skin
+    rings, around = 16, 24
+    lat = np.linspace(0.0, np.pi, rings + 1)
+    lon = np.linspace(0.0, 2.0 * np.pi, around, endpoint=False)
+    unit = np.array([(np.sin(a) * np.cos(b), np.cos(a), np.sin(a) * np.sin(b)) for a in lat for b in lon])
+    faces = [(r * around + k, r * around + (k + 1) % around, (r + 1) * around + k) for r in range(rings)
+             for k in range(around)]
+    faces += [(r * around + (k + 1) % around, (r + 1) * around + (k + 1) % around, (r + 1) * around + k)
+              for r in range(rings) for k in range(around)]
+    squash = unit * (0.25, -0.45, 0.25)
+    spikes = unit * (0.5 * np.outer(np.arange(rings + 1) % 4 == 2, np.arange(around) % 4 == 0).reshape(-1))[:, None]
+    ball = Object3D(Mesh(unit * 0.45, np.array(faces), morph_targets=np.stack([squash, spikes])),
+                    position=np.array([-1.0, 0.5, -0.7]), rotation=turned(0.5), color=(110, 170, 220),
+                    morph_weights=[0.4, 0.8])
+    x, y = np.meshgrid(np.linspace(0.0, 1.2, 25), np.linspace(0.0, 0.8, 17))
+    flat = np.stack([x.ravel(), y.ravel(), np.zeros(x.size)], axis=1)
+    cells = [(r * 25 + c, r * 25 + c + 1, (r + 1) * 25 + c + 1) for r in range(16) for c in range(24)]
+    cells += [(r * 25 + c, (r + 1) * 25 + c + 1, (r + 1) * 25 + c) for r in range(16) for c in range(24)]
+    ripple = np.zeros_like(flat)
+    ripple[:, 2] = 0.12 * np.sin(flat[:, 0] * 9.0) * flat[:, 0]
+    crease = np.zeros_like(flat)
+    crease[:, 2] = 0.2 * np.abs(flat[:, 1] - 0.4) * flat[:, 0]
+    turn = np.zeros((2, len(flat), 3))
+    turn[0, :, 0] = -0.12 * 9.0 * np.cos(flat[:, 0] * 9.0) * flat[:, 0]
+    flag = Object3D(Mesh(flat, np.array(cells), morph_targets=np.stack([ripple, crease]), morph_normals=turn),
+                    position=np.array([0.9, 0.9, -0.6]), rotation=turned(-0.4), color=(220, 90, 80),
+                    double_sided=True, morph_weights=[1.0, -0.8])
+    pole = Object3D(make_box(), position=np.array([0.88, 0.85, -0.6]), scale=(0.04, 1.7, 0.04), color=(150, 130, 110))
+    mesh, inverse_bind = figure_rig()
+    v = mesh.vertices
+    head = (v[:, 1] > 1.55)[:, None]
+    swollen = (v - (0.0, 1.62, 0.0)) * 0.5 * head
+    thin = v * (-0.3, 0.0, -0.3) * ~head
+    j = skeleton()
+    j["hips"].position = j["hips"].position + (-0.1, 0.0, 0.2)
+    j["hips"].rotation = turned(-0.3)
+    bend(j["right shoulder"], (0, 0, 1), 2.1)
+    bend(j["right elbow"], (0, 0, 1), 0.8)
+    bend(j["neck"], (0, 0, 1), 0.25)
+    morphing = Mesh(v, mesh.faces, joints=mesh.joints, weights=mesh.weights, morph_targets=np.stack([swollen, thin]))
+    waving = Object3D(morphing, skin=Skin(list(j.values()), inverse_bind), color=(200, 170, 140),
+                      morph_weights=[1.0, 0.8])
+    ground = floor(4.0, texture=checks(64, 4))
+    sun = Light(direction=np.array([0.6, -1.0, -0.4]), shadows=True)
+    lamp = PointLight(np.array([-1.0, 2.4, 1.6]), color=(255, 210, 160), range=6.0, shadows=True)
+    return Shot([Object3D(ground, color=(255, 255, 255)), ball, flag, pole, waving],
+                camera((0.1, 1.35, 3.5), (0.05, 0.8, 0.0)), [sun, lamp], {"background": Sky()})
+
+
 def ortho():
     """The courtyard from above and to one side through an orthographic camera (added after 0.7.1), as in an
     isometric game: everything the same size however far off, with sun shadows, mirrors, outlines and fog
@@ -816,6 +872,7 @@ SCENES = {
     "gltf": gltf,
     "gltf-skinned": gltf_skinned,
     "skinned": skinned,
+    "morph": morph,
     "ortho": ortho,
     "lettering": lettering,
     "detail": detail,

@@ -14,6 +14,12 @@ around the object and around each run of its faces from spheres around the joint
 as a mesh's spheres do; skin() then blends the vertices of the objects whose matrices changed into world-space rows,
 which raster.transform() and the shadow kernels read in place of the mesh's own vertices (inst_src), placed by the
 identity. Objects whose matrices didn't change keep last frame's rows, so idle characters cost little.
+
+Morph targets (Mesh.morph_targets, blend shapes) move a mesh's vertices before its skin poses them: each vertex
+moved by each target's row times the object's weight for it (Object3D.morph_weights), in the same kernel, over the
+targets whose weight isn't 0. A morphing object without a skin is posed by a skin of its own (posing): one joint,
+itself, so it takes the same pass, its rows in the world; it is morphed again whenever it moves, as well as when its
+weights change.
 """
 import weakref
 from dataclasses import dataclass
@@ -24,7 +30,7 @@ from numba import njit, prange
 from .raster import VERTEX_CHUNK, _normal_matrix, stretch
 from .transforms import scene_poses
 
-__all__ = ["Skin"]
+__all__ = ["Skin", "posing"]
 
 CULL_MARGIN = 1.01  # a skinned object is left out where its sphere, this much larger, is wholly out of view
 
@@ -72,20 +78,20 @@ class Skin:
         with np.errstate(all="ignore"):
             return self.world_matrices(top) @ self.inverse_bind
 
-    def pose(self, mesh, top=None):
+    def pose(self, mesh, top=None, morph_weights=None):
         """(positions (V, 3), unit normals (V, 3)) of a skinned mesh's vertices in the world (with top, a node
-        above the joints: in its space), as this skin poses it now: what the renderer draws (worked out here in
-        numpy, rather than in its kernels). A normal blended to nothing stays 0."""
-        joints, weights = skin_arrays(mesh)
+        above the joints: in its space), as this skin poses it now, morphed first by morph_weights (see morphed):
+        what the renderer draws (worked out here in numpy, rather than in its kernels). A normal blended to nothing
+        stays 0."""
+        joints, weights = self._arrays(mesh)
         _check_joints(joints, self)
         with np.errstate(all="ignore"):
             m = self.palette(top)[:, :3, :]
             normal = _normal_matrices(m[:, :, :3])
             blend = np.einsum("vk,vkij->vij", weights, m[joints])
-            vertices = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3)
+            vertices, normals = morphed(mesh, morph_weights)
             positions = np.einsum("vij,vj->vi", blend[:, :, :3], vertices) + blend[:, :, 3]
-            normals = np.einsum("vij,vj->vi", np.einsum("vk,vkij->vij", weights, normal[joints]),
-                                mesh.vertex_normals())
+            normals = np.einsum("vij,vj->vi", np.einsum("vk,vkij->vij", weights, normal[joints]), normals)
             length = np.linalg.norm(normals, axis=1, keepdims=True)
             normals = np.where(length > 0.0, normals / np.where(length > 0.0, length, 1.0), normals)
         return positions, normals
@@ -93,6 +99,120 @@ class Skin:
     def remapped(self, joint):
         """A Skin on joint(j) for each of its joints j (sharing its inverse bind matrices): for Model.copy()."""
         return Skin([joint(j) for j in self.joints], self.inverse_bind)
+
+    def _arrays(self, mesh):
+        return skin_arrays(mesh)
+
+
+_BOUND_HERE = np.eye(4)[None]  # (every _Own's inverse bind matrices: one array, so joint_radii's cache holds)
+
+
+class _Own(Skin):
+    """What poses a morphing object that has no skin (see posing): one joint, the object itself, bound where it
+    stands (inverse bind matrix the identity), every vertex wholly on it; the mesh's own joints and weights, if it
+    has any, don't count."""
+
+    def __init__(self, obj):
+        super().__init__([obj], _BOUND_HERE)
+
+    def _arrays(self, mesh):
+        return rigid_arrays(mesh)
+
+    def remapped(self, joint):
+        return _Own(joint(self.joints[0]))
+
+
+def morphs(obj):
+    """Whether obj is morphed: its mesh has morph targets and it has weights for them (Object3D.morph_weights)."""
+    return getattr(obj, "morph_weights", None) is not None and getattr(obj.mesh, "morph_targets", None) is not None
+
+
+def posing(obj):
+    """The Skin posing obj's mesh: its own (Object3D.skin); for a morphing object without one (see morphs), a skin
+    of one joint, the object itself, kept on it (so a frame's plan sees the same one each time); else None."""
+    skin = getattr(obj, "skin", None)
+    if skin is not None or not morphs(obj):
+        return skin
+    own = obj.__dict__.get("_own_skin")
+    if own is None or own.joints[0] is not obj:  # (a copy.copy() of an object carries the original's)
+        own = obj._own_skin = _Own(obj)
+    return own
+
+
+def morph_arrays(mesh):
+    """A morphing mesh's targets as the kernel takes them, cached on the mesh until either array is replaced:
+    (position offsets (K * V, 3), normal offsets (K * V, 3) or None), target k's rows k * V to (k + 1) * V; numbers
+    that aren't finite as 0. Raises ValueError where they don't fit the mesh."""
+    cached = mesh.__dict__.get("_morph_arrays")
+    if (cached is not None and cached[0] is mesh.morph_targets and cached[1] is mesh.morph_normals
+            and cached[2] is mesh.vertices):
+        return cached[3]
+    mesh.check()
+    with np.errstate(all="ignore"):
+        deltas = np.array(mesh.morph_targets, dtype=np.float64).reshape(-1, 3)
+        deltas[~np.isfinite(deltas)] = 0.0
+        turns = None
+        if mesh.morph_normals is not None:
+            turns = np.array(mesh.morph_normals, dtype=np.float64).reshape(-1, 3)
+            turns[~np.isfinite(turns)] = 0.0
+    arrays = (np.ascontiguousarray(deltas), None if turns is None else np.ascontiguousarray(turns))
+    mesh._morph_arrays = (mesh.morph_targets, mesh.morph_normals, mesh.vertices, arrays)
+    return arrays
+
+
+def morph_reach(mesh, arrays, n_joints):
+    """How far each of a morphing mesh's targets (K) moves the vertices each joint (n_joints) moves, at most: (J, K),
+    0 for joints moving none. arrays: the mesh's (joints, weights) as skin_arrays gives them. Cached on the mesh for
+    each joints array."""
+    cache = mesh.__dict__.setdefault("_morph_reach", {})
+    joints, weights = arrays
+    deltas = morph_arrays(mesh)[0]
+    cached = cache.get(id(joints))
+    if cached is not None and cached[0] is joints and cached[1] is deltas and cached[2].shape[0] == n_joints:
+        return cached[2]
+    k = np.shape(mesh.morph_targets)[0]
+    with np.errstate(all="ignore"):
+        lengths = np.sqrt((deltas ** 2).sum(axis=1)).reshape(k, -1).T  # (V, K)
+    reach = np.zeros((n_joints, k))
+    for c in range(joints.shape[1]):
+        moved = weights[:, c] > 0.0
+        np.maximum.at(reach, joints[moved, c], lengths[moved])
+    if len(cache) > 8:
+        cache.clear()
+    cache[id(joints)] = (joints, deltas, reach)
+    return reach
+
+
+def morph_weights(mesh, weights):
+    """weights (an object's morph_weights) as a (K,) float64 array for mesh's K targets, numbers that aren't finite
+    as 0; None where there are none to morph by. Raises ValueError if there are more or fewer than K."""
+    if weights is None or mesh.morph_targets is None:
+        return None
+    w = np.array(weights, dtype=np.float64).reshape(-1)
+    k = np.shape(mesh.morph_targets)[0]
+    if len(w) != k:
+        raise ValueError(f"Object3D.morph_weights has {len(w)} weights for a mesh with {k} morph targets")
+    w[~np.isfinite(w)] = 0.0
+    return w
+
+
+def morphed(mesh, weights):
+    """(positions (V, 3), normals (V, 3)) of mesh's vertices in its own space, moved by its morph targets times
+    weights (see morph_weights), each target's in turn, as the kernel adds them (normals as given or worked out,
+    turned by morph_normals, not made unit length again)."""
+    vertices = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3)
+    normals = mesh.vertex_normals()
+    w = morph_weights(mesh, weights)
+    if w is None or not w.any():
+        return vertices, normals
+    deltas, turns = morph_arrays(mesh)
+    v = len(vertices)
+    vertices, normals = vertices.copy(), normals.copy()
+    for k in np.flatnonzero(w):
+        vertices += w[k] * deltas[k * v:(k + 1) * v]
+        if turns is not None:
+            normals += w[k] * turns[k * v:(k + 1) * v]
+    return vertices, normals
 
 
 def _normal_matrices(linear):
@@ -130,6 +250,21 @@ def skin_arrays(mesh, fresh=False):
     return joints, weights
 
 
+def rigid_arrays(mesh, fresh=False):
+    """(joints, weights) as skin_arrays gives them for a mesh posed by one joint (see _Own): every vertex wholly
+    on joint 0. Cached on the mesh while its vertices are the same array."""
+    cached = mesh.__dict__.get("_rigid_arrays")
+    if not fresh and cached is not None and cached[0] is mesh.vertices:
+        return cached[1]
+    mesh.check()
+    n = len(np.asarray(mesh.vertices).reshape(-1, 3))
+    weights = np.zeros((n, 4))
+    weights[:, 0] = 1.0
+    arrays = (np.zeros((n, 4), np.int64), weights)
+    mesh._rigid_arrays = (mesh.vertices, arrays)
+    return arrays
+
+
 def _check_joints(joints, skin):
     """Raise ValueError if a mesh's joint indices (as skin_arrays gives them) reach past the skin's joints."""
     most = int(joints.max()) if joints.size else -1
@@ -137,13 +272,13 @@ def _check_joints(joints, skin):
         raise ValueError(f"the mesh's vertices name joint {most}, but its skin has {len(skin.joints)} joints")
 
 
-def joint_radii(mesh, inverse_bind):
+def joint_radii(mesh, inverse_bind, arrays):
     """How far from each joint (J,) the vertices it moves reach, in the joint's own space (|inverse bind @ p|), -1
-    for joints moving none: each joint carries its vertices within that times its stretch of where it is. Cached on
-    the mesh for each inverse_bind array."""
+    for joints moving none: each joint carries its vertices within that times its stretch of where it is. arrays:
+    the mesh's (joints, weights), as skin_arrays gives them. Cached on the mesh for each inverse_bind array."""
     cache = mesh.__dict__.setdefault("_joint_radii", {})
     cached = cache.get(id(inverse_bind))
-    joints, weights = skin_arrays(mesh)
+    joints, weights = arrays
     if cached is not None and cached[0] is inverse_bind and cached[1] is joints:
         return cached[2]
     vertices = np.asarray(mesh.vertices, dtype=float).reshape(-1, 3)
@@ -161,6 +296,14 @@ def joint_radii(mesh, inverse_bind):
         cache.clear()
     cache[id(inverse_bind)] = (inverse_bind, joints, radius)
     return radius
+
+
+def stretches(inverse_bind):
+    """raster.stretch() of each of inverse_bind's (J, 4, 4) matrices' top left 3 x 3: how much each lengthens an
+    offset to a vertex (a morph target's) on its way into its joint's space."""
+    m = inverse_bind[:, :3, :3]
+    gram = np.abs(np.einsum("jki,jkl->jil", m, m))  # (|m^T m|, row sums as stretch() takes them)
+    return np.sqrt(gram.sum(axis=2).max(axis=1))
 
 
 def run_joints(joints, weights, run_vertex):
@@ -265,18 +408,34 @@ def joint_palette(linear, place, joint_row, inverse_bind, joint_radius, skin_joi
 
 
 @njit(cache=True, error_model="numpy", parallel=True)
-def skin(vertices, normals, joints, weights, palette, normal_palette, chunk_vertex, chunk_weight, chunk_joint,
-         chunk_row, chunk_count, out):
+def skin(vertices, normals, joints, weights, palette, normal_palette, deltas, turns, morph_row, morph_turn,
+         morph_weight, chunk_vertex, chunk_weight, chunk_joint, chunk_row, chunk_count, chunk_morph, chunk_morphs,
+         out):
     """Skinned vertices into out (2, S, 3: positions, normals, in the world), in parallel over chunks of vertices
     (each writes only its own rows). Chunk c blends chunk_count[c] vertices: those from row chunk_vertex[c] of
     vertices and normals (the pack's, in the mesh's own space), with their 4 joints and weights from row
     chunk_weight[c] of joints and weights (joints counted from palette row chunk_joint[c]), into out from row
-    chunk_row[c]. Each position is the sum over its joints of weight * palette[j] @ p, each normal the same with
-    normal_palette (normalized afterwards, by raster.transform)."""
+    chunk_row[c]. Each vertex is first morphed: moved by morph_weight[a] times row morph_row[a] + v of deltas, and
+    its normal by the same times row morph_turn[a] + v of turns (none where that is -1), for a from chunk_morph[c],
+    chunk_morphs[c] of them (rows for the chunk's first vertex). Each position is then the sum over its joints of
+    weight * palette[j] @ p, each normal the same with normal_palette (normalized afterwards, by raster.transform)."""
     for c in prange(chunk_count.shape[0]):
         v0, w0, j0, r0 = chunk_vertex[c], chunk_weight[c], chunk_joint[c], chunk_row[c]
+        a0, a1 = chunk_morph[c], chunk_morph[c] + chunk_morphs[c]
         for v in range(chunk_count[c]):
-            p, n = vertices[v0 + v], normals[v0 + v]
+            p0, p1, p2 = vertices[v0 + v, 0], vertices[v0 + v, 1], vertices[v0 + v, 2]
+            n0, n1, n2 = normals[v0 + v, 0], normals[v0 + v, 1], normals[v0 + v, 2]
+            for a in range(a0, a1):
+                f = morph_weight[a]
+                d = deltas[morph_row[a] + v]
+                p0 += f * d[0]
+                p1 += f * d[1]
+                p2 += f * d[2]
+                if morph_turn[a] >= 0:
+                    e = turns[morph_turn[a] + v]
+                    n0 += f * e[0]
+                    n1 += f * e[1]
+                    n2 += f * e[2]
             px = py = pz = nx = ny = nz = 0.0
             for k in range(4):
                 w = weights[w0 + v, k]
@@ -284,12 +443,12 @@ def skin(vertices, normals, joints, weights, palette, normal_palette, chunk_vert
                     continue
                 j = j0 + joints[w0 + v, k]
                 m, q = palette[j], normal_palette[j]
-                px += w * (m[0, 0] * p[0] + m[0, 1] * p[1] + m[0, 2] * p[2] + m[0, 3])
-                py += w * (m[1, 0] * p[0] + m[1, 1] * p[1] + m[1, 2] * p[2] + m[1, 3])
-                pz += w * (m[2, 0] * p[0] + m[2, 1] * p[1] + m[2, 2] * p[2] + m[2, 3])
-                nx += w * (q[0, 0] * n[0] + q[0, 1] * n[1] + q[0, 2] * n[2])
-                ny += w * (q[1, 0] * n[0] + q[1, 1] * n[1] + q[1, 2] * n[2])
-                nz += w * (q[2, 0] * n[0] + q[2, 1] * n[1] + q[2, 2] * n[2])
+                px += w * (m[0, 0] * p0 + m[0, 1] * p1 + m[0, 2] * p2 + m[0, 3])
+                py += w * (m[1, 0] * p0 + m[1, 1] * p1 + m[1, 2] * p2 + m[1, 3])
+                pz += w * (m[2, 0] * p0 + m[2, 1] * p1 + m[2, 2] * p2 + m[2, 3])
+                nx += w * (q[0, 0] * n0 + q[0, 1] * n1 + q[0, 2] * n2)
+                ny += w * (q[1, 0] * n0 + q[1, 1] * n1 + q[1, 2] * n2)
+                nz += w * (q[2, 0] * n0 + q[2, 1] * n1 + q[2, 2] * n2)
             a, b = out[0, r0 + v], out[1, r0 + v]
             a[0], a[1], a[2] = px, py, pz
             b[0], b[1], b[2] = nx, ny, nz
@@ -301,7 +460,7 @@ class _Plan:
     """What stays the same while the same skinned objects show the same meshes with the same skins: their joints in
     one list (for scene_poses), and the arrays joint_palette() and skin() take, but for the poses."""
 
-    def __init__(self, key, objects, skins, meshes, runs_of, prepared):
+    def __init__(self, key, objects, skins, meshes, morphing, runs_of, prepared):
         self.key = key
         self.objects = objects
         s_count = len(objects)
@@ -316,24 +475,48 @@ class _Plan:
         self.skin_runs = np.zeros((s_count, 2), np.int64)
         self.vertices = np.zeros(s_count, np.int64)
         radii, total, n_runs = [], 0, 0
+        # Morph targets: each morphing mesh's offsets once, end to end; each object's (first row of its mesh's
+        # offsets, of their normals' or -1, its vertices), or -1s for those that don't morph.
+        morph_at, deltas, turns, reaches, n_deltas, n_turns = {}, [], [], [], 0, 0
+        self.morph = np.full((s_count, 3), -1, np.int64)
+        self.reach = [None] * s_count  # (morph_reach of those that morph)
         for s, (skin_, mesh) in enumerate(zip(skins, meshes)):
-            joints, weights = skin_arrays(mesh, fresh=mesh not in prepared)  # (afresh once after invalidate())
+            fresh = mesh not in prepared  # (afresh once after invalidate())
+            rigid = isinstance(skin_, _Own)  # (the mesh's joints and weights don't count: by mesh and rigid below)
+            joints, weights = (rigid_arrays if rigid else skin_arrays)(mesh, fresh=fresh)
+            if morphing[s]:
+                if fresh:
+                    mesh.__dict__.pop("_morph_arrays", None)
+                if id(mesh) not in morph_at:
+                    d, t = morph_arrays(mesh)
+                    morph_at[id(mesh)] = (n_deltas, -1 if t is None else n_turns)
+                    deltas.append(d)
+                    n_deltas += len(d)
+                    if t is not None:
+                        turns.append(t)
+                        n_turns += len(t)
+                row, turn = morph_at[id(mesh)]
+                self.morph[s] = row, turn, len(joints)
+                self.reach[s] = morph_reach(mesh, (joints, weights), len(skin_.joints))
             prepared.add(mesh)
             _check_joints(joints, skin_)
-            if id(mesh) not in weight_at:
-                weight_at[id(mesh)] = total
+            if (id(mesh), rigid) not in weight_at:
+                weight_at[id(mesh), rigid] = total
                 arrays.append((joints, weights))
                 total += len(joints)
-            if id(mesh) not in run_at:
+            if (id(mesh), rigid) not in run_at:
                 first, listed = run_joints(joints, weights, runs_of(mesh))
-                run_at[id(mesh)] = (n_runs, len(first) - 1)
+                run_at[id(mesh), rigid] = (n_runs, len(first) - 1)
                 run_lists.append((first, listed))
                 n_runs += len(first) - 1
-            self.skin_weight[s] = weight_at[id(mesh)]
-            self.skin_runs[s] = run_at[id(mesh)]
+            self.skin_weight[s] = weight_at[id(mesh), rigid]
+            self.skin_runs[s] = run_at[id(mesh), rigid]
             self.vertices[s] = len(joints)
-            radii.append(joint_radii(mesh, skin_.inverse_bind))
+            radii.append(joint_radii(mesh, skin_.inverse_bind, (joints, weights)))
         self.joint_radius = np.ascontiguousarray(np.concatenate(radii) if radii else np.zeros(0), np.float64)
+        self.deltas = np.ascontiguousarray(np.concatenate(deltas) if deltas else np.zeros((0, 3)), np.float64)
+        self.turns = np.ascontiguousarray(np.concatenate(turns) if turns else np.zeros((0, 3)), np.float64)
+        self.joint_stretch = stretches(np.concatenate([skin.inverse_bind for skin in skins])) if morph_at else None
         self.weight_joints = np.ascontiguousarray(np.concatenate([a[0] for a in arrays]).reshape(-1, 4), np.int64)
         self.weights = np.ascontiguousarray(np.concatenate([a[1] for a in arrays]).reshape(-1, 4), np.float64)
         # Every mesh's run lists end to end: run q's joints are run_list[run_first[q]:run_first[q + 1]].
@@ -381,20 +564,23 @@ class SkinPass:
         self._frame = None  # (palette, normal palette, bounds, flip) of the last pose()
         self._prepared = weakref.WeakSet()  # the meshes whose skin_arrays were worked out afresh for this pass
 
-    def pose(self, nodes, skins, meshes, runs_of, cull=None):
-        """For the objects `nodes` (rows of the instances; skins and meshes: each one's Skin, None if it has none,
-        and Mesh): (each row's place among the skinned objects (N,), -1 for the rest; which rows to leave out (N,)
-        bool, or None for none). runs_of(mesh): the vertices each run of a mesh's faces uses (renderer._runs).
+    def pose(self, nodes, skins, meshes, morphs, runs_of, cull=None):
+        """For the objects `nodes` (rows of the instances; skins, meshes and morphs: each one's Skin (posing()),
+        None if it has none, Mesh, and morph_weights): (each row's place among the skinned objects (N,), -1 for the
+        rest; which rows to leave out (N,) bool, or None for none). runs_of(mesh): the vertices each run of a mesh's
+        faces uses (renderer._runs).
         cull: None, or (planes (6, 4): the camera's view, each kept where a x + b y + c z + d >= 0; positions (L, 3)
         and ranges (L,) of the lights whose shadows an object out of view may cast): skinned objects wholly out of
         view and out of reach of those lights are left out, before they are skinned."""
         rows = [k for k, s in enumerate(skins) if s is not None]
-        key = [x for k in rows for x in (nodes[k], skins[k], *_skin_key(meshes[k]), skins[k].inverse_bind,
-                                         *skins[k].joints, None)]
+        weights = [morph_weights(meshes[k], morphs[k]) for k in rows]
+        morphing = [w is not None for w in weights]
+        key = [x for k, m in zip(rows, morphing) for x in (nodes[k], skins[k], *_skin_key(meshes[k]), m,
+                                                            skins[k].inverse_bind, *skins[k].joints, None)]
         plan = self._plan
         if plan is None or not (len(plan.key) == len(key) and all(map(_is, plan.key, key))):
             plan = self._plan = _Plan(key, [nodes[k] for k in rows], [skins[k] for k in rows],
-                                      [meshes[k] for k in rows], runs_of, self._prepared)
+                                      [meshes[k] for k in rows], morphing, runs_of, self._prepared)
             self._allot(plan)
         poses, linear, place, _ = scene_poses(plan.joints, memo=self._memo)
         if plan.joint_row is None or plan.order is not self._memo.get("order"):
@@ -404,7 +590,14 @@ class SkinPass:
         palette, normal_palette = np.empty((n_joints, 3, 4)), np.empty((n_joints, 3, 3))
         bounds = np.empty((plan.n_bounds, 4))
         flip, finite = np.empty(n_skins, np.bool_), np.empty(n_skins, np.bool_)
-        joint_palette(linear, place, plan.joint_row, plan.inverse_bind, plan.joint_radius, plan.skin_joint,
+        radius = plan.joint_radius
+        if plan.joint_stretch is not None:  # (morph targets carry each joint's vertices further: by their offsets)
+            radius = radius.copy()
+            for s, (w, reach) in enumerate(zip(weights, plan.reach)):
+                if w is not None:
+                    j0, j1 = plan.skin_joint[s], plan.skin_joint[s + 1]
+                    radius[j0:j1] += (reach @ np.abs(w)) * plan.joint_stretch[j0:j1] * (radius[j0:j1] >= 0.0)
+        joint_palette(linear, place, plan.joint_row, plan.inverse_bind, radius, plan.skin_joint,
                       plan.skin_runs, plan.run_first, plan.run_list, plan.skin_bound, palette, normal_palette, bounds,
                       flip, finite)
         out = ~finite
@@ -417,7 +610,7 @@ class SkinPass:
                     gap = np.linalg.norm(spheres[None, :, :3] - positions[:, None, :], axis=2) - spheres[None, :, 3]
                     outside &= ~(gap < CULL_MARGIN * ranges[:, None]).any(axis=0)
             out |= outside
-        self._frame = (palette, normal_palette, bounds, flip)
+        self._frame = (palette, normal_palette, bounds, flip, weights)
         skin_of = np.full(len(nodes), -1, np.int64)
         skin_of[rows] = np.arange(n_skins)
         return skin_of, (None if not out.any() else np.isin(skin_of, np.flatnonzero(out)))
@@ -456,12 +649,13 @@ class SkinPass:
         serial (K,): a number that changes whenever its rows do, and whether it is drawn inside out (K,); the store
         (2, S, 3), the bounds (B, 4)): what raster.transform() takes as inst_src, inst_bound, skinned and bounds."""
         plan = self._plan
-        palette, normal_palette, bounds, flip = self._frame
-        chunks, row_of = [], {s: k for k, s in enumerate(skin_of.tolist())}
+        palette, normal_palette, bounds, flip, weights = self._frame
+        chunks, row_of, morphs, n_morphs = [], {s: k for k, s in enumerate(skin_of.tolist())}, [], 0
         for s in row_of:
             slot = self._slots[id(plan.objects[s])]
             j0, j1 = plan.skin_joint[s], plan.skin_joint[s + 1]
-            key = palette[j0:j1].tobytes() + flip[s].tobytes()
+            w = weights[s]
+            key = palette[j0:j1].tobytes() + flip[s].tobytes() + (b"" if w is None else w.tobytes())
             if slot.key is not None and slot.key == key:
                 continue
             slot.key = key
@@ -471,12 +665,28 @@ class SkinPass:
             first = int(pack["mesh_vertex"][m])
             if int(pack["mesh_vertex"][m + 1]) - first != slot.count:
                 raise ValueError("a skinned mesh's vertices changed in place (call Renderer.invalidate())")
-            for c in range(0, slot.count, VERTEX_CHUNK):
-                chunks.append((first + c, plan.skin_weight[s] + c, j0, slot.start + c, min(VERTEX_CHUNK, slot.count - c)))
+            active = np.flatnonzero(w) if w is not None else ()
+            starts = range(0, slot.count, VERTEX_CHUNK)
+            if len(active):  # (the targets it is morphed by: rows for each chunk's first vertex)
+                row, turn, n = plan.morph[s]
+                at = n * active[None, :] + np.array(starts)[:, None]
+                morphs.append((row + at, np.full(at.shape, -1) if turn < 0 else turn + at,
+                               np.broadcast_to(w[active], at.shape)))
+            for c in starts:
+                chunks.append((first + c, plan.skin_weight[s] + c, j0, slot.start + c, min(VERTEX_CHUNK, slot.count - c),
+                               n_morphs, len(active)))
+                n_morphs += len(active)
         if chunks:
             c = np.array(chunks, np.int64)
+            if morphs:
+                rows, turns, factors = (np.concatenate([m[i].reshape(-1) for m in morphs]) for i in range(3))
+            else:
+                rows = turns = np.zeros(0, np.int64)
+                factors = np.zeros(0)
             skin(pack["vertices"], pack["normals"], plan.weight_joints, plan.weights, palette, normal_palette,
-                 c[:, 0].copy(), c[:, 1].copy(), c[:, 2].copy(), c[:, 3].copy(), c[:, 4].copy(), self._store)
+                 plan.deltas, plan.turns, rows.astype(np.int64), turns.astype(np.int64), factors.astype(np.float64),
+                 c[:, 0].copy(), c[:, 1].copy(), c[:, 2].copy(), c[:, 3].copy(), c[:, 4].copy(), c[:, 5].copy(),
+                 c[:, 6].copy(), self._store)
         slots = [self._slots[id(plan.objects[s])] for s in skin_of.tolist()]
         start = np.array([slot.start for slot in slots], np.int64)
         serial = np.array([slot.serial for slot in slots], np.int64)
@@ -485,7 +695,8 @@ class SkinPass:
 
 def _skin_key(mesh):
     """What a mesh's skinned rows depend on but the pose, compared by identity: the mesh and its arrays."""
-    return mesh, mesh.vertices, mesh.faces, mesh.normals, mesh.joints, mesh.weights
+    return mesh, mesh.vertices, mesh.faces, mesh.normals, mesh.joints, mesh.weights, mesh.morph_targets, \
+        mesh.morph_normals
 
 
 def _is(a, b):

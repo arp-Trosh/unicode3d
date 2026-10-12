@@ -36,6 +36,11 @@ class Mesh:
     joints: np.ndarray | None = None         # (V, 4) ints: the joints moving each vertex, of the Skin of the object
                                              # showing it (Object3D.skin; see skinning.py), as its skin numbers them
     weights: np.ndarray | None = None        # (V, 4) how much each of those moves it (scaled to add up to 1)
+    morph_targets: np.ndarray | None = None  # (K, V, 3) morph targets (blend shapes): how far each moves each
+                                             # vertex at its full weight (Object3D.morph_weights: how much of each
+                                             # is drawn; see skinning.py), before any skin poses it
+    morph_normals: np.ndarray | None = None  # (K, V, 3) how far each turns each vertex's normal (None: normals
+                                             # stay the mesh's own however it morphs)
 
     def vertex_normals(self):
         """The unit normal at each vertex (V, 3): `normals` where given, otherwise the area-weighted average of the
@@ -150,6 +155,14 @@ class Mesh:
                                  f"vertex, not {joints.shape} and {weights.shape}")
             if not (np.issubdtype(joints.dtype, np.integer) or not joints.size) or (joints.size and joints.min() < 0):
                 raise ValueError(f"Mesh.joints must be whole numbers from 0, not {joints.dtype}")
+        if self.morph_targets is not None:
+            targets = np.shape(self.morph_targets)
+            if len(targets) != 3 or targets[1:] != (n_vertices, 3):
+                raise ValueError(f"Mesh.morph_targets must be (K, {n_vertices}, 3), a row for each vertex in each "
+                                 f"target, not {targets}")
+            if self.morph_normals is not None and np.shape(self.morph_normals) != targets:
+                raise ValueError(f"Mesh.morph_normals must be {targets}, as Mesh.morph_targets, not "
+                                 f"{np.shape(self.morph_normals)}")
 
     def mipmaps(self, material):
         """Mipmap chain of textures[material], built on first use and rebuilt if the texture is replaced. Meshes
@@ -169,8 +182,9 @@ class Mesh:
         lo, hi = self.vertices.min(axis=0), self.vertices.max(axis=0)
         extent = float((hi - lo).max()) or 1.0
         verts = (self.vertices - (lo + hi) / 2.0) * (size / extent)
+        targets = None if self.morph_targets is None else np.asarray(self.morph_targets, float) * (size / extent)
         return Mesh(verts, self.faces, self.uvs, self.materials, self.textures, self.vertex_colors, self.face_colors,
-                    self.normals, self.joints, self.weights)
+                    self.normals, self.joints, self.weights, targets, self.morph_normals)
 
 
 def load_obj(path, **options):

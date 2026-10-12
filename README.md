@@ -881,6 +881,35 @@ posed. A skinned object is never simplified (`Renderer.simplify`) nor a mirror, 
 </details>
 
 <details>
+<summary><h3 id="morph-targets">Morph targets</h3></summary>
+
+Morph targets (blend shapes) change a mesh's shape by degrees: a face that smiles or blinks, a
+muscle that bulges, a flag that ripples. Each target moves each vertex by an offset at its full
+weight; the object's `morph_weights` say how much of each to draw (0 none, 1 all of it; further, or
+negative, go on past it or the other way), and the offsets of all of them are added together:
+
+```python
+from unicode3d import Animation, Clip, Mesh, Object3D, Track
+
+face = Mesh(vertices, faces, morph_targets=np.stack([smile, blink]))  # each (V, 3): how far each vertex moves
+head = Object3D(face, morph_weights=np.zeros(2))
+head.morph_weights[1] = 1.0   # eyes shut (changed in place, or replaced)
+wink = Clip([Animation(head, morph_weights=Track([(0.0, (0, 0)), (0.2, (0, 1)), (0.4, (0, 0))]))])
+```
+
+`Mesh.morph_normals` (the same shape, optional) turns the normals with each target; without it the
+normals stay the mesh's own. A morph happens before any skin poses the mesh, so a skinned face can
+smile while its head turns. A morphing object is drawn as a skinned one is: once a frame for every
+pass, and only again when its weights (or its pose) change; one without a skin is posed by its own
+position, rotation and scale, as any object, and morphed again whenever it moves. `morph_weights`
+None (the default) draws the mesh as it is; more or fewer weights than targets raise `ValueError`,
+and weights that aren't finite count as 0. `world_bounds()`, `model.bounds()` and `model.bake()`
+take it as morphed; ray and overlap queries (`Colliders`) see the mesh unmorphed. A morphing object
+is never simplified nor a mirror.
+
+</details>
+
+<details>
 <summary><h3 id="colours">Colours</h3></summary>
 
 `Object3D.color` takes a named `Color` or an `(r, g, b)` triple (0..255 ints or 0..1 floats). A mesh
@@ -1132,9 +1161,11 @@ colour fades surfaces into it.
 - `SplineTrack(keys, loop="once", rotation=False)` curves through keyframes `(time, value,
   in_tangent, out_tangent)` (cubic Hermite splines, as glTF animations use); `rotation=True` for
   quaternions.
-- `Animation(obj, position=None, rotation=None, scale=None, speed=1)` moves an `Object3D` or `Node`
-  along tracks: call `anim.update(dt)` every frame (it returns whether it is still playing), or
-  `anim.apply(t)` for a time of your own.
+- `Animation(obj, position=None, rotation=None, scale=None, speed=1, morph_weights=None)` moves an
+  `Object3D` or `Node` along tracks (`morph_weights`: a `Track` or `SplineTrack` of an object's
+  [morph weights](#morph-targets), as many numbers a keyframe as its mesh has targets): call
+  `anim.update(dt)` every frame (it returns whether it is still playing), or `anim.apply(t)` for a
+  time of your own.
 - `Clip(animations, name="", loop="once", speed=1)` plays several `Animation`s on one clock, from 0
   to the end of the longest, and does the looping for them all (`"once"`, `"loop"`, `"pingpong"`):
   a loaded glTF model's animations are clips, and they group your own as well. It has `update(dt)`,

@@ -24,7 +24,7 @@ from .raster import (ATTRS, CLEAR, CUT, FACE_CHUNK, ROW_BAND, RUN_CELLS, RUN_LEA
                      rasterize_pixels, transform, upscale, work_plan, NO_BOUNDS, NO_CLIP, NO_SKINNED)
 from .shading import blend, post_effects, resolve, resolve_cells
 from .shadows import SHADOW_FITS, ShadowMaps
-from .skinning import SkinPass
+from .skinning import SkinPass, posing
 from .sprites import SheetCell
 from .texture import alpha_kind, pack as pack_textures
 from .threads import kernel_lock
@@ -78,7 +78,7 @@ def _same(a, b):
 
 _object_attrs = operator.attrgetter("mesh", "opacity", "color", "simplify", "double_sided", "emissive",
                                     "cast_shadows", "reflectivity", "specular", "shininess",
-                                    "billboard", "outline", "skin")  # (see _instances)
+                                    "billboard", "outline", "skin", "morph_weights")  # (see _instances)
 
 
 def _numbers(values):
@@ -776,10 +776,10 @@ class Renderer(ShadowMaps, Mirrors):
         """The objects to draw, as arrays: their meshes' place in the pack, world poses (linear (3, 3) and
         position), colours, materials, flags and ids (render-list index + 1). Packs the meshes afresh if the set
         of meshes has changed. With a camera and simplify on, each object's mesh is the level of detail (see
-        _detail) it is drawn with. Skinned objects (Object3D.skin) are skinned (skinning.SkinPass): placed by the
-        identity, their vertices from rows of inst["skin"][0] (src), their bounds rows of inst["skin"][1] (bound);
-        given the lights too, those that can't be seen nor cast a shadow seen are left out first (see
-        _skin_culling)."""
+        _detail) it is drawn with. Skinned objects (Object3D.skin), and morphing ones (Object3D.morph_weights), are
+        skinned (skinning.SkinPass): placed by the identity, their vertices from rows of inst["skin"][0] (src), their
+        bounds rows of inst["skin"][1] (bound); given the lights too, those that can't be seen nor cast a shadow seen
+        are left out first (see _skin_culling)."""
         # Everything read from each object, in one pass (_object_attrs). Wholly clear objects, or with a NaN
         # opacity, have nothing to draw, nor any shadow.
         attrs = list(map(_object_attrs, objects))
@@ -810,18 +810,22 @@ class Renderer(ShadowMaps, Mirrors):
             attrs = [attrs[k] for k in keep]
             nodes = [nodes[k] for k in keep]
             ident = np.array(candidates, np.int32)[keep] + 1
-        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined, skin = zip(*attrs)
+        on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined, skin, morph = \
+            zip(*attrs)
+        if any(w is not None for w in morph):  # (morphing objects without a skin are posed by one of their own)
+            skin = tuple(map(posing, nodes))
         skin_of = None  # (each row's place among the skinned objects, -1 for the rest; None if there are none)
         if skin.count(None) != len(skin):
-            skin_of, out = self._skins.pose(nodes, skin, on, _run_vertex, self._skin_culling(camera, lights, shine))
+            skin_of, out = self._skins.pose(nodes, skin, on, morph, _run_vertex,
+                                            self._skin_culling(camera, lights, shine))
             if out is not None:  # (culled, or a joint's pose isn't finite)
                 keep = np.flatnonzero(~out)
                 if not len(keep):
                     return None
                 nodes, attrs = [nodes[k] for k in keep], [attrs[k] for k in keep]
                 linear, where, ident, skin_of = linear[keep], where[keep], ident[keep], skin_of[keep]
-                on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined, skin = \
-                    zip(*attrs)
+                on, alpha, colors, simplify, double, emissive, cast, shine, spec, shiny, billboard, outlined, skin, \
+                    morph = zip(*attrs)
         last = memo.get("meshes")
         if last is not None and _same(last[0], on):  # (the same meshes on the same objects: the same indices)
             meshes, mesh_idx, sprites = last[1], last[2], last[3]

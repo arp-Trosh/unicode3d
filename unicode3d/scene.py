@@ -19,7 +19,7 @@ from .texture import alpha_kind
 from .lines import Lines
 from .particles import Particles
 from .renderer import Anchor, Pick, Renderer
-from .skinning import Skin
+from .skinning import Skin, posing
 from .sprites import SpriteSheet
 from .transforms import look_at, quat_from_matrix, quat_identity, quat_mul, place_boxes, quat_to_matrix, scale3, scene_poses, world_matrix
 
@@ -203,6 +203,12 @@ class Object3D(_Placed):
                           # count (its visibility does, its joints' doesn't). Ray and overlap queries (Colliders) see
                           # its mesh as it is (the pose it was bound in), placed by the object; world_bounds() the
                           # pose drawn. Never a mirror, nor simplified (Renderer.simplify), and billboard is ignored
+    morph_weights: object = None  # how much of each of its mesh's morph targets (Mesh.morph_targets) is drawn: K
+                                  # numbers (0: none of it, 1: all; others go on as far, or the other way), changed
+                                  # in place or replaced (Animation(morph_weights=...) does); None draws the mesh as it
+                                  # is. A morphing object is drawn as a skinned one is (skinning.py), posed by itself
+                                  # if it has no skin: never a mirror nor simplified, and Colliders see its mesh
+                                  # unmorphed
 
     def world_bounds(self):
         """The corners (low (3,), high (3,)) of the box around the object's mesh as it stands in the world, through
@@ -289,7 +295,7 @@ def _placed_mesh(part, linear, position, posed=None):
     """A copy of the part's mesh moved by linear and position (p -> linear @ p + position), its normals turned to
     match and its faces wound the other way where linear mirrors (as the renderer draws such a part), with the
     part's colour multiplied into the mesh's colours (in linear light, as drawing does). posed: instead, (positions,
-    normals, flip) of a skinned part's vertices as its skin poses them (flip: its joints mirror it, on the whole)."""
+    normals, flip) of a skinned or morphing part's vertices as posed (flip: its joints mirror it, on the whole)."""
     mesh = part.mesh
     faces = np.asarray(mesh.faces, np.int64).reshape(-1, 3)
     if posed is not None:
@@ -390,6 +396,8 @@ class Model:
                     twin.parent = clone(node.parent)
                 if getattr(node, "skin", None) is not None:  # (its joints in the copy, those outside it shared)
                     twin.skin = node.skin.remapped(clone)
+                if getattr(node, "morph_weights", None) is not None:
+                    twin.morph_weights = np.array(node.morph_weights, dtype=float)
             return made[id(node)]
 
         animations = {}
@@ -413,7 +421,8 @@ class Model:
         (merge_meshes: textures and normals kept, each part's colour multiplied into its mesh's colours), and
         those that can't merge (see-through, with holes in their textures, or reflective) each moved into a mesh
         of its own. Hidden parts are left out; skinned parts are baked as their skins pose them now (a still of a
-        character), each vertex where it is drawn; it has no nodes or animations (its parts no longer move apart).
+        character), each vertex where it is drawn, and morphing parts as morphed now; it has no nodes or animations
+        (its parts no longer move apart).
         This model is left as it is; copy() the result for more of it."""
         parts = [o for o in self.objects if o.mesh is not None and len(o.mesh.faces)]
         rows, linear, position, visible = scene_poses(parts, top=self.root)
@@ -421,10 +430,11 @@ class Model:
         for part in parts:
             r = rows[id(part)]
             posed = None
-            if getattr(part, "skin", None) is not None:  # (placed by its joints, not by its own pose)
+            skin = posing(part)
+            if skin is not None:  # (placed by its joints, not by its own pose; morphed)
                 with np.errstate(all="ignore"):
-                    vertices, normals = part.skin.pose(part.mesh, top=self.root)
-                    flip = bool(np.linalg.det(part.skin.palette(top=self.root)[:, :3, :3]).sum() < 0.0)
+                    vertices, normals = skin.pose(part.mesh, top=self.root, morph_weights=part.morph_weights)
+                    flip = bool(np.linalg.det(skin.palette(top=self.root)[:, :3, :3]).sum() < 0.0)
                 posed = (vertices, normals, flip)
                 if not (visible[r] and np.isfinite(vertices).all()):
                     continue
@@ -466,8 +476,9 @@ class Model:
     def _bounds(self):
         lo, hi = np.full(3, np.inf), np.full(3, -np.inf)
         for obj in self.objects:
-            if getattr(obj, "skin", None) is not None:  # (as its skin poses it)
-                v = obj.skin.pose(obj.mesh, top=self.root)[0]
+            skin = posing(obj)
+            if skin is not None:  # (as its skin poses it, morphed)
+                v = skin.pose(obj.mesh, top=self.root, morph_weights=obj.morph_weights)[0]
                 v = v[np.isfinite(v).all(axis=1)]
                 if len(v):
                     lo, hi = np.minimum(lo, v.min(axis=0)), np.maximum(hi, v.max(axis=0))
@@ -501,9 +512,9 @@ class Model:
 
 
 def _skinned_box(part):
-    """The box (low, high) around a skinned part as its skin poses it; None if there is nothing finite to box."""
+    """The box (low, high) around a skinned or morphing part as posed; None if there is nothing finite to box."""
     with np.errstate(all="ignore"):
-        points = part.skin.pose(part.mesh)[0]
+        points = posing(part).pose(part.mesh, morph_weights=part.morph_weights)[0]
     points = points[np.isfinite(points).all(axis=1)]
     if not len(points):
         return None
@@ -512,15 +523,15 @@ def _skinned_box(part):
 
 def union_bounds(objects):
     """The corners (low (3,), high (3,)) of the box around several objects (Object3Ds or Models) as they stand in
-    the world (skinned ones as their skins pose them); None if there is nothing to box. Particles and Lines are left
-    out."""
+    the world (skinned ones as their skins pose them, morphing ones morphed); None if there is nothing to box.
+    Particles and Lines are left out."""
     parts = [part for obj in objects for part in ([obj] if hasattr(obj, "mesh") else obj)]
     parts = [part for part in parts if type(part) not in (Particles, Lines) and len(_finite_vertices(part.mesh))]
-    skinned = [part for part in parts if getattr(part, "skin", None) is not None]
+    skinned = [part for part in parts if posing(part) is not None]
     if skinned:
         boxes = [_skinned_box(part) for part in skinned]
         boxes = [box for box in boxes if box is not None]
-        rest = [part for part in parts if getattr(part, "skin", None) is None]
+        rest = [part for part in parts if posing(part) is None]
         box = union_bounds(rest) if rest else None
         if box is not None:
             boxes.append(box)

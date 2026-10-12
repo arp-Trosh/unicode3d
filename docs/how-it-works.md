@@ -324,6 +324,12 @@ rows instead of the mesh's own, placed by the identity. The mesh stays packed on
 character showing it, and a character whose joints' matrices haven't changed to the bit keeps last
 frame's rows, so a crowd standing idle costs no skinning at all.
 
+Morph targets (a face's smile, a blink) are a step before the blend in the same kernel: each vertex is
+first moved by the offsets of the targets whose weight isn't 0, then skinned. A morphing mesh without a
+skeleton takes the same path, as if skinned to one joint, itself. Its bounding sphere widens by what the
+targets can add: for each joint, the longest offset each target gives the vertices it moves, times that
+target's weight. Weights go into the comparison too, so a face holding still costs nothing.
+
 ## Orthographic views
 
 An orthographic camera (isometric and top-down games, board games) shows things the same size however far

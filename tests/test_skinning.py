@@ -100,7 +100,7 @@ class SkinningTests(unittest.TestCase):
             serial = renderer._instances([obj, other], CAMERA)["serial"]
             self.assertNotEqual(serial[0], first[0])
             self.assertEqual(serial[1], first[1])
-            self.assertEqual(kernel.call_args.args[6].shape[0], -(-len(obj.mesh.vertices) // 256))  # (its chunks)
+            self.assertEqual(kernel.call_args.args[11].shape[0], -(-len(obj.mesh.vertices) // 256))  # (its chunks)
 
     def test_bounds_hold_every_vertex_in_any_pose(self):
         mesh = tube_mesh(bones=4, rings=10, segments=16)  # (1280 faces: runs of their own)

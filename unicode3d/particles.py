@@ -74,7 +74,7 @@ class Particles:
     billboard = False  # (Object3D's: a Particles faces the camera with face_camera)
     reflectivity = 0.0
     simplify = False
-    skin = None
+    skin = morph_weights = None
 
     def __init__(self, mesh=None, face_camera=False, gravity=(0.0, 0.0, 0.0), drag=0.0, ground=None, bounce=0.3,
                  friction=0.6, limit=10000, emissive=0.0, cast_shadows=False, opacity=1.0, color=(255, 255, 255),

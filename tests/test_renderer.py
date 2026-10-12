@@ -382,6 +382,12 @@ class RenderTests(unittest.TestCase):
         figures = [figure(tube_mesh(4, rings=10, segments=16), bones=4, position=(-0.8, -1.0, 0.0), bend=0.4)[0],
                    figure(position=(0.6, -1.0, 0.3), bend=-0.6)[0], figure(position=(0.0, -1.0, -0.8), bend=0.9)[0]]
         figures[2].skin.joints[0].scale = (-1.0, 0.8, 1.0)
+        bulge = tube_mesh(4, rings=10, segments=16)  # (and morphed: one skinned, one posed by itself)
+        bulge.morph_targets = np.stack([bulge.vertices * (0.3, 0.0, 0.3),
+                                        np.tile((0.1, 0.0, 0.0), (len(bulge.vertices), 1))])
+        figures[0].mesh = bulge
+        figures[0].morph_weights = [0.8, -0.5]
+        figures.append(Object3D(bulge, position=np.array([1.2, -1.0, -0.5]), scale=0.4, morph_weights=[1.2, 0.3]))
         scenes.append(([*crowd[:12], *figures], shadowed))
         ortho = Camera(position=np.array([3.0, 3.0, 4.0]), target=np.zeros(3), projection="ortho", size=4.0)
 

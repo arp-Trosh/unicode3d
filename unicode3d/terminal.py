@@ -526,7 +526,9 @@ def compile_kernels():
     bent.weights = np.tile([0.5, 0.5, 0.0, 0.0], (len(bent.vertices), 1))
     bones = [Node(position=np.array([0.0, 1.5, 0.0]))]
     bones.append(Node(position=np.array([0.0, 0.5, 0.0]), parent=bones[0]))
-    objects += [Object3D(bent, skin=Skin(bones))]
+    bent.morph_targets = np.zeros((1, len(bent.vertices), 3))  # (and morphed, by a target that moves it up)
+    bent.morph_targets[0, :, 1] = 0.2
+    objects += [Object3D(bent, skin=Skin(bones), morph_weights=[0.5])]
     mirror = Mesh(np.array([(-2, -1, -1), (2, -1, -1), (2, 1, -1), (-2, 1, -1)], float),
                   np.array([(0, 1, 2), (0, 2, 3)]))
     objects += [Object3D(mirror, reflectivity=0.8), Object3D(make_box(), position=np.array([0.0, -1.0, 0.0]),
