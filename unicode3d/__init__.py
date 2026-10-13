@@ -28,6 +28,16 @@ from .terminal import Screen, add_display_args, compile_kernels, display_options
 from .texture import load_image
 from .ui import Button, Choice, DisplayControls, Panel, Slider, Toggle
 
+
+
+def __getattr__(name):
+    """Playtest, imported when first asked for (so that python -m unicode3d.playtest doesn't import it twice)."""
+    if name == "Playtest":
+        from .playtest import Playtest
+        return Playtest
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 from .kernel_cache import refresh as _refresh_kernel_cache
 
 _refresh_kernel_cache()  # drop cached kernels that were compiled with helpers since changed (see kernel_cache.py)
