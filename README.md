@@ -379,7 +379,8 @@ between frames:
 object (its index in the render list plus one) covers each pixel. `renderer.project(point)` gives
 the cell a world point landed on (see [Labels](#labels) for text placed there). An unchanged scene isn't drawn again:
 `render()` hands back the last frame, and `renderer.draws` counts only the renders that rasterized.
-After editing a mesh's arrays in place, call `renderer.invalidate()`.
+After editing a mesh's arrays in place, call `renderer.invalidate()` (a playtest, `unicode3d.playtest`,
+warns of an edit made without it).
 
 </details>
 
@@ -489,7 +490,7 @@ Each mesh gets a bounding volume hierarchy, a tree of boxes around its triangles
 time a set holding it updates (0.07 s for 140,000 triangles) and shared by every object and set
 that uses the mesh, so a big level is indexed once. A query then costs about 10 µs from Python,
 and `update()` about 7 µs an object. After editing a mesh's arrays in place, call
-`colliders.invalidate()`. An object with a pose that isn't finite, or scaled to nothing, is never
+`colliders.invalidate()` (a playtest warns of an edit made without it). An object with a pose that isn't finite, or scaled to nothing, is never
 hit, and faces with a corner at NaN, or with no area (their corners on a line, as triangle strips and
 polygon fans leave), are left out.
 
@@ -879,7 +880,8 @@ reach). `world_bounds()` boxes it as it is drawn (and `model.bounds()` and `fit(
 `skin.pose(mesh)` gives its vertices and normals in the world; `model.copy()` gives each copy's
 parts a skin on the copy's joints, and `model.bake()` a still of the pose it is in. Ray and
 overlap queries (`Colliders`) see its mesh as it was bound, placed by the object, not as it is
-posed. A skinned object is never simplified (`Renderer.simplify`) nor a mirror, and ignores
+posed, and a set holding one warns of it: give the set a stand-in moved with it instead (an
+invisible box or capsule). A skinned object is never simplified (`Renderer.simplify`) nor a mirror, and ignores
 `billboard`.
 
 </details>
@@ -1176,7 +1178,8 @@ colour fades surfaces into it.
   `apply(t)`, `done()`, `duration` and `targets`. A clip samples all its tracks in one compiled
   kernel (a 55-part character in about 35 µs a frame, not 0.5 ms), with the same numbers as
   `track.at(t)`; so it reads a track's keyframes once: to change them, give the animation a new
-  `Track` rather than editing one in place. Tracks with an easing function or a `Track` subclass of
+  `Track` rather than editing one in place (a track's keyframes are read-only once it is made, so an
+  edit raises). Tracks with an easing function or a `Track` subclass of
   your own are played as before, through `at()`.
 - `clip.start(fade=0)` plays a clip from the beginning; with `fade` (seconds), it eases from the
   pose its targets have now into its own over that long (positions and scales blended, rotations

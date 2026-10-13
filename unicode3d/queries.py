@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit, prange
 
+from .mesh import edited_in_place, warn_at_caller
 from .threads import kernel_lock
 from .lines import Lines
 from .particles import Particles
@@ -263,11 +264,15 @@ def mesh_tree(mesh):
     when mesh.vertices or mesh.faces are replaced, but not when they are edited in place (Colliders.invalidate)."""
     entry = _TREES.get(id(mesh), False)
     if entry and entry[0][0] is mesh.vertices and entry[0][1] is mesh.faces:
+        if edited_in_place((mesh.vertices, mesh.faces), "colliders", id(entry[1])):
+            warn_at_caller("a Mesh's arrays were edited in place, which Colliders don't see: call "
+                           "colliders.invalidate() after editing them, or give the mesh new arrays (mesh.vertices = ...)")
         return entry[1]
     if entry is False:  # (once a mesh: invalidate() leaves None, so that calling it each frame adds nothing)
         weakref.finalize(mesh, _forget, id(mesh))
     tree = _Tree(mesh)
     _TREES[id(mesh)] = ((mesh.vertices, mesh.faces), tree)
+    edited_in_place((mesh.vertices, mesh.faces), "colliders", id(tree))  # (with CHECK_EDITS: what it was built from)
     return tree
 
 
@@ -789,13 +794,16 @@ class Colliders:
     thousand triangles) and shared with every other set; after editing a mesh's arrays in place, call invalidate().
 
     Each object counts with the pose it has in the world through its parents, whether or not it is visible. An
-    object scaled to nothing in some direction, or with a pose that isn't finite, is never hit.
+    object scaled to nothing in some direction, or with a pose that isn't finite, is never hit. A skinned object
+    counts in the pose its mesh was bound in, placed by the object, which is seldom where it is drawn: the set warns
+    of one (a stand-in moved with it does better), and a morphing object counts unmorphed.
     """
 
     def __init__(self, objects=()):
         self.objects = list(_parts(objects))
         self._packed = None   # (trees, arrays): the trees of the meshes in the set, packed together
         self._instances = []  # the objects the arrays hold, in their order
+        self._warned = False  # whether it has warned of a skinned object (seen in its bind pose)
         self.update()
 
     def invalidate(self):
@@ -816,6 +824,11 @@ class Colliders:
             mesh = getattr(obj, "mesh", None)
             if mesh is None or type(obj) in (Particles, Lines):  # (effects: nothing to hit)
                 continue
+            if getattr(obj, "skin", None) is not None and not self._warned:
+                self._warned = True  # (once a set)
+                warn_at_caller("Colliders see a skinned object in the pose its mesh was bound in, not as drawn: give "
+                               "the set a stand-in moved with it instead (an invisible box, say), or filter this "
+                               "warning if the bind pose will do")
             tree = mesh_tree(mesh)
             if not len(tree.tri):
                 continue

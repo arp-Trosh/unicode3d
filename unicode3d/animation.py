@@ -15,7 +15,8 @@ along tangents given with each (cubic Hermite splines, as glTF models' animation
 A Clip plays several Animations on one clock: what models.load_model() gives for each animation in a
 glTF file (Model.animations), and a way to group your own. It samples all of its tracks in one kernel
 (_sample), with the same arithmetic as Track.at, so a track's keyframes are read once, the first time a clip
-plays it: make a new Track rather than changing one in place.
+plays it: make a new Track rather than changing one in place. So a track's keyframes can't be changed once it is
+made: its arrays are read-only and setting them raises.
 """
 import math
 
@@ -97,12 +98,25 @@ def _wrap(t, start, end, loop):
     return start + (2.0 * span - u if u > span else u)
 
 
+_KEYFRAMES = frozenset({"times", "values", "easings", "loop", "tangents", "rotation"})  # (what a Clip reads once)
+
+
+def _read_only(value):
+    """value (a number or an array), with an array made read-only."""
+    if isinstance(value, np.ndarray):
+        value.flags.writeable = False
+    return value
+
+
 class Track:
     """Keyframes (time, value) or (time, value, easing), in any order, and the value at any time between them.
 
     Values are numbers or arrays (a position, a scale, a colour); easing is a function of 0..1 or the name of one
     in EASINGS. loop: "once" holds the first value before the first key and the last after the last; "loop"
     starts again from the first key; "pingpong" plays forwards, then backwards.
+
+    The keyframes can't be changed once the track is made (a Clip reads them once): times and the values' arrays
+    are read-only, values and easings are tuples, and setting any of them raises. Make a new Track instead.
     """
 
     def __init__(self, keys, easing=linear, loop="once"):
@@ -110,12 +124,19 @@ class Track:
             raise ValueError("a track needs at least one keyframe")
         _check_loop(loop)
         keys = sorted(keys, key=lambda k: k[0])
-        self.times = np.array([float(k[0]) for k in keys])
-        self.values = [self._value(k[1]) for k in keys]
+        self.times = _read_only(np.array([float(k[0]) for k in keys]))
+        self.values = tuple(_read_only(self._value(k[1])) for k in keys)
         default = EASINGS[easing] if isinstance(easing, str) else easing
-        self.easings = [EASINGS[k[2]] if len(k) > 2 and isinstance(k[2], str) else (k[2] if len(k) > 2 else default)
-                        for k in keys]
+        self.easings = tuple(EASINGS[k[2]] if len(k) > 2 and isinstance(k[2], str) else (k[2] if len(k) > 2 else default)
+                             for k in keys)
         self.loop = loop
+        self._sealed = True
+
+    def __setattr__(self, name, value):
+        if name in _KEYFRAMES and self.__dict__.get("_sealed"):
+            raise AttributeError(f"a Track's keyframes can't be changed (a Clip reads them once): make a new Track "
+                                 f"rather than setting {name}")
+        super().__setattr__(name, value)
 
     @staticmethod
     def _value(value):
@@ -176,8 +197,8 @@ class SplineTrack(Track):
     def __init__(self, keys, loop="once", rotation=False):
         self.rotation = rotation
         keys = sorted(keys, key=lambda k: k[0])
+        self.tangents = tuple((_read_only(self._value(k[2])), _read_only(self._value(k[3]))) for k in keys)
         super().__init__([(k[0], k[1]) for k in keys], loop=loop)
-        self.tangents = [(self._value(k[2]), self._value(k[3])) for k in keys]
 
     def between(self, i, f):
         span = self.times[i] - self.times[i - 1]

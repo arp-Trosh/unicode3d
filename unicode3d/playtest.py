@@ -41,6 +41,7 @@ import warnings
 
 import numpy as np
 
+from . import mesh as mesh_module
 from .glyphs import GLYPH_MODES, GLYPH_SETS
 from .keys import Key, KeyRelease, MouseEvent
 from .color import COLOR_MODES
@@ -181,10 +182,15 @@ class Playtest:
     what looks at the screen (text, find, expect, shot) sees the last one. Warnings frame() raises are collected for
     the report (under the program's own warning filters: one made an error is raised as an error); those raised on
     the program's other threads are not.
+
+    check_edits: check, each frame, that no mesh drawn (or in a Colliders set) had its arrays edited in place without
+    invalidate(), which renderers and Colliders don't see; one that was is a warning in the report. It takes
+    checksums of the meshes' arrays each frame (of a big one, such as a texture, a slice of its rows at a time, so
+    an edit to a few rows shows some frames later: see mesh.CHECK_BYTES), which frame times leave out.
     """
 
     def __init__(self, frame, size=(40, 120), glyphs="sextant", color="truecolor", dt=1 / 30, unicode=True,
-                 releases=True, key_release=False, out="playtest", compile=True):
+                 releases=True, key_release=False, out="playtest", compile=True, check_edits=True):
         frame = getattr(frame, "frame", frame)
         if not callable(frame):
             raise TypeError(f"frame must be the program's frame function (screen, dt, events) or an object with a "
@@ -195,6 +201,7 @@ class Playtest:
         self.dt = float(dt)
         self.out = out
         self.releases = bool(releases)
+        self.check_edits = bool(check_edits)
         self.console = _Console(*size, unicode=unicode, key_release=key_release)
         if compile:
             compile_kernels()
@@ -242,6 +249,8 @@ class Playtest:
         screen.poll_size()
         written = self.console.written
         self.frames += 1
+        checking, checked = mesh_module.CHECK_EDITS, mesh_module.check_seconds
+        mesh_module.CHECK_EDITS = self.check_edits
         start = time.perf_counter()
         try:
             with warnings.catch_warnings(record=True) as caught:  # (the program's own filters still apply)
@@ -250,7 +259,9 @@ class Playtest:
             path = self._save_picture(f"crash-frame-{self.frames}")
             raise PlaytestError(f"frame() raised {type(e).__name__} in frame {self.frames} ({self.now:.2f} s of "
                                 f"play): {e}\n(the screen as it was is in {path})") from e
-        elapsed = time.perf_counter() - start
+        finally:
+            mesh_module.CHECK_EDITS = checking
+        elapsed = time.perf_counter() - start - (mesh_module.check_seconds - checked)  # (the checks left out)
         for w in caught:
             self.warnings.setdefault(f"{w.category.__name__}: {w.message} ({os.path.basename(w.filename)}:"
                                      f"{w.lineno})", self.frames)
@@ -826,6 +837,8 @@ def main(argv=None):
     play.add_argument("--no-releases", action="store_true", help="a terminal that reports no key releases (most "
                       "do not): held keys are guessed from presses and repeats")
     play.add_argument("--key-release", action="store_true", help="pass KeyRelease events, as run(key_release=True)")
+    play.add_argument("--no-check-edits", action="store_true", help="don't check meshes for arrays edited in place "
+                      "without invalidate() (checksums of the meshes' arrays each frame)")
     play.add_argument("--out", default="playtest", help="folder for the pictures (default: playtest)")
     view = sub.add_parser("preview", help="contact sheets of models' animations",
                           description=preview.__doc__.split("\n\n")[0])
@@ -866,7 +879,7 @@ def main(argv=None):
         return 2
     test = Playtest(frame, size=args.size, glyphs=args.glyphs, color=args.color, dt=args.dt,
                     unicode=not args.no_unicode, releases=not args.no_releases, key_release=args.key_release,
-                    out=args.out)
+                    out=args.out, check_edits=not args.no_check_edits)
     status = 0
     try:
         run_script(test, script)

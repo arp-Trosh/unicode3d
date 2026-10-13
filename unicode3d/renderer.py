@@ -15,6 +15,8 @@ import numpy as np
 
 from .background import SKYBOX_FACES, background_args, fill_background, fog_args
 from .color import cached_linear_rgb
+from . import mesh as mesh_module
+from .mesh import edited_in_place, mesh_arrays, warn_at_caller
 from .lights import LIGHT_COLUMNS, PointLight, as_lights, light_rows
 from .mirrors import Mirrors
 from .lines import STRIPS, Lines
@@ -176,6 +178,16 @@ class _Piece:
 
 
 _edits = 0  # how many times Renderer.invalidate() was called: pieces made before the last call are made afresh
+
+
+def _check_edits(objects):
+    """Warn of a mesh drawn whose arrays were edited in place since it was last drawn (mesh.CHECK_EDITS, which
+    Playtest turns on): the renderer keeps copies of them, and goes on drawing those."""
+    meshes = {id(m): m for m in (getattr(obj, "mesh", None) for obj in objects) if m is not None}
+    arrays = {id(a): a for mesh in meshes.values() for a in mesh_arrays(mesh)}  # (each once: meshes share textures)
+    if edited_in_place(arrays.values(), "renderer", _edits):
+        warn_at_caller("a Mesh's arrays were edited in place, which renderers don't see: call "
+                       "renderer.invalidate() after editing them, or give the mesh new arrays (mesh.vertices = ...)")
 
 
 def _mesh_piece(mesh, key):
@@ -1147,6 +1159,8 @@ class Renderer(ShadowMaps, Mirrors):
         self._fit()
         self._objects = objects = list(objects)  # (once: objects may be a generator)
         inst = self._instances(objects, camera, lights)
+        if mesh_module.CHECK_EDITS:
+            _check_edits(objects)
         self._light_rows = light_rows(lights, self.shadows)
         aspect = self.width * self.cell_aspect / max(self.height, 1)
         bg_args, bg_state = background_args(self.background, camera, aspect, self._fb.height)

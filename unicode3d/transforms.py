@@ -192,8 +192,8 @@ def scene_poses(nodes, top=None, memo=None):
             memo.update(top=top, nodes=list(nodes), order=order, parents=list(map(_parent_of, order)), rows=rows,
                         parent=parent)
     n = len(order)
-    position = _gather([node.position for node in order], n, 3)
-    rotation = _gather([node.rotation for node in order], n, 4)
+    position = _gather([node.position for node in order], n, 3, "position")
+    rotation = _gather([node.rotation for node in order], n, 4, "rotation")
     scale = _scales([node.scale for node in order], n)
     visible = np.array([bool(node.visible) for node in order], np.bool_)
     linear, place = np.empty((n, 3, 3)), np.empty((n, 3))
@@ -206,15 +206,31 @@ def _same_list(a, b):
     return len(a) == len(b) and all(map(operator.is_, a, b))
 
 
-def _gather(values, n, k):
+_SHAPES = {"position": "three numbers (x, y, z)",
+           "rotation": "a quaternion, four numbers (w, x, y, z); quat_axis_angle(axis, radians) makes one"}
+
+
+def _gather(values, n, k, what):
     """values (n of them, each k numbers) as an (n, k) float array. Joining them end to end is about twice as fast
-    as np.array() of the list when they are arrays already (as positions and rotations mostly are)."""
+    as np.array() of the list when they are arrays already (as positions and rotations mostly are). what: the
+    attribute they are ("position" or "rotation"), for the error naming one that isn't k numbers."""
     try:
         a = np.concatenate(values).astype(np.float64, copy=False) if n else np.empty(0)
-    except (TypeError, ValueError):  # (a number among them, say: np.array() turns that into the error it was)
+    except (TypeError, ValueError):  # (a number among them, say)
         a = None
     if a is None or a.shape != (n * k,):
-        a = np.array(values, np.float64)
+        try:
+            a = np.array(values, np.float64)
+        except (TypeError, ValueError):
+            a = None
+        if a is None or a.size != n * k:
+            for value in values:
+                try:
+                    ok = np.shape(np.asarray(value, np.float64)) == (k,)
+                except (TypeError, ValueError):
+                    ok = False
+                if not ok:
+                    raise ValueError(f"{what} must be {_SHAPES[what]}, not {value!r}")
     return a.reshape(n, k)
 
 

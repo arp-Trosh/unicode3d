@@ -93,9 +93,13 @@ def to_srgb(color):
     """sRGB values 0..1 (3,) of a named Color, an (r, g, b) tuple of 0..255 ints, or of 0..1 floats."""
     if isinstance(color, (int, np.integer)):
         return np.array(HUE_RGB[Color(int(color))]) / 255.0
-    c = np.asarray(color, dtype=float)
-    if c.shape != (3,):
-        raise ValueError(f"colour must be a Color or an (r, g, b) triple, not {color!r}")
+    try:
+        c = np.asarray(color, dtype=float)
+    except (TypeError, ValueError):  # (a name, say)
+        c = None
+    if c is None or c.shape != (3,):
+        raise ValueError(f"colour must be a Color (Color.RED, ...) or an (r, g, b) triple, 0..255 ints or 0..1 "
+                         f"floats, not {color!r}")
     return c / 255.0 if np.issubdtype(np.asarray(color).dtype, np.integer) or c.max() > 1.0 else c
 
 

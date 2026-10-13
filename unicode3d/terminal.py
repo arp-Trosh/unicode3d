@@ -553,7 +553,7 @@ def compile_kernels():
     screen.draw_frame(renderer.render(objects[:-2], Camera(), lights))  # something moved (casters looked up)
     screen.render_updates()
     # Ray and overlap queries.
-    solid = Colliders(objects)
+    solid = Colliders([obj for obj in objects if obj.skin is None])  # (a skinned one would warn)
     solid.raycast((0.0, 0.0, 5.0), (0.0, 0.0, -1.0))
     solid.raycast((0.0, 0.0, 5.0), (0.0, 0.0, -1.0), all=True)
     solid.raycast_many(np.zeros((4, 3)), np.eye(4, 3) - 0.5)

@@ -1,12 +1,86 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
 """Triangle meshes, and textured boxes. (Loading models from files is in models.py.)"""
+import os
+import sys
+import time
+import warnings
+import weakref
+import zlib
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from .color import srgb_to_linear
 from .texture import build_mipmaps, mipmaps as shared_mipmaps
+
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def warn_at_caller(message, category=UserWarning):
+    """warnings.warn(message), pointing at the line outside unicode3d's own modules that led to it (examples count as
+    outside), as Python 3.12's skip_file_prefixes would."""
+    frame, level = sys._getframe(1), 2
+    while frame is not None and os.path.dirname(os.path.abspath(frame.f_code.co_filename)) == _HERE:
+        frame, level = frame.f_back, level + 1
+    warnings.warn(message, category, stacklevel=level)
+
+
+CHECK_EDITS = False  # whether renderers and Colliders check that meshes' arrays weren't edited in place, which they
+                     # don't see (Playtest turns it on): checksums of each array, each frame
+check_seconds = 0.0  # how long those checks have taken (Playtest leaves it out of frame times)
+CHECK_BYTES = 1 << 18  # an array bigger than this is checked a slice of its rows at a time (every row over that many
+                       # frames: a 2 MB texture over 8), so that a check costs about this much an array
+
+_ARRAYS = ("vertices", "faces", "uvs", "materials", "vertex_colors", "face_colors", "normals", "joints", "weights",
+           "morph_targets", "morph_normals")
+_SUMS = {}  # (who asks, id(array)): (weak reference to the array, generation, _Sums)
+
+
+def mesh_arrays(mesh, textures=True):
+    """A mesh's arrays (and its textures), as edited_in_place() checks them."""
+    arrays = [getattr(mesh, name, None) for name in _ARRAYS] + (list(mesh.textures) if textures else [])
+    return [a for a in arrays if a is not None]
+
+
+class _Sums:
+    """An array's checksums, kept from one check to the next: of the whole array if it is small, else of one of
+    `step` slices of its rows (every step-th row), a different slice each check."""
+
+    def __init__(self, a):
+        self.step = max(1, min(len(a) if a.ndim else 1, -(-a.nbytes // CHECK_BYTES)))
+        self.next, self.sums = 0, {}
+
+    def changed(self, a):
+        """Whether the slice checked now holds other numbers than when it was last checked."""
+        k, self.next = self.next, (self.next + 1) % self.step
+        new = zlib.crc32(np.ascontiguousarray(a[k::self.step] if self.step > 1 else a))
+        old, self.sums[k] = self.sums.get(k), new
+        return old is not None and old != new
+
+
+def edited_in_place(arrays, slot, generation):
+    """With CHECK_EDITS on: whether any of these arrays (ask once a frame for each) holds other numbers than when
+    it was last checked for this slot (who asks: "renderer", "colliders") and generation (what makes the asker
+    read the arrays afresh, such as a count of its invalidate() calls). Each array is checked whole, or a slice of
+    a big one (CHECK_BYTES), so an edit to a few rows of one shows a few frames later. False when CHECK_EDITS is
+    off, and for an array not seen before (a new one: replacing one is seen anyway)."""
+    global check_seconds
+    if not CHECK_EDITS:
+        return False
+    start = time.perf_counter()
+    edited = False
+    for a in arrays:
+        if not isinstance(a, np.ndarray):  # (a list, say: no weak reference, and edits to one go unchecked)
+            continue
+        key = (slot, id(a))
+        entry = _SUMS.get(key)
+        if entry is None or entry[0]() is not a or entry[1] != generation:
+            entry = _SUMS[key] = (weakref.ref(a, lambda _, key=key: _SUMS.pop(key, None)), generation, _Sums(a))
+        edited = entry[2].changed(a) or edited
+    check_seconds += time.perf_counter() - start
+    return edited
 
 
 def _srgb01(colors):
