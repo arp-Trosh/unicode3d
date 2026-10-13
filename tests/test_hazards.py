@@ -2,6 +2,8 @@
 # Copyright (C) 2026 arp-Trosh
 """Mistakes that would otherwise go unnoticed (a change that isn't drawn, an error far from its cause), made loud: an
 error that says what is wrong, or a warning (some only in a playtest, where checking costs nothing that matters)."""
+import subprocess
+import sys
 import tempfile
 import unittest
 import warnings
@@ -167,6 +169,17 @@ class EditCheckTests(unittest.TestCase):
             for _ in range(3):
                 renderer.render([game.box], CAMERA, Light())
                 game.box.mesh.vertices *= 1.5
+
+
+class NoTerminalTests(unittest.TestCase):
+    def test_run_without_a_terminal_names_the_playtest(self):
+        # As when an agent's shell tool starts a game: stdin isn't a terminal.
+        program = "from unicode3d import run; run(lambda screen, dt, events: False)"
+        done = subprocess.run([sys.executable, "-c", program], stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=120)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("needs a terminal", done.stderr)
+        self.assertIn("python -m unicode3d.playtest play", done.stderr)
 
 
 if __name__ == "__main__":

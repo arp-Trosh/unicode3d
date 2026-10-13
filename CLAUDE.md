@@ -100,6 +100,13 @@ preferred, its workers sleeping between kernels; compare threading layers with `
 (`Renderer._instances`): each has a `lin` (3, 3) matrix (rotation and per-axis scale, parents included) and `pos`,
 and `flip` where the matrix mirrors.
 
+## The guide for games
+
+`docs/making-a-game.md` is what agents building games read first, and `docs/game-CLAUDE.md` is copied into
+their repositories. When the public API, `run()` or the playtest changes, update its cheat sheet,
+conventions and gotchas to match. `tests/test_guide.py` plays the guide's example game and runs its example
+tests, so the code in it can't go stale unnoticed.
+
 ## Checking a change
 
 - `python -m unittest` from the repository root. The tests use the public API. `tests/test_stability.py` covers

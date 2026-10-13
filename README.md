@@ -8,7 +8,8 @@ animations, ray and overlap queries, labels and widgets, and draws a typical fra
 milliseconds. It started as a Python port, in spirit, of
 [ShakedAp/ASCII-renderer](https://github.com/ShakedAp/ASCII-renderer).
 
-Used by [Zombie Dice](https://github.com/arp-Trosh/zombieDice). For how it works inside, read
+Used by [Zombie Dice](https://github.com/arp-Trosh/zombieDice). To build a game on it (by hand or with
+an AI agent), start with [Making a game](docs/making-a-game.md). For how it works inside, read
 [How unicode3d works](docs/how-it-works.md).
 
 ## Gallery
@@ -316,7 +317,9 @@ row 0, the first row of the image file); `load_gltf` flips glTF's v, which runs 
 beyond 0..1 repeat the texture: 0 to 10 across a floor tiles it ten times.
 
 The [Engine reference](#engine-reference) below covers each part in detail, and the programs in
-`unicode3d/examples/` show them in use.
+`unicode3d/examples/` show them in use. [Making a game](docs/making-a-game.md) is the guide to building
+a game: its shape, playing it off-screen to check it (`unicode3d.playtest`), the conventions, an API
+cheat sheet and the gotchas.
 
 </details>
 
@@ -1210,6 +1213,8 @@ however the loop ends (Ctrl-C raises `KeyboardInterrupt`; `kill`'s SIGTERM exits
 would, unless the program handles that signal itself). `frame_fn(screen, dt, keys)` returns
 `False` to stop. `keys` holds ints (a character's code, or a `Key` such as `Key.UP`, `Key.ENTER`,
 `Key.ESC`), `MouseEvent`s and, with `key_release=True`, `KeyRelease`s (see [Input](#input)).
+Without a terminal (stdin redirected, or a program started by a tool such as an agent's shell) it raises
+`OSError` saying so: play the program with the playtest instead (see [Making a game](docs/making-a-game.md)).
 
 - `screen.text(y, x, s, color, bold=False, reverse=False, dim=False, bg=None)` writes text. A named
   `Color` is one of the terminal's own ANSI colours, so text follows the user's theme; `(r, g, b)`
@@ -1487,7 +1492,9 @@ the one-writer rule that keeps multithreaded rendering deterministic) are in `CL
 `examples/` programs show the engine in use; games may build on them, as
 [Zombie Dice](https://github.com/arp-Trosh/zombieDice) does with `examples/dice.py`. `benchmarks/`
 holds tools for working on the engine (see [Checking a change](#checking-a-change)), and `docs/`
-[the article on how it works](docs/how-it-works.md) with the script that makes its pictures.
+[the guide to making a game](docs/making-a-game.md) with a `CLAUDE.md` for game repositories
+(`game-CLAUDE.md`), and [the article on how it works](docs/how-it-works.md) with the script that makes
+its pictures.
 
 | module          | role |
 |-----------------|------|
@@ -1515,6 +1522,7 @@ holds tools for working on the engine (see [Checking a change](#checking-a-chang
 | `console.py`    | raw terminal I/O for POSIX (termios) and Windows (console API), `WindowsInput` (console key and mouse records to VT sequences), key state on Windows, colour and glyph detection |
 | `keys.py`       | `Key` codes, `KeyRelease`, `MouseEvent`, the VT and kitty-protocol input decoder, `HeldKeys` |
 | `ui.py`         | widgets: `Button`, `Toggle`, `Slider`, `Choice`, laid out in a `Panel`; `DisplayControls` (glyphs, colours, frame rate, shadows, reflections, detail, quality on F2-F8) |
+| `playtest.py`   | `Playtest`: plays a program's `frame()` off-screen with scripted keys and clicks, saving shots, contact sheets and text dumps, with a report (`python -m unicode3d.playtest`; see [Making a game](docs/making-a-game.md)) |
 | `quality.py`    | `AutoQuality`: the picture stepped down while frames run long, and back up (no kernels) |
 | `threads.py`    | `kernel_lock()`, which keeps threads from launching parallel kernels at once where Numba's threading layer can't take it; `prefer_sleeping_workers()` |
 | `precompile.py` | compiling the kernels on several cores at once on the first run (their argument types are in `kernel_signatures.py`) |

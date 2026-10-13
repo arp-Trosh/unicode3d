@@ -101,6 +101,10 @@ def mouse_sequences(mouse):
     return f"\x1b[?{mode}h\x1b[?1006h", f"\x1b[?{mode}l\x1b[?1006l"
 
 
+NO_TERMINAL = ("needs a terminal, and stdin isn't one (redirected, or the program was started by a tool). To play a "
+               "program without a terminal, use the playtest: python -m unicode3d.playtest play file.py:Name")
+
+
 class Console:
     """Raw terminal I/O. Use as a context manager: entering switches to a full-screen raw mode.
 
@@ -165,6 +169,8 @@ class PosixConsole(Console):
         self._saved = None
 
     def _setup(self):
+        if not os.isatty(self.fd_in):
+            raise OSError(f"unicode3d {NO_TERMINAL}")
         t = self._termios
         self._saved = t.tcgetattr(self.fd_in)
         attrs = t.tcgetattr(self.fd_in)
@@ -331,7 +337,7 @@ class WindowsConsole(Console):
     def _mode(self, handle):
         mode = self._wt.DWORD()
         if not self._k32.GetConsoleMode(handle, self._ctypes.byref(mode)):
-            raise OSError("not running in a Windows console (stdin/stdout are redirected?)")
+            raise OSError(f"unicode3d {NO_TERMINAL} (stdin and stdout must be a Windows console)")
         return mode.value
 
     def _setup(self):
