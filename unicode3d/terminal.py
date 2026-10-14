@@ -650,7 +650,7 @@ class _Writer:
         self._thread.start()
 
     def write(self, data):
-        with self._done:
+        with _holding_signals(), self._done:
             self._wait()
             self._pending = data
             self._done.notify_all()
@@ -658,16 +658,17 @@ class _Writer:
     def close(self):
         """Wait for the write on its way, then stop the thread. An error it raised is dropped: the console's
         own write on closing (restoring the terminal) meets the same trouble and raises it."""
-        with self._done:
-            while self._pending is not None:
+        with _holding_signals(), self._done:
+            while self._pending is not None and _held["signal"] is None:
                 self._done.wait(self.WAIT)
             self._closing = True
             self._done.notify_all()
-        self._thread.join()
+        self._thread.join(None if _held["signal"] is None else self.WAIT)
 
     def _wait(self):
-        """Wait (holding the lock) until no write is on its way, and raise what the last one raised."""
-        while self._pending is not None:
+        """Wait (holding the lock) until no write is on its way, and raise what the last one raised. A signal
+        stops the wait (the write may never end, on a terminal gone wrong)."""
+        while self._pending is not None and _held["signal"] is None:
             self._done.wait(self.WAIT)
         error, self._error = self._error, None
         if error is not None:
@@ -691,24 +692,59 @@ class _Writer:
                 self._done.notify_all()
 
 
+_held = {"depth": 0, "signal": None}  # see _holding_signals
+
+
+@contextlib.contextmanager
+def _holding_signals():
+    """Hold back the exception run()'s signal handlers raise until the block ends. Raised inside
+    threading.Condition.wait(), it can leave the condition's lock released, and leaving the `with` block then fails
+    with RuntimeError ("cannot release un-acquired lock") in place of the exit: seen on macOS."""
+    _held["depth"] += 1
+    try:
+        yield
+    finally:
+        _held["depth"] -= 1
+        if not _held["depth"] and _held["signal"] is not None:
+            error, _held["signal"] = _held["signal"], None
+            raise error
+
+
+def _signal_raises(error):
+    """Raise error from a signal handler, or once out of a _holding_signals() block."""
+    if not _held["depth"]:
+        raise error
+    if _held["signal"] is None:
+        _held["signal"] = error
+
+
 @contextlib.contextmanager
 def _exit_on_sigterm():
     """While the loop runs, SIGTERM (kill, a closing session) ends the program as SystemExit does, so that the
     terminal is restored on the way out: the signal's default ends Python at once, leaving the terminal in raw mode
-    on the alternate screen. A handler the program set itself is left alone."""
-    if (not hasattr(signal, "SIGTERM") or threading.current_thread() is not threading.main_thread()
-            or signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL):
+    on the alternate screen. Ctrl-C raises KeyboardInterrupt as usual. Both wait for the end of a
+    _holding_signals() block. Handlers the program set itself are left alone."""
+    if threading.current_thread() is not threading.main_thread():
         yield
         return
 
     def stop(signum, frame):
-        raise SystemExit(128 + signum)  # (the exit status a shell shows for a program the signal ended)
+        _signal_raises(SystemExit(128 + signum))  # (the exit status a shell shows for a program the signal ended)
 
-    signal.signal(signal.SIGTERM, stop)
+    def interrupt(signum, frame):
+        _signal_raises(KeyboardInterrupt())
+
+    ours = [(name, handler) for name, handler, default in [("SIGTERM", stop, signal.SIG_DFL),
+                                                         ("SIGINT", interrupt, signal.default_int_handler)]
+            if hasattr(signal, name) and signal.getsignal(getattr(signal, name)) is default]
+    for name, handler in ours:
+        signal.signal(getattr(signal, name), handler)
     try:
         yield
     finally:
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        _held["depth"], _held["signal"] = 0, None
+        for name, handler in ours:
+            signal.signal(getattr(signal, name), signal.SIG_DFL if name == "SIGTERM" else signal.default_int_handler)
 
 
 def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False):

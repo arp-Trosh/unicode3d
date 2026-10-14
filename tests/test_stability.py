@@ -756,5 +756,50 @@ class RealTerminalTests(unittest.TestCase):
         self.assertIn(b"HELD True LAST False RELEASES 0", out)
 
 
+
+@unittest.skipIf(os.name == "nt", "sends itself SIGTERM")
+class SignalTests(unittest.TestCase):
+    """SIGTERM and Ctrl-C while run()'s output thread is busy: raised inside threading.Condition.wait(), the exit
+    could leave the condition's lock released, and leaving its `with` block then failed with RuntimeError in place
+    of the exit (seen once on macOS in CI). They are held back until the wait is over."""
+
+    def test_a_signal_in_a_wait_is_raised_after_it(self):
+        import signal
+        from unicode3d.terminal import _exit_on_sigterm, _holding_signals
+        reached = False
+        with _exit_on_sigterm():
+            with self.assertRaises(SystemExit) as caught:
+                with _holding_signals():
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)  # as if it came mid-wait
+                    reached = True
+            with self.assertRaises(KeyboardInterrupt):
+                with _holding_signals():
+                    signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+        self.assertTrue(reached)
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        self.assertIs(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
+    def test_sigterm_while_waiting_for_a_slow_terminal(self):
+        import signal
+        import threading
+        from unicode3d.terminal import _exit_on_sigterm, _Writer
+
+        class Slow:
+            def write(self, data):
+                time.sleep(0.5)
+
+        with _exit_on_sigterm():
+            writer = _Writer(Slow())
+            writer.write(b"first")
+            threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGTERM)).start()
+            started = time.monotonic()
+            with self.assertRaises(SystemExit) as caught:
+                writer.write(b"second")  # waits for the first, and the signal comes meanwhile
+            self.assertLess(time.monotonic() - started, 0.4)  # the wait stopped for it
+            writer.close()
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+
+
 if __name__ == "__main__":
     unittest.main()
