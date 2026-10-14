@@ -44,7 +44,7 @@ Python 3.10 or later; numpy, Numba and Pillow (for loading images) come with it.
 in `requirements.txt`:
 
 ```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.24.1
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.25.0
 ```
 
 To work on the engine and a game together, install your local copy of the engine in the game's
