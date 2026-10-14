@@ -83,6 +83,22 @@ class PlaytestTests(unittest.TestCase):
         self.assertAlmostEqual(test.now, 0.3)
         self.assertIn("Score 6", test.text())
 
+    def test_jittered_dt(self):
+        test = self.play(dt=0.05, jitter=0.5)
+        test.hold("d", frames=40)
+        dts = self.game.dts
+        self.assertTrue(all(0.025 <= dt <= 0.075 for dt in dts))
+        self.assertGreater(len(set(dts)), 30)              # each frame its own
+        self.assertAlmostEqual(test.now, sum(dts))
+        self.assertAlmostEqual(test.report().seconds, sum(dts))
+        repeats = sum(e.count(ord("d")) for e in self.game.events)
+        held = sum(dts[:40])                               # repeats from 0.5 s, 30 a second, by the time played
+        self.assertAlmostEqual(repeats, 1 + int((held - dts[0] - 0.5) * 30) + 1, delta=1)
+        again = self.play(dt=0.05, jitter=0.5)
+        again.hold("d", frames=40)
+        self.assertEqual(self.game.dts, dts)               # the same every time
+        self.assertEqual(self.play(dt=0.05).dt, 0.05)
+
     def test_held_keys_are_exact_and_repeat_like_a_terminal(self):
         test = self.play(dt=0.1)
         test.hold("w", "right", frames=8)

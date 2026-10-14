@@ -63,3 +63,156 @@ class GuideTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# What the guide calls an object by (screen.draw(...), solid.raycast(...)), the methods it names alone (Playtest's,
+# listed after it, and others), and names in its code that aren't unicode3d's.
+INSTANCES = {"screen": "Screen", "renderer": "Renderer", "solid": "Colliders", "mesh": "Mesh", "model": "Model",
+             "anim": "Animation", "clip": "Clip", "panel": "Panel", "controls": "DisplayControls", "obj": "Object3D",
+             "test": "Playtest"}
+METHODS = {"emit": "Particles", "play": "Sprite", "push_out": "Colliders", "invalidate": "Renderer", **{name: "Playtest" for name in (
+    "wait", "press", "type", "hold", "down", "up", "click", "click_text", "move", "resize", "step", "shot", "sheet",
+    "text", "find", "expect", "expect_not", "picture", "report")}}
+NOT_CALLS = {"ord", "chr", "print", "range", "len", "min", "max", "sin", "cos", "frame", "update", "Game", "Crawl"}
+
+
+def _split_arguments(text):
+    """The arguments of a call as written, split at the commas outside brackets and quotes."""
+    parts, depth, quote, start = [], 0, None, 0
+    for i, ch in enumerate(text):
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return [p for p in parts if p]
+
+
+def _resolve(name):
+    """The function or class a name in the guide means, or None."""
+    import unicode3d
+    from unicode3d import playtest, shapes, transforms
+    owner, _, attr = name.rpartition(".")
+    if not owner:
+        if name in METHODS:
+            return getattr(getattr(unicode3d, METHODS[name]), name)
+        for module in (unicode3d, shapes, transforms, playtest):
+            if hasattr(module, name):
+                return getattr(module, name)
+        return None
+    cls = INSTANCES.get(owner)
+    if cls is not None:
+        holder = getattr(playtest, cls, None) or getattr(unicode3d, cls, None)
+        if holder is None:
+            from unicode3d import models
+            holder = getattr(models, cls)
+        return getattr(holder, attr, None)
+    for module in (unicode3d, shapes, transforms, playtest):
+        target = module
+        for part in name.split("."):
+            target = getattr(target, part, None)
+        if target is not None:
+            return target
+    return None
+
+
+def _defaults(target):
+    """Each argument's default, with a dataclass's default_factory called (inspect shows those as <factory>)."""
+    import dataclasses
+    import inspect
+    defaults = {name: p.default for name, p in inspect.signature(target).parameters.items()}
+    if isinstance(target, type) and dataclasses.is_dataclass(target):
+        for field in dataclasses.fields(target):
+            if field.default_factory is not dataclasses.MISSING:
+                defaults[field.name] = field.default_factory()
+    return defaults
+
+
+def signature_problems(markdown):
+    """What the calls written in a markdown file's inline code (not its code blocks) get wrong about the functions
+    they name: functions or arguments that don't exist, or too many arguments by position. A call written with three
+    or more arguments, one at least with a default (`Camera(position, target, up=(0, 1, 0), fov=50)`), is read as a
+    signature: its arguments by position must have the function's names, and its defaults the function's values
+    (`...` for one says nothing). Returns a list of strings."""
+    import inspect
+
+    import numpy as np
+
+    import unicode3d
+    text = re.sub(r"```.*?```", "", markdown, flags=re.S)
+    namespace = {**vars(unicode3d), "np": np}
+    problems = []
+    for code in re.findall(r"`([^`]+)`", text):
+        code = " ".join(code.split())  # (inline code may wrap onto the next line)
+        for call in re.finditer(r"(?<![\w.])([A-Za-z_][\w.]*)\(([^()]*(?:\([^()]*\)[^()]*)*)\)", code):
+            name, arguments = call.group(1), call.group(2)
+            if name in NOT_CALLS or name.split(".")[0] in ("np", "self", "os", "sys"):
+                continue
+            target = _resolve(name)
+            if target is None:
+                owner = name.rpartition(".")[0]
+                if not owner or owner in INSTANCES or hasattr(unicode3d, owner.split(".")[0]):
+                    problems.append(f"{call.group(0)}: no such function")
+                continue  # (a method of the game's own, such as MOVES.get)
+            try:
+                sig = inspect.signature(target)
+            except (TypeError, ValueError):
+                continue
+            params = [p for p in sig.parameters.values() if p.name not in ("self", "cls")]
+            names = {p.name: p for p in params}
+            defaults = _defaults(target)
+            takes_any = any(p.kind == p.VAR_KEYWORD for p in params)
+            written_arguments = _split_arguments(arguments)
+            signature = len(written_arguments) >= 3 and any(re.match(r"\w+=", a) for a in written_arguments)
+            index = 0
+            for argument in written_arguments:
+                if argument in ("...", "…") or argument.startswith("*"):
+                    break
+                key, eq, value = argument.partition("=")
+                if eq and re.fullmatch(r"\w+", key.strip()) and not value.startswith("="):
+                    key, value = key.strip(), value.strip()
+                    if key not in names:
+                        if not takes_any:
+                            problems.append(f"{call.group(0)}: {name} has no argument {key!r}")
+                        continue
+                    default = defaults[key]
+                    if not signature or default is inspect.Parameter.empty or "|" in value or "..." in value:
+                        continue
+                    try:
+                        written = eval(value, namespace)
+                    except Exception:
+                        continue
+                    try:
+                        same = bool(np.all(np.asarray(written) == np.asarray(default))) and \
+                            np.shape(written) == np.shape(default)
+                    except Exception:
+                        same = written == default
+                    if not same:
+                        problems.append(f"{call.group(0)}: {name}'s {key} defaults to {default!r}, not {value}")
+                    continue
+                positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+                if index >= len(positional):
+                    if not any(p.kind == p.VAR_POSITIONAL for p in params):
+                        problems.append(f"{call.group(0)}: {name} takes {len(positional)} arguments by position")
+                    break
+                if re.fullmatch(r"[a-z_]\w*", argument) and (signature or argument in names) \
+                        and argument != positional[index].name:
+                    problems.append(f"{call.group(0)}: {name}'s argument {index + 1} is {positional[index].name}, "
+                                    f"not {argument}")
+                index += 1
+    return problems
+
+
+class SignatureTests(unittest.TestCase):
+    def test_the_guides_calls_match_the_functions(self):
+        for path in (GUIDE, os.path.join(ROOT, "unicode3d", "starter", "game-CLAUDE.md")):
+            with open(path, encoding="utf-8") as f:
+                problems = signature_problems(f.read())
+            self.assertEqual(problems, [], os.path.basename(path))

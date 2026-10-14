@@ -32,11 +32,16 @@ After every change that affects what is on screen:
 
 1. **Playtest** it with a script that reaches the part you changed.
 2. **Look** at the result:
-   - Read the report. `WARNING` and `BLANK SCREEN` lines are bugs: fix them, don't ignore them.
-   - Open the `.png` shots. Without vision, read the `.txt` dumps, and play with `--glyphs ascii` to see
-     the 3D picture as shading characters.
+   - Read the report. `WARNING`, `BLANK SCREEN`, `DARK SCENE` and `EMPTY SCENE` lines are bugs: fix them,
+     don't ignore them.
+   - Open the `.png` shots. Without vision, read the `.txt` dumps, play with `--glyphs ascii` to see
+     the 3D picture as shading characters, and tune lights by the brightness the report gives each shot.
    - Use `sheet NAME N` for anything that moves.
 3. **Fix** what is wrong and play again. Only call a change done when you have seen it work.
+4. **Hand over** what a playtest can't judge. It plays perfectly: exact taps, a fixed `dt`, a terminal
+   that reports key releases. Play with `--no-releases` and `--jitter 0.5` too, and when you report a change
+   as done, list under "For a person to check" what only playing by hand shows (how far a tap turns, how
+   fast things move, whether it's fun).
 
 Each feature you add gets a test in `tests/` that plays it: keys in, then `expect` on the words it puts
 on screen, or a check of the game's state.

@@ -48,11 +48,13 @@ from .keys import Key, KeyRelease, MouseEvent, key_codes
 from .color import COLOR_MODES
 from .terminal import Screen, _program_settings, compile_kernels
 
-__all__ = ["Playtest", "PlaytestError", "Report", "Found", "parse_key", "contact_sheet", "preview", "parse_script", "run_script", "load_target",
-           "SCRIPT_HELP"]
+__all__ = ["Playtest", "PlaytestError", "Report", "Found", "parse_key", "contact_sheet", "SceneLight", "scene_light", "preview",
+           "parse_script", "run_script", "load_target", "SCRIPT_HELP"]
 
 REPEAT_DELAY = 0.5  # seconds a held key waits before a terminal starts repeating it
 REPEAT_RATE = 30    # and then the times a second it repeats
+NEAR_BLACK = 16 / 255  # a pixel of a 3D scene darker than this (sRGB) counts as near black,
+DARK_SHARE = 0.97      # and a scene whose drawn pixels are this share near black as dark (DARK SCENE in the report)
 SHEET_GAP = 4       # pixels between the tiles of a contact sheet
 GAP_COLOR = 90      # their grey
 
@@ -123,7 +125,7 @@ class Report:
     """What a playtest saw. Times are wall-clock milliseconds for frame() itself; the first frame is left out of
     them (it loads textures, packs meshes, compiles anything compile_kernels() missed)."""
     frames: int                 # frames drawn
-    seconds: float              # the time they covered in the program (frames * dt)
+    seconds: float              # the time they covered in the program (their dt added up)
     size: tuple                 # (rows, cols) at the end
     glyphs: str
     color: str
@@ -136,6 +138,9 @@ class Report:
     mean_bytes: float | None    # output to the terminal per frame (after the first), what a slow link must carry
     max_bytes: int | None
     blank_frames: list          # frames that left the screen empty
+    dark_frames: list           # frames whose 3D scene (what draw_frame() drew) showed only near black
+    empty_frames: list          # frames whose 3D scene showed nothing (no object and no background)
+    brightness: dict            # each shot's path: its 3D scene's SceneLight
     warnings: list              # (frame, "Category: message") for each different warning raised while playing
     shots: list                 # paths of the pictures and text dumps saved
 
@@ -154,17 +159,26 @@ class Report:
         if self.blank_frames:
             shown = ", ".join(map(str, self.blank_frames[:10])) + (" ..." if len(self.blank_frames) > 10 else "")
             lines.append(f"BLANK SCREEN in {len(self.blank_frames)} frames: {shown}")
+        if self.dark_frames:
+            shown = ", ".join(map(str, self.dark_frames[:10])) + (" ..." if len(self.dark_frames) > 10 else "")
+            lines.append(f"DARK SCENE in {len(self.dark_frames)} frames: {shown} (all that the 3D scene shows is near "
+                         f"black: check the lights and the objects' colours)")
+        if self.empty_frames:
+            shown = ", ".join(map(str, self.empty_frames[:10])) + (" ..." if len(self.empty_frames) > 10 else "")
+            lines.append(f"EMPTY SCENE in {len(self.empty_frames)} frames: {shown} (the 3D scene shows nothing: check "
+                         f"the camera's position and target, and where the objects are)")
         for frame, message in self.warnings:
             lines.append(f"WARNING (first at frame {frame}): {message}")
         for path in self.shots:
-            lines.append(f"saved {path}")
+            light = self.brightness.get(path)
+            lines.append(f"saved {path}" + ("" if light is None else f" (3D scene: {light})"))
         return "\n".join(lines)
 
 
 class Playtest:
     """Drives frame(screen, dt, events), the function run() would call, off-screen.
 
-    frame: the program's frame function, or an object with a frame() method (a game).
+    game: an object with a frame() method, or the program's frame function itself.
     mouse, key_release: as run()'s; left as None, they come from the game's attributes of those names (`mouse = True`
     on its class), as under run(), else False. Mouse events the program didn't ask for raise PlaytestError (a click
     without mouse, a drag without "drag" or "move", a move with no button without "move"): run() would never pass
@@ -172,6 +186,9 @@ class Playtest:
     size: (rows, cols) of the pretend terminal, as Screen(size=...) takes it (scripts and the command line give
     sizes as COLSxROWS); glyphs, color: its glyph set and colour mode (fixed, so pictures are the same on every
     machine); dt: the seconds each frame is told have passed (fixed: a playtest plays the same every time).
+    jitter: let each frame's dt vary by up to this fraction of dt either way (0.5: from dt / 2 to 1.5 dt), as
+    frame times do under run(), to catch a game that counts frames where it should count time; the variation comes
+    from a fixed seed, so it is still the same every time.
     unicode=False plays it as a terminal without Unicode (ASCII glyphs only). out: the folder shots and sheets are
     saved in. compile: compile the kernels first (as run() does), so the first frame's time is the program's own.
 
@@ -189,6 +206,10 @@ class Playtest:
     the report (under the program's own warning filters: one made an error is raised as an error); those raised on
     the program's other threads are not.
 
+    Each frame's 3D scenes (the framebuffers draw_frame() drew) are measured (see SceneLight): one where what is
+    drawn is near black is a DARK SCENE in the report, one with nothing drawn an EMPTY SCENE, and each shot notes
+    its scene's measures, for an agent tuning lights without seeing.
+
     check_edits: check, each frame, that no mesh drawn (or in a Colliders set) had its arrays edited in place without
     invalidate(), which renderers and Colliders don't see (they make the arrays read-only, so this catches edits
     through arrays they are views of); one that was is a warning in the report. It takes
@@ -196,14 +217,16 @@ class Playtest:
     an edit to a few rows shows some frames later: see mesh.CHECK_BYTES), which frame times leave out.
     """
 
-    def __init__(self, frame, size=(40, 120), glyphs="sextant", color="truecolor", dt=1 / 30, unicode=True,
+    def __init__(self, game, size=(40, 120), glyphs="sextant", color="truecolor", dt=1 / 30, unicode=True,
                  releases=True, key_release=None, out="playtest", compile=True, check_edits=True, erase=True,
-                 mouse=None):
-        frame, self.mouse, key_release = _program_settings(frame, mouse, key_release)
+                 mouse=None, jitter=0.0):
+        frame, self.mouse, key_release = _program_settings(game, mouse, key_release)
         if glyphs not in GLYPH_MODES:
             raise ValueError(f"glyphs must be one of {GLYPH_MODES}, not {glyphs!r}")
         self.frame_fn = frame
         self.dt = float(dt)
+        self.jitter = min(max(float(jitter), 0.0), 1.0) if jitter == jitter else 0.0  # (NaN as 0)
+        self._random = np.random.default_rng(1)
         self.out = out
         self.releases = bool(releases)
         self.check_edits = bool(check_edits)
@@ -219,6 +242,12 @@ class Playtest:
         self.times = []          # seconds each frame() took
         self.bytes = []          # bytes each frame sent the terminal
         self.blank = []          # frames that left the screen empty
+        self.dark = []           # frames whose 3D scene showed only near black
+        self.empty = []          # frames whose 3D scene showed nothing
+        self.brightness = {}     # each shot's path: its 3D scene's SceneLight
+        self._light = None       # the last frame's SceneLight, None if it drew no scene
+        self._time = 0.0         # seconds of play so far,
+        self._last = 0.0         # and as of the frame before the last
         self.warnings = {}       # "Category: message": the first frame it was raised in
         self.shots = []          # paths saved
         self._held = {}          # key code held with down(): the time (now) of the frame its press went with
@@ -229,7 +258,7 @@ class Playtest:
     @property
     def now(self):
         """Seconds of play so far."""
-        return self.frames * self.dt
+        return self._time
 
     def _repeats(self, since, t):
         """How many times a key pressed at `since` has repeated by time t."""
@@ -247,7 +276,7 @@ class Playtest:
                 self._check_mouse(e)
         if self.frames:
             for key, since in self._held.items():  # a terminal's auto-repeat, at its own rate whatever the frame's
-                n = self._repeats(since, self.now) - self._repeats(since, self.now - self.dt)
+                n = self._repeats(since, self._time) - self._repeats(since, self._last)
                 events += [key] * min(n, 100)
         if not self.releases:
             events = [e for e in events if not isinstance(e, KeyRelease)]
@@ -261,13 +290,16 @@ class Playtest:
             before = (screen.chars.copy(), screen.fg.copy(), screen.bg.copy(), screen.attrs.copy())
             screen.erase()
         written = self.console.written
+        dt = self.dt * (1.0 + self.jitter * self._random.uniform(-1.0, 1.0)) if self.jitter else self.dt
+        self._last, self._time = self._time, self._time + dt
         self.frames += 1
+        screen._drawn = []
         checking, checked = mesh_module.CHECK_EDITS, mesh_module.check_seconds
         mesh_module.CHECK_EDITS = self.check_edits
         start = time.perf_counter()
         try:
             with warnings.catch_warnings(record=True) as caught:  # (the program's own filters still apply)
-                result = self.frame_fn(screen, self.dt, key_codes(events))
+                result = self.frame_fn(screen, dt, key_codes(events))
                 if result is not False:
                     screen.refresh()
         except Exception as e:
@@ -276,18 +308,24 @@ class Playtest:
                                 f"play): {e}\n(the screen as it was is in {path})") from e
         finally:
             mesh_module.CHECK_EDITS = checking
+            drawn, screen._drawn = screen._drawn, None
         elapsed = time.perf_counter() - start - (mesh_module.check_seconds - checked)  # (the checks left out)
         for w in caught:
             self.warnings.setdefault(f"{w.category.__name__}: {w.message} ({os.path.basename(w.filename)}:"
                                      f"{w.lineno})", self.frames)
         self.times.append(elapsed)
         self.bytes.append(self.console.written - written)
-        screen.frame_time, screen.measured_fps = elapsed, 1.0 / self.dt if self.dt > 0 else None
+        screen.frame_time, screen.measured_fps = elapsed, 1.0 / dt if dt > 0 else None
         screen.frame_count += 1
         if result is False and before is not None:
             screen.chars[...], screen.fg[...], screen.bg[...], screen.attrs[...] = before
         if self._is_blank():
             self.blank.append(self.frames)
+        self._light = scene_light(drawn) if drawn else None
+        if self._light is not None and not self._light.covered:
+            self.empty.append(self.frames)
+        elif self._light is not None and self._light.near_black >= DARK_SHARE:
+            self.dark.append(self.frames)
         if result is False:
             self.quit, self.quit_at = True, self.frames
         return result
@@ -441,6 +479,8 @@ class Playtest:
     def shot(self, name):
         """Save the screen as <out>/<name>.png, and its text as <out>/<name>.txt. Returns the picture's path."""
         path = self._save_picture(name)
+        if self._light is not None:
+            self.brightness[path] = self._light
         with open(os.path.join(self.out, f"{name}.txt"), "w", encoding="utf-8") as f:
             f.write(self.text() + "\n")
         self.shots.append(os.path.join(self.out, f"{name}.txt"))
@@ -492,7 +532,37 @@ class Playtest:
         return Report(frames=self.frames, seconds=self.now, size=self.screen.size(), glyphs=self.screen.mode,
                       color=self.screen.color_mode, quit_at=self.quit_at,
                       first_ms=self.times[0] * 1000.0 if self.times else None, blank_frames=list(self.blank),
+                      dark_frames=list(self.dark), empty_frames=list(self.empty), brightness=dict(self.brightness),
                       warnings=warned, shots=list(self.shots), **notes)
+
+
+class SceneLight(collections.namedtuple("SceneLight", "covered brightness near_black")):
+    """How a rendered scene looks, for checking it without seeing it. covered: the share of its pixels with
+    something drawn (objects or a background); brightness: their mean brightness, 0..1 as the terminal shows it;
+    near_black: the share of them darker than NEAR_BLACK."""
+
+    def __str__(self):
+        if not self.covered:
+            return "nothing drawn"
+        return (f"{self.covered:.0%} drawn on, brightness {self.brightness:.0%}, {self.near_black:.0%} of it near "
+                f"black")
+
+
+def scene_light(framebuffers):
+    """The SceneLight of rendered framebuffers, over all their pixels (None if they have none)."""
+    lum, alpha = [], []
+    for fb in framebuffers:
+        alpha.append(fb.alpha.reshape(-1))
+        lum.append(fb.rgb.reshape(-1, 3).astype(float) @ np.array([0.2126, 0.7152, 0.0722]))
+    lum, alpha = np.concatenate(lum), np.concatenate(alpha)
+    if not len(lum):
+        return None
+    with np.errstate(all="ignore"):
+        drawn = alpha > 0.5
+        colour = np.clip(np.nan_to_num(lum[drawn] / alpha[drawn]), 0.0, 1.0) ** (1 / 2.2)  # (near enough sRGB)
+    if not len(colour):
+        return SceneLight(0.0, 0.0, 0.0)
+    return SceneLight(float(drawn.mean()), float(colour.mean()), float((colour < NEAR_BLACK).mean()))
 
 
 def contact_sheet(tiles, labels=None, columns=3, background=(12, 12, 16)):
@@ -864,6 +934,8 @@ def main(argv=None):
     play.add_argument("--glyphs", choices=GLYPH_MODES, default="sextant")
     play.add_argument("--color", choices=COLOR_MODES, default="truecolor")
     play.add_argument("--dt", type=float, default=1 / 30, help="seconds per frame (default 1/30)")
+    play.add_argument("--jitter", type=float, default=0.0, help="let each frame's dt vary by up to this fraction "
+                      "of it either way, as real frame times do (0.5: dt / 2 to 1.5 dt; the same every run)")
     play.add_argument("--no-unicode", action="store_true", help="a terminal without Unicode")
     play.add_argument("--no-releases", action="store_true", help="a terminal that reports no key releases (most "
                       "do not): held keys are guessed from presses and repeats")
@@ -912,7 +984,7 @@ def main(argv=None):
     except (OSError, ValueError) as e:
         print(f"playtest: {e}", file=sys.stderr)
         return 2
-    test = Playtest(frame, size=args.size, glyphs=args.glyphs, color=args.color, dt=args.dt,
+    test = Playtest(frame, size=args.size, glyphs=args.glyphs, color=args.color, dt=args.dt, jitter=args.jitter,
                     unicode=not args.no_unicode, releases=not args.no_releases, key_release=args.key_release,
                     mouse={None: None, "off": False, "on": True}.get(args.mouse, args.mouse),
                     erase=not args.no_erase, out=args.out, check_edits=not args.no_check_edits)

@@ -107,8 +107,8 @@ and `flip` where the matrix mirrors.
 first), `game-CLAUDE.md` (the game's `CLAUDE.md`; not named `CLAUDE.md` here, where it would be read as notes for
 the engine), `requirements.txt` and `gitignore`. They ship as package data (`pyproject.toml`), so a game gets the
 guide for the version it installed. When the public API, `run()` or the playtest changes, update the guide's cheat
-sheet, conventions and gotchas, and the starter, to match. `tests/test_guide.py` plays the guide's example game and
-runs its example tests, and `tests/test_new.py` makes a game with `unicode3d.new` and runs its tests, so neither
+sheet, conventions and gotchas, and the starter, to match. `tests/test_guide.py` plays the guide's example game,
+runs its example tests and checks the calls the guide writes (its cheat sheet's signatures) against the functions, and `tests/test_new.py` makes a game with `unicode3d.new` and runs its tests, so neither
 can go stale unnoticed.
 
 ## Checking a change

@@ -12,12 +12,13 @@ from game import ROUND_TIME, Game, GameOver, Play, Title
 
 
 class GameTests(unittest.TestCase):
-    def play(self, size=(24, 80)):
-        """A fresh game (always the same round: seed 1) and a playtest of it, size as (rows, cols)."""
+    def play(self, size=(24, 80), **options):
+        """A fresh game (always the same round: seed 1) and a playtest of it, size as (rows, cols); options go
+        to Playtest."""
         out = tempfile.TemporaryDirectory()     # pictures from shot() go here, and are thrown away
         self.addCleanup(out.cleanup)
         self.game = Game(seed=1)
-        return Playtest(self.game, size=size, out=out.name)
+        return Playtest(self.game, size=size, out=out.name, **options)
 
     def test_title_screen(self):
         test = self.play()
@@ -76,7 +77,7 @@ class GameTests(unittest.TestCase):
         self.assertTrue(test.quit)
 
     def test_plays_cleanly(self):
-        test = self.play()
+        test = self.play(jitter=0.5, releases=False)    # frame times that vary, a terminal without key releases
         test.wait(5)
         test.press("enter")
         test.hold("up", "left", frames=20)
@@ -85,6 +86,8 @@ class GameTests(unittest.TestCase):
         report = test.report()
         self.assertEqual(report.warnings, [])
         self.assertEqual(report.blank_frames, [])
+        self.assertEqual(report.dark_frames, [])        # a 3D scene all near black: lights, colours
+        self.assertEqual(report.empty_frames, [])       # a 3D scene showing nothing: the camera
 
 
 if __name__ == "__main__":

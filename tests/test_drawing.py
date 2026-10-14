@@ -123,3 +123,78 @@ class RunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ColourNameTests(unittest.TestCase):
+    def test_more_named_colours(self):
+        from unicode3d.color import ANSI, HUE_RGB, encode_index
+        self.assertIs(Color.GRAY, Color.GREY)
+        for mode in ("truecolor", "256", "16"):
+            screen = Screen(size=(2, 10), color=mode)
+            for color in Color:
+                screen.text(0, 0, "x", color)
+                if color == Color.DEFAULT:
+                    continue
+                if color in ANSI:  # the terminal's own palette, so text follows its theme
+                    self.assertEqual(screen.fg[0, 0], encode_index(ANSI[color]), (mode, color))
+                else:              # hues it lacks: their RGB, as an (r, g, b) text colour is shown
+                    screen.text(1, 0, "x", HUE_RGB[color])
+                    self.assertEqual(screen.fg[0, 0], screen.fg[1, 0], (mode, color))
+        screen = Screen(size=(2, 10), color="truecolor")
+        screen.text(0, 0, "x", Color.ORANGE)
+        self.assertEqual(screen.fg[0, 0] & 0xFFFFFF, 0xF5821E)
+        for color in (Color.ORANGE, Color.BROWN):  # on objects, as any colour: red over green over blue
+            renderer = Renderer()
+            renderer.resize(20, 10)
+            fb = renderer.render([Object3D(make_box(2.0), color=color)], CAMERA, Light(direction=(0.0, 0.0, -1.0)))
+            r, g, b = fb.rgb[10, 10]
+            self.assertTrue(r > g > b, (color, r, g, b))
+
+
+class SceneLightTests(unittest.TestCase):
+    def scene(self, color=Color.WHITE, target=(0.0, 0.0, 0.0)):
+        box = Object3D(make_box(), color=color)
+        camera = Camera(position=np.array([0.0, 1.0, 4.0]), target=np.array(target))
+        renderer = Renderer()
+
+        def frame(screen, dt, events):
+            screen.draw(renderer, [box], camera, Light(), rows=-1)
+            screen.text(screen.size().rows - 1, 0, "status line", Color.WHITE)
+        out = tempfile.TemporaryDirectory()
+        self.addCleanup(out.cleanup)
+        test = Playtest(frame, size=(20, 60), out=out.name, compile=False)
+        test.wait(2)
+        test.shot("scene")
+        return test.report()
+
+    def test_a_lit_scene_reports_its_brightness(self):
+        report = self.scene()
+        self.assertEqual((report.dark_frames, report.empty_frames), ([], []))
+        (path, light), = report.brightness.items()
+        self.assertTrue(path.endswith("scene.png"))
+        self.assertGreater(light.covered, 0.02)
+        self.assertLess(light.covered, 0.5)     # a box on nothing: most of the frame is empty, not dark
+        self.assertGreater(light.brightness, 0.3)
+        self.assertLess(light.near_black, 0.1)
+        self.assertIn("(3D scene: ", str(report))
+
+    def test_a_black_scene_is_dark(self):
+        report = self.scene(color=(0, 0, 0))
+        self.assertEqual(report.dark_frames, [1, 2])
+        self.assertIn("DARK SCENE in 2 frames", str(report))
+
+    def test_a_camera_looking_away_sees_an_empty_scene(self):
+        report = self.scene(target=(0.0, 20.0, 0.0))
+        self.assertEqual(report.empty_frames, [1, 2])
+        self.assertIn("EMPTY SCENE in 2 frames", str(report))
+        self.assertIn("(3D scene: nothing drawn)", str(report))
+
+    def test_no_scene_no_measure(self):
+        out = tempfile.TemporaryDirectory()
+        self.addCleanup(out.cleanup)
+        test = Playtest(lambda screen, dt, events: screen.text(0, 0, "title"), size=(10, 30), out=out.name,
+                        compile=False)
+        test.wait(1)
+        test.shot("title")
+        report = test.report()
+        self.assertEqual((report.dark_frames, report.empty_frames, report.brightness), ([], [], {}))

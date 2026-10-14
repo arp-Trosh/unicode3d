@@ -46,6 +46,9 @@ never overwrites a file, and writes:
   requirements.txt` on another machine.
 - `.gitignore`, leaving out `.venv/`, `__pycache__/` and `playtest/` (the playtests' pictures).
 
+The first run compiles in several processes at once. PyInstaller programs are handled; a launcher
+of your own that can't start Python processes should set `UNICODE3D_NO_PRECOMPILE=1`.
+
 ## The shape of a game
 
 A game is a class holding its state, with a `frame(screen, dt, events)` method. `run()` takes over
@@ -144,6 +147,9 @@ every change that affects the screen:
 2. **Look:** read the report, look at the pictures (or the text dumps), and check the words on the
    screen.
 3. **Fix**, and play again.
+4. **Hand over** what a playtest can't judge: when you report a change as done, list what a person
+   should try by hand (how a tap feels, how fast things move, whether it's fun), since a playtest
+   plays perfectly ([gotcha 6](#gotchas)).
 
 ### From the command line
 
@@ -178,7 +184,8 @@ Keys are a character (`a`, `A`, `+`) or a name: `enter`, `esc`, `space`, `tab`, 
 `ctrl+c`, and so on.
 
 Options: `--size 120x40` (columns x rows; the default), `--glyphs sextant|quad|half|ascii`,
-`--color truecolor|256|16|mono`, `--dt 0.0333` (seconds per frame), `--no-unicode`,
+`--color truecolor|256|16|mono`, `--dt 0.0333` (seconds per frame), `--jitter 0.5` (each frame's
+`dt` varied by up to half either way, as real frame times vary; the same every run), `--no-unicode`,
 `--no-releases` (a terminal that reports no key releases, as many don't: held keys are then
 guessed from repeats), `--mouse on|off|drag|move` and `--key-release` (in place of what the game
 declares), `--no-erase` (as `run(erase=False)`), `--no-check-edits` and
@@ -192,7 +199,7 @@ The report it prints at the end looks like this:
 frame time: mean 1.6 ms, 95% 2.4 ms, slowest 4.0 ms (frame 34); first frame 5 ms
 output: 1.9 KB a frame on average, 2.9 KB at most
 quit: frame() returned False at frame 38
-saved playtest/start.png
+saved playtest/start.png (3D scene: 100% drawn on, brightness 41%, 0% of it near black)
 ...
 ```
 
@@ -202,10 +209,13 @@ about 2.5 ms at 160x48. Point lights casting shadows cost the most: a few millis
 takes two to three times as long. Under about 30 ms a frame plays smoothly; if the report's mean is
 far above that, find out what costs it before adding more.
 
-Lines starting `BLANK SCREEN` or `WARNING` are problems to fix. A warning names the line in your
-game that caused it. If `frame()` raises, the playtest stops, prints the traceback and saves the
-screen as it was (`crash-frame-N.png`). The exit status is 0 if the script finished, 1 if the game
-raised or an `expect` failed, and 2 for a bad script or target.
+Lines starting `BLANK SCREEN`, `DARK SCENE` (what the 3D scene shows is all near black),
+`EMPTY SCENE` (it shows nothing: the camera looks away from everything) or `WARNING` are problems to
+fix. A warning names the line in your game that caused it. Each saved picture notes how bright its
+3D scene is: tune lights by these numbers if you can't see the pictures. If `frame()` raises, the
+playtest stops, prints the traceback and saves the screen as it was (`crash-frame-N.png`). The exit
+status is 0 if the script finished, 1 if the game raised or an `expect` failed, and 2 for a bad
+script or target.
 
 **Looking at the results.** With vision, open the `.png` files: they show exactly what the terminal
 would. Without vision, read the `.txt` files and `dump words` for the text on screen. Play with
@@ -252,26 +262,29 @@ class GameTests(unittest.TestCase):
         report = test.report()
         self.assertEqual(report.warnings, [])
         self.assertEqual(report.blank_frames, [])
+        self.assertEqual(report.dark_frames, [])
 ```
 
-`Playtest(game, size=(40, 120), glyphs="sextant", color="truecolor", dt=1/30, releases=True,
-mouse=None, key_release=None, out="playtest")` has the same commands as methods: `wait(n)`, `press(*keys)`,
-`type(text)`, `hold(*keys, frames=n)`, `down`/`up`, `click(x, y)`, `click_text(text)`,
-`move(x, y)`, `resize(rows, cols)`, `step(events)` for events of your own, `shot(name)` and
-`sheet(name, frames, shots=6, columns=3)`. To look at the screen, it has `text(picture=False)`,
-`find(text)` (a `Found(row, col)` or `None`), `expect(text)`, `expect_not(text)` and `picture()` (an
-RGB array). `quit` says whether `frame()` returned `False`. `report()` gives a `Report` with
-`frames`, `seconds`, `mean_ms`, `p95_ms`, `max_ms`, `first_ms`, `slowest_frame`, `mean_bytes`,
-`max_bytes`, `blank_frames` (a list of frame numbers), `warnings` (a list of `(frame, message)`),
-`shots` and `quit_at`; `print(report)` shows it as the command line does. Keep the `Game()` you passed in, and a test can check its state too.
+`Playtest(game, size=(40, 120), glyphs="sextant", color="truecolor", dt=1/30, releases=True, mouse=None, key_release=None, jitter=0.0, out="playtest")`
+has the same commands as methods: `wait(n)`, `press(*keys)`, `type(text)`, `hold(*keys, frames=n)`,
+`down`/`up`, `click(x, y)`, `click_text(text)`, `move(x, y)`, `resize(rows, cols)`, `step(events)`
+for events of your own, `shot(name)` and `sheet(name, frames, shots=6, columns=3)`. To look at the
+screen, it has `text()` (`picture=False` for the words alone), `find(text)` (a `Found(row, col)` or
+`None`), `expect(text)`, `expect_not(text)` and `picture()` (an RGB array). `quit` says whether
+`frame()` returned `False`. `report()` gives a `Report` with `frames`, `seconds`, `mean_ms`,
+`p95_ms`, `max_ms`, `first_ms`, `slowest_frame`, `mean_bytes`, `max_bytes`, `blank_frames`,
+`dark_frames` and `empty_frames` (lists of frame numbers), `warnings` (a list of
+`(frame, message)`), `shots`, `brightness` (each picture's 3D scene: `covered`, `brightness` and
+`near_black`, 0 to 1) and `quit_at`; `print(report)` shows it as the command line does. Keep the
+`Game()` you passed in, and a test can check its state too.
 
-A playtest is the same every time: `dt` is fixed, and so are the glyphs and colours. It plays
-every frame without waiting, so ten seconds of play take as long as drawing 300 frames. It also
-checks for mistakes that real runs can't afford to check: a mesh's arrays edited in place through
-other arrays they are views of (past the read-only lock), without `invalidate()`, is reported as a
-warning. It plays the game as `run()` would: a click, drag or move
-the game didn't ask for (its `mouse`) stops the playtest with an error, since `run()` would never
-pass it on.
+A playtest is the same every time: `dt` is fixed (or varied the same way each time, with `jitter`),
+and so are the glyphs and colours. It plays every frame without waiting, so ten seconds of play take
+as long as drawing 300 frames. It also checks for mistakes that real runs can't afford to check: a
+mesh's arrays edited in place through other arrays they are views of (past the read-only lock),
+without `invalidate()`, is reported as a warning. It plays the game as `run()` would: a click, drag
+or move the game didn't ask for (its `mouse`) stops the playtest with an error, since `run()` would
+never pass it on.
 
 ## Conventions
 
@@ -282,7 +295,7 @@ pass it on.
 | rotations | quaternions, **w first**: `(w, x, y, z)`. Make them with `quat_axis_angle(axis, radians)`; combine with `quat_mul(a, b)` (b first, then a); blend with `quat_slerp(a, b, t)`. Never three angles. |
 | angles | radians (`Camera.fov` is the exception: degrees) |
 | `Light(direction=...)` | the way the light travels, so a sun overhead is `(0, -1, 0)` |
-| colours | a named `Color` (`WHITE`, `RED`, `GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`; `DEFAULT` for text in the terminal's own colour) or `(r, g, b)`, 0..255 ints or 0..1 floats |
+| colours | a named `Color` (`WHITE`, `BLACK`, `GREY` or `GRAY`, `RED`, `ORANGE`, `YELLOW`, `GREEN`, `CYAN`, `BLUE`, `PURPLE`, `MAGENTA`, `PINK`, `BROWN`; `DEFAULT` for text in the terminal's own colour) or `(r, g, b)`, 0..255 ints or 0..1 floats |
 | meshes | a face's corners go **counter-clockwise seen from the side that shows**; `uvs` is `(F, 3, 2)`, a `(u, v)` for each corner of each face; `materials` `(F,)` picks each face's texture from `textures` |
 | textures | 0..1 arrays, `(H, W)` brightness or `(H, W, 3)` colour (`(H, W, 4)` with opacity); `v` runs from the image's bottom (0) to its top (1) |
 | time | `dt` is in seconds; speeds are units a second, turns radians a second |
@@ -444,8 +457,8 @@ flags.
   leaves the last row for a status line). It returns the framebuffer.
 - `screen.text(y, x, s, color, bold=False, reverse=False, dim=False, bg=None)` writes text.
 - `screen.bar(y, x, width, fraction, color)` draws a meter.
-- `screen.label(renderer, point, text, color, top=0, left=0, owner=None, clamp=False)` writes text
-  over a point in the scene.
+- `screen.label(renderer, point, text, color=Color.WHITE, owner=None, clamp=False)` writes text
+  over a point in the scene (wherever `screen.draw` put the renderer's frame).
 - `screen.erase()` clears it, for a game that draws a new screen in the middle of a frame.
 - `screen.held` is the keys held down: `"w" in screen.held`, `Key.LEFT in screen.held`.
 - `screen.fps` is the target frame rate and `screen.measured_fps` the one achieved.
@@ -456,7 +469,7 @@ flags.
 `Key.PAGE_UP`, `Key.PAGE_DOWN`, `Key.DELETE`, `Key.INSERT`, `Key.F1` to `Key.F12`. Shifted letters
 come as capitals (`"Q"`). A click is `MouseEvent(x, y, button, pressed, moved)`, with `button`
 one of `MouseEvent.LEFT`, `MIDDLE`, `RIGHT`, `WHEEL_UP`, `WHEEL_DOWN` or `NONE`. `KeyRelease(key)`
-comes with `run(key_release=True)`.
+comes with `key_release = True` on the game's class.
 
 **Scene.**
 - `Renderer(background=None, fog=0.3)`, drawn with `screen.draw(renderer, ...)` every frame.
@@ -467,7 +480,7 @@ comes with `run(key_release=True)`.
 - `Object3D(mesh, position, rotation, scale, color, visible=True, parent=None)`. It also takes
   `emissive`, `opacity`, `reflectivity`, `specular`, `shininess`, `cast_shadows`, `billboard`,
   `outline` and `simplify`.
-- `Node(position, rotation, scale, parent)` groups objects, which move with their parent. A
+- `Node(position, rotation, scale=1.0, parent=None)` groups objects, which move with their parent. A
   `Camera` can be a parent too: its children stay in place in the view (a held weapon, a cockpit).
 - `obj.world_bounds()` gives the corners `(low, high)`; `union_bounds(objects)`.
 
@@ -495,9 +508,9 @@ comes with `run(key_release=True)`.
 - `Track([(time, value), ...], easing, loop="once"|"loop"|"pingpong")` and `RotationTrack` (for
   quaternions). `easing` is a function or its name: `"linear"` (the default), `"ease_in"`,
   `"ease_out"`, `"ease_in_out"`, `"ease_out_back"`, `"ease_out_bounce"` or `"step"`.
-- `Animation(obj, position=track, rotation=track, scale=track)`; call `anim.update(dt)` every frame.
+- `Animation(target, position=track, rotation=track, scale=track)`; call `anim.update(dt)` every frame.
 - `Clip([animations], loop=...)` plays several on one clock: `clip.update(dt)`,
-  `clip.start(fade=0.2)`, `clip.done()`.
+  `clip.start(fade=0.0)` (`fade`: seconds to blend in from the pose before), `clip.done()`.
 - The easing functions (`ease_in_out(t)`, ...) and `lerp(a, b, t)` import from `unicode3d`;
   `unicode3d.transforms` has `quat_slerp`.
 
@@ -505,8 +518,8 @@ comes with `run(key_release=True)`.
 - `solid = Colliders(objects)`. Call `solid.update()` once a frame after moving things.
 - `solid.raycast(origin, direction, max_distance, ignore=[...])` gives a `Hit` (`object`,
   `position`, `normal`, `distance`) or `None`.
-- `solid.overlap_sphere(centre, radius)`, `overlap_capsule(a, b, radius)` and
-  `overlap_box(centre, size)` give contacts.
+- `solid.overlap_sphere(centre, radius)`, `solid.overlap_capsule(a, b, radius)` and
+  `solid.overlap_box(centre, size)` give contacts.
 - `solid.push_out(centre, radius)` is the move out of walls.
 - `renderer.pick(ev)` tells what the last frame drew under a `MouseEvent` (`.object`, `.position`),
   wherever on the screen it was drawn.
@@ -515,17 +528,18 @@ comes with `run(key_release=True)`.
   top-left corner.
 
 **Effects.**
-- `Particles(gravity, ground, face_camera, seed=None)` (`seed` an int, for the same particles each run) with `emit(point, count, velocity, speed, life, size,
-  color, ...)` and `update(dt)`, put in the render list.
-- `Lines(starts, ends, color, width)`.
-- `SpriteSheet(picture, columns, animations={...})` and `Sprite(sheet, position)`, with
+- `Particles(face_camera=False, gravity=(0, 0, 0), ground=None, seed=None)` (`seed` an int, for the
+  same particles each run) with `emit(at, count=1, velocity=..., speed=..., life=..., size=...,
+  color=..., ...)` and `update(dt)`, put in the render list.
+- `Lines(starts, ends, color=..., width=1.0)`.
+- `SpriteSheet(image, columns, animations={...})` and `Sprite(sheet, position=...)`, with
   `play(name)` and `update(dt)`.
 - `Sky()`, `Gradient(top, bottom)` and `SkyBox(textures)` as `renderer.background`;
   `Fog(start, end, color)` as `renderer.fog`.
 
 **Widgets.**
-- `Button(label, action, key)`, `Toggle(label, value, key)`, `Slider(label, value, lo, hi, step)` and
-  `Choice(label, options, key)` go in a `Panel([...], vertical=False)`.
+- `Button(label, action, key=None)`, `Toggle(label, value=False, key=None)`,
+  `Slider(label, value, lo, hi, step=1)` and `Choice(label, options, value=None, key=None)` go in a `Panel([...], vertical=False)`.
 - In each frame, `events = panel.handle(events)` takes what the panel uses, and
   `panel.draw(screen, y, x)` draws it.
 - `DisplayControls(renderer=renderer)` is the F2 to F8 display settings bar:
@@ -541,61 +555,51 @@ lists every command.
 
 ## Gotchas
 
-Mistakes that look right and fail quietly, or fail far from their cause. The engine makes most of
-its own mistakes loud (a wrong-shaped position, rotation or colour is a clear `ValueError`, an edited
-animation track raises, the playtest warns of mesh edits it can't see), but these it can't:
+Mistakes that look right and fail quietly. Most mistakes are loud instead, and their messages say
+what to do (see [Errors that name their fix](#errors-that-name-their-fix)), but the engine can't
+catch these:
 
 1. **Keys equal their characters, except as set members and dict keys.** `key == "q"` and
    `key in ("q", "e")` work, but `key in {"q", "e"}` and `MOVES.get(key)` with string keys miss
    (a key hashes as the int it is). Look up `chr(key)`, or use a tuple.
 2. **`frame()` returning `False` quits**, and only `False`: returning `None` or `0` carries on.
    Don't return `False` by accident from a helper whose result you pass on.
-3. **`dt` is in seconds**, and under `run()` it is the real time since the last frame, at most
-   0.1 s (`run(max_dt=...)`), so the game runs slower rather than skipping ahead when frames are
-   slow. In a playtest it is fixed (1/30 by default).
-4. **Clicks need `mouse = True` on the game's class** (`"drag"` for sliders, `"move"` for hover),
-   and `KeyRelease` events need `key_release = True` (`screen.held` doesn't: `run()` always asks for
-   releases). `run(game)` and the playtest both read them; a playtest click the game didn't ask
-   for is an error. Pass the game itself (or `game.frame`) to `run()`: a plain function has no
-   class to declare them on, so it needs `run(frame, mouse=True)` and `Playtest(frame, mouse=True)`
-   alike.
-5. **Held keys need `screen.held`, not events.** A held key arrives as a press, a half-second
+3. **Held keys need `screen.held`, not events.** A held key arrives as a press, a half-second
    pause, then repeats, so moving a player once per key event stutters. Move by
    `speed * dt` while `"w" in screen.held`. It is exact in terminals that report releases (kitty,
    foot, Ghostty, Alacritty, iTerm2, Windows); in the others it guesses, and a tap holds a key for
    up to half a second. Playtest with `--no-releases` to see that case.
-6. **Coordinates go in both orders.** `screen.text(y, x)`, `screen.bar(y, x)` and `screen.draw(...,
+4. **Coordinates go in both orders.** `screen.text(y, x)`, `screen.bar(y, x)` and `screen.draw(...,
    top, left)` take the row first, while `MouseEvent.x/.y` and `click X Y` take the column first.
    `screen.size()` is `(rows, cols)`. See [Conventions](#conventions).
-7. **Rotations are quaternions, w first.** `rotation=(0, 45, 0)` is not 45 degrees about y: it is
-   refused with an error. Use `quat_axis_angle((0, 1, 0), np.radians(45))`.
-8. **A new object starts at the origin.** An `Object3D` made in the middle of play without a
+5. **A new object starts at the origin.** An `Object3D` made in the middle of play without a
    position shows for a frame at (0, 0, 0) before your code moves it. Give it its position when you
    make it, or make it with `visible=False` until it is placed.
-9. **A mesh's arrays are read-only once drawn.** The renderer and `Colliders` keep packed copies
-   of them, so an edit in place raises `ValueError: assignment destination is read-only` (or
-   `output array is read-only`) rather than going unseen. Edit the copy `mesh.edit("vertices")`
-   gives (`mesh.edit("textures", i)` for a texture) again each time, or give the mesh a new array.
-   The lock covers the mesh's own arrays, not other arrays they are views of: edits through those
-   still need `renderer.invalidate()`, and the playtest warns of them. Moving objects needs nothing:
-   change `obj.position`, `rotation` or `scale` freely.
-10. **Animation tracks can't be edited.** A track's keyframes are read-only once it is made (an edit
-    raises): give the animation a new `Track` instead. A `Clip`'s `loop` and `speed` can be changed.
-11. **`Colliders` don't see skinned poses.** A skinned character is seen by queries in its bind
-    pose (a set holding one warns of it). Stand an invisible box or capsule in for it, moved with it,
-    in the set instead.
-12. **`print()` output shows only once the game ends.** `run()` holds it back while it goes (it
-    would scribble over the picture), so watch a value live on the status line, or print it in a
-    playtest.
-13. **Don't start the game from an agent's shell.** `run()` needs a terminal and raises without one;
-    play it with the playtest. Keep `run()` inside `main()` behind
-    `if __name__ == "__main__":` so the playtest and tests can import the file.
-14. **Build things once.** Make meshes, load models and textures, and build `Renderer`s and
-    `Colliders` in `__init__` (or when a level loads), not in `frame()`. A new `Camera` or light
-    each frame is fine, and so is showing, hiding or moving objects.
-15. **Frozen programs and custom launchers.** The first run compiles in several processes at once.
-    PyInstaller programs are handled; a launcher of your own that can't start Python processes should
-    set `UNICODE3D_NO_PRECOMPILE=1`.
+6. **A playtest plays perfectly; people don't.** It presses keys for exact frames, at a fixed `dt`,
+   in a terminal that reports releases. A game can pass every playtest and still feel wrong: a tap
+   that turns too far, a speed tied to the frame rate. Playtest with `--no-releases` and
+   `--jitter 0.5` too, and when you hand a change over, list what a person should try by hand.
+7. **`print()` output shows only once the game ends.** `run()` holds it back while it goes (it
+   would scribble over the picture), so watch a value live on the status line, or print it in a
+   playtest.
+8. **`Colliders` don't see skinned poses.** A skinned character is seen by queries in its bind
+   pose (a set holding one warns of it). Stand an invisible box or capsule in for it, moved with it,
+   in the set instead.
+9. **Build things once.** Make meshes, load models and textures, and build `Renderer`s and
+   `Colliders` in `__init__` (or when a level loads), not in `frame()`: it works, slowly. A new
+   `Camera` or light each frame is fine, and so is showing, hiding or moving objects.
+
+### Errors that name their fix
+
+| the error | what it means |
+|-----------|---------------|
+| `ValueError: assignment destination is read-only` (or `output array is read-only`) | An edit in place of a mesh's array once it has been drawn: edit the copy `mesh.edit("vertices")` gives (`mesh.edit("textures", i)` for a texture), or give the mesh a new array. Moving objects needs neither. On a `Track`'s `times` or `values`: give the animation a new `Track`. |
+| `ValueError: rotation must be a quaternion, four numbers (w, x, y, z)...` | Rotations are quaternions, w first, not angles: `quat_axis_angle((0, 1, 0), np.radians(45))`. |
+| `ValueError: colour must be a Color (Color.RED, ...) or an (r, g, b) triple...` | A colour by name is a `Color` (`Color.ORANGE`), not a string. |
+| `PlaytestError: the program's mouse is False, so run() would never pass it this MouseEvent...` | The game didn't ask for the mouse: give its class `mouse = True` (`"drag"` for sliders, `"move"` for hover). A plain frame function has no class: pass `mouse=` to `run()` and `Playtest` alike. |
+| `ValueError: Game.mouse is ...: run() and the playtest read a game's mouse as its setting` | The game uses `mouse` (or `key_release`) for something of its own: rename it. |
+| `OSError: unicode3d needs a terminal...` | `run()` was started without one, as from an agent's shell: play it with the playtest. Keep `run()` inside `main()` behind `if __name__ == "__main__":` so tests can import the file. |
+| `PlaytestError: frame() raised ...` | The game raised: the traceback is printed above it, and the screen as it was saved as `crash-frame-N.png`. |
 
 ## Where to look next
 

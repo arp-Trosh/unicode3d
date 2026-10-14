@@ -930,7 +930,9 @@ is never simplified nor a mirror.
 <details>
 <summary><h3 id="colours">Colours</h3></summary>
 
-`Object3D.color` takes a named `Color` or an `(r, g, b)` triple (0..255 ints or 0..1 floats). A mesh
+`Object3D.color` takes a named `Color` (`WHITE`, `BLACK`, `GREY` or `GRAY`, `RED`, `ORANGE`, `YELLOW`,
+`GREEN`, `CYAN`, `BLUE`, `PURPLE`, `MAGENTA`, `PINK`, `BROWN`) or an `(r, g, b)` triple (0..255 ints or
+0..1 floats). A mesh
 can carry its own colours: `mesh.face_colors` (one per face) or `mesh.vertex_colors` (one per
 vertex, blended smoothly across each face, in linear light). Like textures, they multiply the
 object's colour, so give the object `color=(255, 255, 255)` to show them as they are; the default
@@ -1247,7 +1249,8 @@ vanish with it.
   framebuffer rendered by hand. Either way the framebuffer notes where it went, for `pick(ev)`,
   `ray(ev)` and `label()`.
 - `screen.text(y, x, s, color, bold=False, reverse=False, dim=False, bg=None)` writes text. A named
-  `Color` is one of the terminal's own ANSI colours, so text follows the user's theme; `(r, g, b)`
+  `Color` is one of the terminal's own ANSI colours, so text follows the user's theme (`ORANGE`,
+  `PINK`, `PURPLE` and `BROWN`, which the ANSI palette lacks, are shown as their RGB); `(r, g, b)`
   (0..255 ints or 0..1 floats) is that colour, exactly in truecolor and as the nearest palette
   entry in 256 or 16 colours. `bg` sets the cells' background the same way (a card's face, a
   highlighted row); `None` leaves the screen's. In mono, text keeps the terminal's colours, and

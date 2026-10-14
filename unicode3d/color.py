@@ -29,7 +29,8 @@ _RGB = 1 << 25      # packed colour: 0xRRGGBB in the low 24 bits
 
 
 class Color(IntEnum):
-    """Named hues: for text they are the terminal's ANSI colours, for 3D objects the RGB in HUE_RGB."""
+    """Named hues: for text they are the terminal's ANSI colours (ORANGE, PINK, PURPLE and BROWN, which the ANSI
+    palette lacks, their RGB), for 3D objects the RGB in HUE_RGB. GRAY is GREY."""
     DEFAULT = 0
     WHITE = 1
     RED = 2
@@ -38,10 +39,18 @@ class Color(IntEnum):
     BLUE = 5
     MAGENTA = 6
     CYAN = 7
+    BLACK = 8
+    GREY = 9
+    GRAY = 9
+    ORANGE = 10
+    PINK = 11
+    PURPLE = 12
+    BROWN = 13
 
 
 # ANSI colour number of each named hue, for text.
-ANSI = {Color.WHITE: 7, Color.RED: 1, Color.GREEN: 2, Color.YELLOW: 3, Color.BLUE: 4, Color.MAGENTA: 5, Color.CYAN: 6}
+ANSI = {Color.WHITE: 7, Color.RED: 1, Color.GREEN: 2, Color.YELLOW: 3, Color.BLUE: 4, Color.MAGENTA: 5, Color.CYAN: 6,
+        Color.BLACK: 0, Color.GREY: 8}
 
 # Fully lit surface colour (sRGB) of each named hue when used on a 3D object.
 HUE_RGB = {
@@ -53,6 +62,12 @@ HUE_RGB = {
     Color.BLUE: (60, 110, 240),
     Color.MAGENTA: (210, 70, 210),
     Color.CYAN: (40, 200, 215),
+    Color.BLACK: (20, 20, 20),
+    Color.GREY: (128, 128, 128),
+    Color.ORANGE: (245, 130, 30),
+    Color.PINK: (240, 125, 175),
+    Color.PURPLE: (130, 60, 200),
+    Color.BROWN: (125, 80, 45),
 }
 
 
@@ -277,6 +292,7 @@ def put_sgr_color(buf, k, packed, background):
 
 
 def ansi_color(color):
-    """Packed cell colour of a named Color as ANSI text colour (DEFAULT stays the terminal's own)."""
+    """Packed cell colour of a named Color as ANSI text colour (DEFAULT stays the terminal's own). KeyError for
+    the hues the ANSI palette lacks (see Color)."""
     color = Color(int(color))
     return DEFAULT if color == Color.DEFAULT else int(encode_index(ANSI[color]))

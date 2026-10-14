@@ -32,7 +32,8 @@ import unicodedata
 import numpy as np
 from numba import njit
 
-from .color import _RGB, COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
+from .color import (_RGB, ANSI, COLOR_MODES, DEFAULT, HUE_RGB, Color, ansi_color, put_int, put_sgr_color, quantize,
+                    to_linear_rgb)
 from .console import MOUSE_MODES, detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import HeldKeys, InputDecoder, Key, KeyCode, KeyRelease, MouseEvent, key_codes
@@ -259,6 +260,7 @@ class Screen:
         self.held = HeldKeys()      # which keys are down, updated by keys()
         self._decoder = InputDecoder()
         self._text_codes = {}       # string: its code points as text() writes them (see _printable)
+        self._drawn = None          # a list the framebuffers draw_frame() draws are added to (the playtest's), or None
         self._rows = self._cols = 0
         self.set_glyphs(glyphs)
         self.set_color(color)
@@ -363,9 +365,10 @@ class Screen:
 
     def text(self, y, x, s, color=Color.DEFAULT, bold=False, reverse=False, dim=False, bg=None):
         """Write a string at row y, column x, clipped to the screen. color: a named Color, from the terminal's ANSI
-        palette (so it follows the user's theme), or (r, g, b), 0..255 ints or 0..1 floats, as near as the colour
-        mode goes (exact in truecolor; the nearest palette entry otherwise). bg likewise, behind the text, or None
-        for the screen's background. In mono, text keeps the terminal's colours: use reverse to set it apart."""
+        palette (so it follows the user's theme; ORANGE, PINK, PURPLE and BROWN, which it lacks, as RGB), or
+        (r, g, b), 0..255 ints or 0..1 floats, as near as the colour mode goes (exact in truecolor; the nearest
+        palette entry otherwise). bg likewise, behind the text, or None for the screen's background. In mono, text
+        keeps the terminal's colours: use reverse to set it apart."""
         y, x = _cell(y), _cell(x)
         if y is None or x is None or not 0 <= y < self._rows or x >= self._cols:
             return
@@ -390,6 +393,8 @@ class Screen:
         """The packed cell colour of a text colour (see text()): default for None, and in mono."""
         if color is None or self.color_mode == "mono":
             return default
+        if isinstance(color, (int, np.integer)) and Color(int(color)) not in ANSI and color != Color.DEFAULT:
+            color = HUE_RGB[Color(int(color))]  # (a hue the ANSI palette lacks: its RGB)
         if isinstance(color, (int, np.integer)):
             packed = _ANSI_CELLS.get(color)
             if packed is None:  # (ansi_color raises for anything but a Color, so this holds at most 17)
@@ -475,6 +480,8 @@ class Screen:
                              f"{self.cell_pixels}: draw with screen.draw(renderer, ...), which sizes the renderer, "
                              f"or pass screen.cell_pixels to Renderer.resize")
         fb.top, fb.left = top, left
+        if self._drawn is not None:
+            self._drawn.append(fb)
         cells = match_cells(fb, self.glyphs, self.background)
         h, w = cells.chars.shape
         y0, x0 = max(top, 0), max(left, 0)
@@ -901,18 +908,19 @@ def _program_settings(program, mouse=None, key_release=None):
     return frame, settings["mouse"], settings["key_release"]
 
 
-def run(frame_fn, fps=30, glyphs=None, color=None, mouse=None, background=None, title=None, key_release=None,
+def run(game, fps=30, glyphs=None, color=None, mouse=None, background=None, title=None, key_release=None,
         erase=True, max_dt=0.1):
-    """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
+    """Take over the terminal and call game.frame(screen, dt, events) up to `fps` times a second until it returns
+    False. game: an object with a frame() method, or the frame function itself.
 
-    frame_fn may also be a game, an object with a frame() method. mouse and key_release left as None come from the
+    mouse and key_release left as None come from the
     game's attributes of those names (`mouse = "drag"` on its class), as in the playtest, so the game declares in one
     place what it wants from the mouse and keyboard; False if it doesn't say.
 
     Before each call the screen is erased (unless erase is False, for a program that keeps what it wrote from
-    frame to frame), and after it the screen is refreshed: what frame_fn drew is sent to the terminal.
+    frame to frame), and after it the screen is refreshed: what frame() drew is sent to the terminal.
 
-    frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved. An fps of 0 draws
+    frame() may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved. An fps of 0 draws
     frames as fast as it can.
 
     dt is the time since the last frame in seconds, at most max_dt (after a pause, such as a window being dragged or
@@ -925,7 +933,7 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=None, background=None, 
 
     mouse: False, True (clicks and wheel), "drag" (also moves while a button is
     held, for sliders) or "move" (every move, for hover effects).
-    key_release: pass key releases to frame_fn as KeyRelease events. The terminal
+    key_release: pass key releases to frame() as KeyRelease events. The terminal
     is asked to report releases either way, so screen.held tells exactly which
     keys are down where it can (the kitty keyboard protocol, Windows), and
     estimates it elsewhere.
@@ -937,7 +945,7 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=None, background=None, 
     Python itself leaves a stack trace there (faulthandler), where the screen would lose it. SIGTERM ends the
     program as sys.exit() would, with the terminal restored (unless the program handles that signal itself).
     """
-    frame_fn, mouse, key_release = _program_settings(frame_fn, mouse, key_release)
+    frame_fn, mouse, key_release = _program_settings(game, mouse, key_release)
     log, screen, frame, handler = _open_crash_log(), None, 0, faulthandler.is_enabled()
     if log is not None:
         faulthandler.enable(log)
