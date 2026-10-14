@@ -44,6 +44,16 @@ class TrackTests(unittest.TestCase):
         clip.apply(1.0)
         np.testing.assert_allclose(obj.position, (5.0, 0.0, 0.0))
 
+    def test_easings_by_name_or_function(self):
+        import unicode3d
+        self.assertIs(unicode3d.ease_in_out, unicode3d.animation.ease_in_out)  # (importable from the top too)
+        keys = [(0.0, 0.0), (1.0, 1.0)]
+        self.assertEqual(Track(keys, "ease_in_out").at(0.25), Track(keys, unicode3d.ease_in_out).at(0.25))
+        with self.assertRaisesRegex(ValueError, "ease_in_out"):  # (the names are listed)
+            Track(keys, "ease-in-out")
+        with self.assertRaisesRegex(TypeError, "easing"):
+            Track([(0.0, 0.0), (1.0, 1.0, 0.5)])
+
     def test_given_arrays_stay_the_callers(self):
         value = np.array([1.0, 2.0, 3.0])
         Track([(0.0, value)])
@@ -59,6 +69,14 @@ class MessageTests(unittest.TestCase):
                           (dict(position="here"), "three numbers"), (dict(color="red"), "Color.RED")]:
             with self.subTest(kw=kw), self.assertRaisesRegex(ValueError, words):
                 self.render(**kw)
+
+    def test_a_particle_seed_is_a_whole_number(self):
+        from unicode3d import Particles
+        for seed in (0.37, -1, True, "7"):
+            with self.subTest(seed=seed), self.assertRaisesRegex(TypeError, "whole number"):
+                Particles(seed=seed)
+        Particles(seed=np.int64(7))
+        Particles(seed=None)
 
 
 def skinned():

@@ -58,7 +58,7 @@ class Particles:
         size above it (the underside of a mesh 1 across). bounce is the share of speed kept upwards, friction
         along the ground.
     limit: the most particles held at once; beyond it, emit() makes room by dropping the earliest emitted.
-    seed: for the random numbers emit() draws (the same seed and calls give the same particles).
+    seed: an int (or None) for the random numbers emit() draws (the same seed and calls give the same particles).
 
     Like an Object3D, a Particles has position, rotation, scale, visible and parent: particles live in its own
     space (the world's, by default), so a Particles with a parent moves with it. emissive, cast_shadows (False
@@ -90,6 +90,8 @@ class Particles:
         self.position = np.array(position, dtype=float)
         self.rotation = quat_identity() if rotation is None else np.array(rotation, dtype=float)
         self.scale, self.visible, self.parent = scale, visible, parent
+        if not (seed is None or isinstance(seed, (int, np.integer)) and not isinstance(seed, bool) and seed >= 0):
+            raise TypeError(f"Particles seed must be a whole number 0 or more, or None, not {seed!r}")
         self.rng = np.random.default_rng(seed)
         self.limit = max(int(limit), 0)
         n = self.limit

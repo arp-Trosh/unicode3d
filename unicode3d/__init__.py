@@ -13,7 +13,8 @@ from .threads import prefer_sleeping_workers as _prefer_sleeping_workers
 _prefer_sleeping_workers()  # before any kernel runs (see threads.py)
 del _prefer_sleeping_workers
 
-from .animation import Animation, Clip, RotationTrack, SplineTrack, Track
+from .animation import (Animation, Clip, RotationTrack, SplineTrack, Track, ease_in, ease_in_out, ease_out,
+                        ease_out_back, ease_out_bounce, lerp)
 from .background import Fog, Gradient, Sky, SkyBox
 from .color import Color
 from .keys import HeldKeys, Key, KeyRelease, MouseEvent

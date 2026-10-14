@@ -83,6 +83,17 @@ EASINGS = {f.__name__: f for f in (linear, ease_in, ease_out, ease_in_out, ease_
 LOOPS = ("once", "loop", "pingpong")
 
 
+def _easing(easing):
+    """An easing function, given one or the name of one in EASINGS."""
+    if isinstance(easing, str):
+        if easing not in EASINGS:
+            raise ValueError(f"no easing called {easing!r}: the names are {', '.join(EASINGS)}")
+        return EASINGS[easing]
+    if not callable(easing):
+        raise TypeError(f"an easing is a function of 0..1 or the name of one in EASINGS, not {easing!r}")
+    return easing
+
+
 def _check_loop(loop):
     if loop not in LOOPS:
         raise ValueError(f"loop must be one of {LOOPS}, not {loop!r}")
@@ -126,9 +137,8 @@ class Track:
         keys = sorted(keys, key=lambda k: k[0])
         self.times = _read_only(np.array([float(k[0]) for k in keys]))
         self.values = tuple(_read_only(self._value(k[1])) for k in keys)
-        default = EASINGS[easing] if isinstance(easing, str) else easing
-        self.easings = tuple(EASINGS[k[2]] if len(k) > 2 and isinstance(k[2], str) else (k[2] if len(k) > 2 else default)
-                             for k in keys)
+        default = _easing(easing)
+        self.easings = tuple(_easing(k[2]) if len(k) > 2 else default for k in keys)
         self.loop = loop
         self._sealed = True
 
