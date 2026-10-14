@@ -1107,7 +1107,7 @@ class Statues:
 
 class Show:
     def __init__(self):
-        self.renderer = Renderer(1, 1)
+        self.renderer = Renderer()
         self.renderer.background = Gradient((30, 22, 28), (8, 6, 10))
         self.bar = StatusBar(self.renderer)
         self.gravity = Slider("Gravity", GRAVITY, 1.6, 19.6, step=0.2, keys="[]", length=10, fmt=self._gravity)
@@ -1240,7 +1240,7 @@ class Show:
                     self.zoom = float(np.clip(self.zoom * (1.15 if ev.button == MouseEvent.WHEEL_UP else 1 / 1.15),
                                               1.0, 3.0))
                 elif ev.button == MouseEvent.LEFT and ev.pressed and not ev.moved:
-                    picked = self.renderer.pick(ev.x, ev.y)  # (what was drawn there, puppets bent as they stood)
+                    picked = self.renderer.pick(ev)  # (what was drawn there, puppets bent as they stood)
                     said = self.statues.click(picked.object) if picked is not None else None
                     if said:
                         self.say(said)
@@ -1265,11 +1265,8 @@ class Show:
         self.advance(dt, screen.held)
         rows, cols = screen.size()
         view_rows = max(rows - 2, 1)
-        self.renderer.resize(cols, view_rows, screen.cell_pixels)
         camera = self.camera(cols, view_rows, screen.cell_pixels)
-        fb = self.renderer.render(self.objects(), camera, self.theatre.lights())
-        screen.erase()
-        screen.draw_frame(fb)
+        screen.draw(self.renderer, self.objects(), camera, self.theatre.lights(), rows=view_rows)
         ms = 1000.0 * (time.perf_counter() - start)
         self.frame_ms += (ms - self.frame_ms) * 0.1
         n = len(self.marionettes)
@@ -1288,7 +1285,6 @@ class Show:
             turn = "[,/. or left/right] turn"
         self.bar.draw(screen, f"[wasd] move the bar  {turn}  [r/f] up/down  [q/e] legs  [z/x] hands  [m] sing  [enter] freeze  "
                               f"[click] a statue  [-/=] puppets  {walk}[esc] quit")
-        screen.refresh()
         return True
 
 

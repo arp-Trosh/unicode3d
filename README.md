@@ -272,23 +272,21 @@ In short; [How unicode3d works](docs/how-it-works.md) explains each of these wit
 <summary><h2 id="using-it-in-a-game">Using it in a game</h2></summary>
 
 `run()` takes over the terminal and calls your frame function about `fps` times a second; a
-`Renderer` draws objects into pixels, and `screen.draw_frame()` turns them into cells:
+`Renderer` draws objects into pixels, and `screen.draw()` sizes it to fit the screen, renders and
+turns the pixels into cells:
 
 ```python
 from unicode3d import Camera, Color, Key, Light, Object3D, Renderer, make_box, run
 
 cube = Object3D(make_box(), color=Color.CYAN)   # or color=(r, g, b)
-renderer, camera, light = Renderer(1, 1), Camera(), Light()
+renderer, camera, light = Renderer(), Camera(), Light()
 
 def frame(screen, dt, keys):
     if ord("q") in keys or Key.ESC in keys:
         return False                                     # stops run()
     rows, cols = screen.size()
-    renderer.resize(cols, rows - 1, screen.cell_pixels)  # cell_pixels depends on the glyph set
-    screen.erase()
-    screen.draw_frame(renderer.render([cube], camera, light))
+    screen.draw(renderer, [cube], camera, light, rows=-1)  # all but the last row
     screen.text(rows - 1, 0, "q quits", Color.YELLOW)
-    screen.refresh()
 
 run(frame, fps=30)
 ```
@@ -354,12 +352,13 @@ drawn as a box), so sextants are picked by terminal, never by guessing at fonts.
 <details>
 <summary><h3 id="renderer">Renderer</h3></summary>
 
-`Renderer(width, height, cell_pixels=(1, 2), ...)` options, each also an attribute you can change
-between frames:
+`Renderer(width=1, height=1, cell_pixels=(1, 2), ...)` options, each also an attribute you can change
+between frames (`screen.draw()` sets the first three to fit the screen every frame;
+`renderer.resize(width, height, cell_pixels)` does it by hand):
 
 | option | default | effect |
 |--------|---------|--------|
-| `cell_pixels` | `(1, 2)` | pixels per cell; pass `screen.cell_pixels` to `resize()` every frame, since it follows the glyph set |
+| `cell_pixels` | `(1, 2)` | pixels per cell; it follows the screen's glyph set (`screen.cell_pixels`), which `screen.draw()` takes care of |
 | `cell_aspect` | `0.5` | a cell's width divided by its height |
 | `samples` | `4` | samples per pixel: 1, 4, 8 or 16 |
 | `edge_samples` | `8` | extra samples in pixels whose samples disagree: 0, 4, 8 or 16 |
@@ -391,17 +390,17 @@ warns of an edit made without it).
 <details>
 <summary><h3 id="picking">Picking</h3></summary>
 
-`renderer.pick(x, y)` tells what the last render drew in cell `(x, y)` of its frame (cells count
-from the frame's top-left, so subtract where you drew it, e.g. from a `MouseEvent`): a `Pick` with
-`object` (the `Object3D` itself), `position` (the point on its surface, in the world) and
-`distance` from the camera, or `None` where nothing was drawn. `renderer.ray(x, y)` gives the line
-of sight through a cell as `(origin, direction)`, for aiming at things that aren't drawn, such as an
-imaginary floor plane.
+`renderer.pick(ev)` tells what the last render drew under a `MouseEvent`, wherever on the screen the
+frame was drawn: a `Pick` with `object` (the `Object3D` itself), `position` (the point on its
+surface, in the world) and `distance` from the camera, or `None` where nothing was drawn.
+`renderer.ray(ev)` gives the line of sight through the cell's centre as `(origin, direction)`, for
+aiming at things that aren't drawn, such as an imaginary floor plane. Both also take a cell of the
+frame, `pick(x, y)`, counted from the frame's top-left (fractions are fine for `ray()`).
 
 ```python
 for ev in events:
     if isinstance(ev, MouseEvent) and ev.pressed and ev.button == MouseEvent.LEFT:
-        hit = renderer.pick(ev.x, ev.y - top)
+        hit = renderer.pick(ev)
         if hit:
             selected = hit.object
 ```
@@ -416,18 +415,18 @@ off screen or not drawn at all, use ray and overlap queries.
 
 Text anchored to points in the scene, drawn as terminal text (sharper than anything textured at
 terminal resolution): names over characters, damage numbers, meters (a character's health, say),
-markers on things off screen. `screen.label(renderer, point, text, color, top=0, left=0)` writes `text` centred on the
-cell the point landed on in the renderer's last frame (drawn at `top`, `left`), `dy` rows lower,
-and returns an `Anchor`, or `None` if it wrote nothing:
+markers on things off screen. `screen.label(renderer, point, text, color)` writes `text` centred on the
+cell the point landed on in the renderer's last frame (wherever it was drawn; `top` and `left` say
+otherwise), `dy` rows lower, and returns an `Anchor`, or `None` if it wrote nothing:
 
 ```python
-screen.draw_frame(fb, top=1)
+screen.draw(renderer, objects, camera, light, top=1)
 for enemy in enemies:
     head = enemy.position + (0.0, 1.2, 0.0)
-    if screen.label(renderer, head, enemy.name, Color.RED, top=1, owner=enemy):
+    if screen.label(renderer, head, enemy.name, Color.RED, owner=enemy):
         a = renderer.anchor(head)
         screen.bar(1 + a.y + 1, a.x - 3, 6, enemy.health)   # a meter under the name
-screen.label(renderer, goal, "goal", Color.YELLOW, top=1, clamp=True, hide=False)
+screen.label(renderer, goal, "goal", Color.YELLOW, clamp=True, hide=False)
 ```
 
 - A point behind something drawn is hidden (the depth buffer says so); `owner` (an object, objects
@@ -466,7 +465,7 @@ if hit:
     print(hit.object, hit.position, hit.normal, hit.distance)
 walker += walls.push_out(walker, 0.3)                            # out of anything it walked into
 ground = walls.raycast(feet + (0, 0.5, 0), (0, -1, 0))            # what it stands on
-under_mouse = walls.raycast(*renderer.ray(ev.x, ev.y - top))      # clicking the world
+under_mouse = walls.raycast(*renderer.ray(ev))                    # clicking the world
 ```
 
 - `raycast(origin, direction, max_distance=inf, ignore=(), all=False)` gives the nearest `Hit`
@@ -1210,14 +1209,25 @@ def frame(screen, dt, keys):
 <summary><h3 id="screen-and-run">Screen and run()</h3></summary>
 
 `run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None,
-key_release=False)` takes over the terminal (naming its window `title`, if given) and restores it
+key_release=False, erase=True)` takes over the terminal (naming its window `title`, if given) and restores it
 however the loop ends (Ctrl-C raises `KeyboardInterrupt`; `kill`'s SIGTERM exits as `sys.exit()`
 would, unless the program handles that signal itself). `frame_fn(screen, dt, keys)` returns
 `False` to stop. `keys` holds ints (a character's code, or a `Key` such as `Key.UP`, `Key.ENTER`,
 `Key.ESC`), `MouseEvent`s and, with `key_release=True`, `KeyRelease`s (see [Input](#input)).
 Without a terminal (stdin redirected, or a program started by a tool such as an agent's shell) it raises
 `OSError` saying so: play the program with the playtest instead (see [Making a game](unicode3d/starter/making-a-game.md)).
+Before each call the screen is erased, and after it what was drawn is sent to the terminal
+(`screen.refresh()`); `erase=False` keeps what was written from frame to frame instead.
 
+- `screen.size()` is the terminal's size in cells, `(rows, cols)`, also as `.rows` and `.cols`.
+- `screen.draw(renderer, objects, camera, lights, top=0, left=0, rows=None, cols=None)` renders a
+  scene into a part of the screen in one call: it sizes the renderer to fit (the terminal's size and
+  the glyph set's `cell_pixels` both change while a program runs), renders and draws the frame with
+  its top-left cell at row `top`, column `left`, and returns the framebuffer. `rows` and `cols` of
+  `None` reach the screen's edge, and negative ones stop that many cells short of it (`rows=-1`
+  leaves the last row for a status line). `screen.draw_frame(fb, top=0, left=0)` draws a
+  framebuffer rendered by hand. Either way the framebuffer notes where it went, for `pick(ev)`,
+  `ray(ev)` and `label()`.
 - `screen.text(y, x, s, color, bold=False, reverse=False, dim=False, bg=None)` writes text. A named
   `Color` is one of the terminal's own ANSI colours, so text follows the user's theme; `(r, g, b)`
   (0..255 ints or 0..1 floats) is that colour, exactly in truecolor and as the nearest palette
@@ -1241,9 +1251,9 @@ Without a terminal (stdin redirected, or a program started by a tool such as an 
   over SSH. The terminal is then up to that many levels off, less than half a just-noticeable
   difference at 1, and only for a moment: the cells still off are sent once the picture stops
   changing, or after 30 refreshes. 0 sends every change.
-- `screen.refresh()` sends what changed in the grid. Under `run()` it returns once the changes are
-  worked out, and they are written to the terminal while the next frame is drawn; the grid is
-  free to change as soon as it returns. At most one frame is on its way at a time, so a slow
+- `screen.refresh()` sends what changed in the grid; `run()` calls it after each frame. Under
+  `run()` it returns once the changes are worked out, and they are written to the terminal while
+  the next frame is drawn; the grid is free to change as soon as it returns. At most one frame is on its way at a time, so a slow
   terminal lowers the frame rate rather than falling behind. With 200 KB frames and a terminal
   taking in 20 MB a second, that is about a quarter more frames; terminals that read quickly
   (kitty, and most where a frame fits in the system's buffer) gain little.
@@ -1349,7 +1359,6 @@ def frame(screen, dt, events):
     rows, cols = screen.size()
     panel.draw(screen, rows - 1, 1)
     controls.draw(screen, rows - 1, cols - controls.width - 1)
-    screen.refresh()
 
 run(frame, mouse="drag")
 ```

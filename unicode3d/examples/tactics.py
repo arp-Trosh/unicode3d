@@ -158,7 +158,7 @@ class Tactics:
         self.chosen = Object3D(marker, color=(120, 230, 255), emissive=0.8, opacity=0.6, cast_shadows=False)
         self.objects = [self.terrain, sea, *self.scenery, *(p.obj for p in self.pawns), self.hover, self.chosen]
         self.solid = Colliders([self.terrain, *self.scenery, *(p.obj for p in self.pawns)])
-        self.renderer = Renderer(1, 1, background=Gradient((70, 100, 140), (15, 20, 35)), fog=0.2)
+        self.renderer = Renderer(background=Gradient((70, 100, 140), (15, 20, 35)), fog=0.2)
         self.bar = StatusBar(self.renderer)
         self.light = Light(direction=np.array([-0.4, -1.0, -0.6]), ambient=0.35, diffuse=0.7, shadows=True)
         self.ortho = True
@@ -277,9 +277,6 @@ class Tactics:
         self.solid.update()  # (the pawns move)
         self.camera = self.make_camera()
 
-        rows, cols = screen.size()
-        view_rows = max(rows - 1, 1)
-        self.renderer.resize(cols, view_rows, screen.cell_pixels)
         # The markers go where the last frame's view puts the pointer and the chosen pawn.
         _, self.hovered = self.tile_at(*self.pointer) if self.pointer is not None else (None, None)
         for marker, tile in ((self.hover, self.hovered), (self.chosen, self.selected.tile)):
@@ -287,9 +284,7 @@ class Tactics:
             if marker.visible:
                 x, z = tile_centre(*tile)
                 marker.position = np.array([x, tile_top(self.levels[tile]) + 0.02, z])
-        fb = self.renderer.render(self.objects, self.camera, self.light)
-        screen.erase()
-        screen.draw_frame(fb)
+        screen.draw(self.renderer, self.objects, self.camera, self.light, rows=-1)
         self.draw_labels(screen)
         mode, other = ("orthographic", "perspective") if self.ortho else ("perspective", "orthographic")
         # (the point of the demo: which view this is, and the key to compare with the other)
@@ -297,7 +292,6 @@ class Tactics:
         where = f"   tile {self.hovered[0]},{self.hovered[1]}" if self.hovered else ""
         self.bar.draw(screen, f"[o] to {other}  [click] pick a pawn, then a tile  [q/e] turn  [+/-] zoom  "
                               f"[wasd] pan  [tab] next  [esc] quit   {self.selected.name} chosen{where}")
-        screen.refresh()
         return True
 
     def draw_labels(self, screen):

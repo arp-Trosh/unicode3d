@@ -29,7 +29,7 @@ class Viewer:
         self.reflectivity = [obj.reflectivity for obj in model]
         self.camera = Camera(position=np.array([0.0, 0.0, 4.0]))
         self.light = Light(direction=np.array([0.0, 0.0, -1.0]), shadows=True)
-        self.renderer = Renderer(1, 1)
+        self.renderer = Renderer()
         self.yaw = self.pitch = 0.0
         self.spin = 0.6  # radians per second
         self.axis = np.array([1.0, 1.0, 0.3])
@@ -85,11 +85,7 @@ class Viewer:
         if self.playing is not None:
             self.clips[self.playing].update(dt)
 
-        rows, cols = screen.size()
-        self.renderer.resize(cols, max(rows - 1, 1), screen.cell_pixels)
-        fb = self.renderer.render([*self.model], self.camera, self.light)
-        screen.erase()
-        screen.draw_frame(fb)
+        screen.draw(self.renderer, [*self.model], self.camera, self.light, rows=-1)
         p = self.camera.position
         playing = ""
         if self.clips:
@@ -99,7 +95,6 @@ class Viewer:
         self.bar.draw(screen, f"[wasd/arrows] move  [q/e] spin  [c] chrome  [o] {view}  {playing}[esc] quit   "
                               f"{sum(len(obj.mesh.faces) for obj in self.model)} tris   "
                               f"cam {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}   spin {self.spin:.2f}")
-        screen.refresh()
         return True
 
 

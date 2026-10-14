@@ -48,13 +48,15 @@ on screen, or a check of the game's state.
 - **Quitting:** `run()` stops when `Game.frame()` returns `False` (which it does when a screen's `frame()`
   returns `None`), and only then.
 - **Time:** `dt` is seconds; clamp it (`min(dt, 0.1)`) and move things by `speed * dt`.
-- **Every frame:** call `renderer.resize(cols, rows, screen.cell_pixels)`, then `screen.erase()`, then draw,
-  then `screen.refresh()` last.
+- **Every frame:** draw the scene with `screen.draw(renderer, objects, camera, lights)` (`rows=-1` leaves
+  the last row for a status line), then write text over it. `run()` erases the screen before each frame and
+  sends what was drawn after it.
 - **The mouse:** `run()` in `main()` must have `mouse=True` (or `"drag"` / `"move"`) for clicks to arrive
   in a real terminal. Playtests send clicks either way.
 - **Build once:** make meshes, models, renderers and `Colliders` in `__init__` or when a level loads,
   never in `frame()`.
-- **Coordinates:** `screen.text(y, x)` takes the row first; `pick(x, y)` and clicks take the column first.
+- **Coordinates:** `screen.text(y, x)` takes the row first; clicks take the column first. Pass the click
+  itself to `renderer.pick(ev)` and `renderer.ray(ev)`, which know where the frame was drawn.
   Rotations are quaternions, w first (`quat_axis_angle(axis, radians)`).
 - **Mesh edits:** after editing a mesh's arrays in place, call `renderer.invalidate()` (and
   `colliders.invalidate()`).

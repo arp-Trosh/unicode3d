@@ -767,7 +767,7 @@ class DebugView:
 class Walk:
     def __init__(self, seed=None):
         self.court = Courtyard(seed)
-        self.renderer = Renderer(1, 1)
+        self.renderer = Renderer()
         self.bar = StatusBar(self.renderer)
         self.lamp = Toggle("Lamp (l)", True, key="l")
         self.sun = Toggle("Sun (u)", True, key="u")
@@ -860,11 +860,8 @@ class Walk:
         colour = MIST if self.fog_into.value == "mist" else None
         self.renderer.fog = Fog(start=2.0, end=6.0 + 60.0 * (1.0 - v) ** 2, color=colour) if v > 0 else 0.0
 
-        self.renderer.resize(cols, view_rows, screen.cell_pixels)
-        fb = self.renderer.render(objects, camera, lights)
-        self.drawn = objects  # (what fb.ids number, from 1)
-        screen.erase()
-        screen.draw_frame(fb)
+        screen.draw(self.renderer, objects, camera, lights, rows=view_rows)
+        self.drawn = objects  # (what the framebuffer's ids number, from 1)
         if self.tags.value:  # a name over each thing nearby, hidden behind whatever is in front of it
             for name, point, objects in self.court.name_tags(eye, TAG_REACH):
                 screen.label(self.renderer, point, name, Color.WHITE, owner=objects, dim=True)
@@ -876,7 +873,6 @@ class Walk:
         keys = "exact" if held.exact else "estimated from repeats"
         self.bar.draw(screen, f"looking at {seeing}   {self.clicked}   [wasd] walk  [q/e/arrows] turn  [esc] quit   "
                               f"held keys: {keys}")
-        screen.refresh()
         return True
 
     def pick(self, x, y):

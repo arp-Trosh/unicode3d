@@ -64,9 +64,12 @@ def walk_frames(demo, screen, count, keys=(), held=()):
         events = [keys[i]] if i < len(keys) else []
         if screen.console is not None:
             screen.poll_size()
+        screen.erase()  # (as run() does: erased before the frame, sent after it)
         assert demo.frame(screen, 0.05, events) is not False
-        if screen.console is None:
-            screen.render_updates()  # (the demo refreshes a console itself)
+        if screen.console is not None:
+            screen.refresh()
+        else:
+            screen.render_updates()
 
 
 class HugeTerminalTests(unittest.TestCase):
@@ -706,6 +709,19 @@ class RealTerminalTests(unittest.TestCase):
         self.assertLess(text.rfind("\x1b[?1049l"), text.find("unicode3d: stopped"))  # after restoring the terminal
         self.assertIn("RuntimeError: broken frame", log)
         self.assertIn("crashed in frame 1: -c: 80x24 cells", log)
+
+    def test_frames_are_sent_without_a_refresh(self):
+        # run() erases the screen before each frame and refreshes it after, so a frame() that only writes shows.
+        program = ("from unicode3d.terminal import run\n"
+                   "def frame(screen, dt, keys):\n"
+                   "    screen.text(0, 0, f'frame number {screen.frame_count}')\n"
+                   "    return ord('q') not in keys\n"
+                   "run(frame)\n")
+        with tempfile.TemporaryDirectory() as cache:
+            code, out = run_in_pty(["-c", program], 24, 80, [(5, lambda fd, *_: os.write(fd, b"q"))],
+                                   env={"XDG_CACHE_HOME": cache})
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertIn(b"frame number 0", out)
 
     def test_sigterm_restores_the_terminal(self):
         # kill (SIGTERM) ends the program as sys.exit() would, so the terminal leaves raw mode and the alternate

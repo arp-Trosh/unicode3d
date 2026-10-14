@@ -71,7 +71,7 @@ def shapes():
 class Workshop:
     def __init__(self):
         self.shapes = shapes()
-        self.renderer = Renderer(1, 1)
+        self.renderer = Renderer()
         self.bar = StatusBar(self.renderer)
         floor = grid_floor(60.0, 40, tiles(1024, (0.72, 0.7, 0.66), (0.42, 0.4, 0.38), 120))
         self.scenery = [Object3D(floor, color=(255, 255, 255), specular=0.0)]
@@ -199,15 +199,11 @@ class Workshop:
         # The view takes the screen right of the panel (and above the status line).
         rows, cols = screen.size()
         left = min(self.panel.width + 3, max(cols - 10, 0))
-        self.renderer.resize(max(cols - left, 1), max(rows - 1, 1), screen.cell_pixels)
-        fb = self.renderer.render([*self.scenery, self.obj], camera, lights)
-        screen.erase()
-        screen.draw_frame(fb, 0, left)
+        screen.draw(self.renderer, [*self.scenery, self.obj], camera, lights, left=left, rows=-1)
         self.panel.draw(screen, 0, 1)
         if rows - 1 - self.panel.height >= GRAPH_H + 3:
             self.draw_graph(screen, self.panel.height + 1, 1)
         self.bar.draw(screen, "[tab/click] settings [h] hop [a/d w/s z/x] camera [r] reset [q] quit")
-        screen.refresh()
         return True
 
 

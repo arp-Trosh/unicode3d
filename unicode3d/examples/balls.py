@@ -111,7 +111,7 @@ class Balls:
         self.floor = Object3D(floor, color=(255, 255, 255), cast_shadows=False)
         self.bulb = Object3D(blob_mesh((1.0, 1.0, 1.0), rings=8, segments=12), color=(255, 235, 190), emissive=1.0,
                              cast_shadows=False)
-        self.renderer = Renderer(1, 1, background=Gradient((22, 26, 40), (4, 4, 8)))
+        self.renderer = Renderer(background=Gradient((22, 26, 40), (4, 4, 8)))
         self.bar = StatusBar(self.renderer)
         self.count = Slider("Balls", count, 1, MAX_BALLS, keys="[]", length=14)
         self.size = Slider("Size ", 0.4, 0.1, 1.5, step=0.05, keys="-=", length=14, fmt=lambda v: f"{v:.2f}")
@@ -223,7 +223,7 @@ class Balls:
             elif ev == Key.DOWN:
                 self.pitch = max(self.pitch - 0.08, -0.2)
             elif isinstance(ev, MouseEvent) and ev.pressed and ev.button == MouseEvent.LEFT and not ev.moved:
-                hit = self.renderer.pick(ev.x, ev.y)
+                hit = self.renderer.pick(ev)
                 if hit is not None and any(hit.object is b for b in self.balls):
                     hit.object.emissive = 0.0 if hit.object.emissive else 0.7
 
@@ -260,21 +260,18 @@ class Balls:
                         target=target, fov=45.0, near=0.1, far=10 * s + 20)
 
         rows, cols = screen.size()
-        self.renderer.resize(cols, max(rows - 1, 1), screen.cell_pixels)
+        self.renderer.resize(cols, max(rows - 1, 1), screen.cell_pixels)  # (sized now, for the levels of detail)
         # Each ball's radius in pixels picks its level of detail.
         pixels_per_unit = self.renderer.drawn_size[1] / (2 * np.tan(np.radians(camera.fov) / 2))
         if len(self.balls):
             on_screen = radii * pixels_per_unit / np.maximum(np.linalg.norm(self.pos - camera.position, axis=1), 1e-6)
             for ball, px in zip(self.balls, on_screen):
                 ball.mesh = next(mesh for limit, mesh in self.lods if px < limit)
-        fb = self.renderer.render(objects, camera, lights)
-        screen.erase()
-        screen.draw_frame(fb)
+        screen.draw(self.renderer, objects, camera, lights, rows=-1)
         self.panel.draw(screen, 0, 1)
         tris = sum(len(ball.mesh.faces) for ball in self.balls)
         self.bar.draw(screen, f"{len(self.balls)} balls, {tris:,} triangles{'  (paused)' if self.paused else ''}   "
                               f"[space] pause  [arrows] turn  [click] a ball glows  [tab] panel  [q] quit")
-        screen.refresh()
         return True
 
 

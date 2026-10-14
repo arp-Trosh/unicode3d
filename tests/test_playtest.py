@@ -22,12 +22,12 @@ from unicode3d.scene import Camera, Light, Model, Node, Object3D, Renderer
 class Game:
     """A small program: a box in a frame, a score line, keys and clicks noted. q quits, x raises, w warns."""
 
-    def __init__(self, refresh=True, draw=True):
+    def __init__(self, draw=True):
         self.renderer = Renderer(1, 1)
         self.camera = Camera(position=np.array([0.0, 1.0, 4.0]))
         self.box = Object3D(make_box())
         self.events, self.held, self.dts = [], [], []
-        self.refresh, self.draw = refresh, draw
+        self.draw = draw
 
     def frame(self, screen, dt, events):
         self.events.append(events)
@@ -46,8 +46,7 @@ class Game:
             screen.erase()
             screen.draw_frame(self.renderer.render([self.box], self.camera, Light()))
             screen.text(rows - 1, 2, f"Score {len(self.events)}  [Start]")
-        if self.refresh:
-            screen.refresh()
+            screen.refresh()  # (as games did before run() refreshed: still harmless)
         return True
 
 
@@ -226,14 +225,11 @@ class PlaytestTests(unittest.TestCase):
         self.assertEqual(report.warnings[0][0], 4)
         self.assertIn("UserWarning: a hazard", str(report))
 
-    def test_a_blank_screen_and_a_missing_refresh_are_reported(self):
+    def test_a_blank_screen_is_reported(self):
         test = self.play(Game(draw=False))
         test.wait(3)
         self.assertEqual(test.report().blank_frames, [1, 2, 3])
         self.assertIn("BLANK SCREEN in 3 frames", str(test.report()))
-        test = self.play(Game(refresh=False))
-        test.wait(2)
-        self.assertIn("never sent: frame() must call screen.refresh()", str(test.report()))
 
     def test_resizing(self):
         test = self.play()

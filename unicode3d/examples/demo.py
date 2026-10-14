@@ -39,7 +39,7 @@ class DiceDemo:
     def __init__(self, count, seed=None):
         self.rng = np.random.default_rng(seed)
         self.mesh = make_die()
-        self.renderer = Renderer(1, 1, background=ROOM)
+        self.renderer = Renderer(background=ROOM)
         self.camera = Camera(target=np.array([0.0, 0.4, 0.0]), fov=35.0)
         self.light = Light(shadows=True)
         # The table top the dice land on (at y = 0), wide enough for the longest row and their bounces: flat,
@@ -103,13 +103,8 @@ class DiceDemo:
             die.position, die.rotation = anim.pose(self.t)
 
         rows, cols = screen.size()
-        view_rows = max(rows - HUD_ROWS, 1)
-        self.renderer.resize(cols, view_rows, screen.cell_pixels)
-        self.fit_camera(cols, view_rows)
-        fb = self.renderer.render([self.table, *self.dice], self.camera, self.light)
-
-        screen.erase()
-        screen.draw_frame(fb)
+        self.fit_camera(cols, max(rows - HUD_ROWS, 1))
+        screen.draw(self.renderer, [self.table, *self.dice], self.camera, self.light, rows=-HUD_ROWS)
         if any(not a.done(self.t) for a in self.anims):
             status = "Rolling..."
         else:
@@ -117,7 +112,6 @@ class DiceDemo:
         screen.text(rows - 2, 1, status, bold=True)
         self.bar.draw(screen, f"[space] roll   [+/-] dice ({len(self.dice)})   [f] finish ({self.finish})   [g] glass   "
                               "[m] polished table   [q] quit")
-        screen.refresh()
         return True
 
 

@@ -135,7 +135,7 @@ class Report:
     slowest_frame: int | None
     mean_bytes: float | None    # output to the terminal per frame (after the first), what a slow link must carry
     max_bytes: int | None
-    blank_frames: list          # frames that left the screen empty (nothing drawn, or nothing refreshed)
+    blank_frames: list          # frames that left the screen empty
     warnings: list              # (frame, "Category: message") for each different warning raised while playing
     shots: list                 # paths of the pictures and text dumps saved
 
@@ -175,11 +175,12 @@ class Playtest:
     it, REPEAT_RATE times a second after REPEAT_DELAY. releases: the terminal reports releases (as with the kitty
     keyboard protocol), so screen.held knows exactly which keys are down; with releases=False, as in most
     terminals, only presses and repeats arrive, and screen.held guesses (see HeldKeys). key_release: as run()'s,
-    pass the releases to frame() as KeyRelease events (where the terminal reports them).
+    pass the releases to frame() as KeyRelease events (where the terminal reports them). erase: as run()'s, erase
+    the screen before each frame.
 
-    Each frame refreshes the screen as run() would (the program calls screen.refresh(); a playtest counts the bytes
-    instead of writing them). An exception from frame() is raised as a PlaytestError naming the frame, after saving
-    a shot of the screen as it was. Once frame() has returned False, what plays frames raises PlaytestError, and
+    Each frame erases and refreshes the screen as run() does (a playtest counts the bytes instead of writing them).
+    An exception from frame() is raised as a PlaytestError naming the frame, after saving a shot of the screen as it
+    was. Once frame() has returned False, what plays frames raises PlaytestError, and
     what looks at the screen (text, find, expect, shot) sees the last one. Warnings frame() raises are collected for
     the report (under the program's own warning filters: one made an error is raised as an error); those raised on
     the program's other threads are not.
@@ -191,7 +192,7 @@ class Playtest:
     """
 
     def __init__(self, frame, size=(40, 120), glyphs="sextant", color="truecolor", dt=1 / 30, unicode=True,
-                 releases=True, key_release=False, out="playtest", compile=True, check_edits=True):
+                 releases=True, key_release=False, out="playtest", compile=True, check_edits=True, erase=True):
         frame = getattr(frame, "frame", frame)
         if not callable(frame):
             raise TypeError(f"frame must be the program's frame function (screen, dt, events) or an object with a "
@@ -203,6 +204,7 @@ class Playtest:
         self.out = out
         self.releases = bool(releases)
         self.check_edits = bool(check_edits)
+        self.erase = bool(erase)
         self.console = _Console(*size, unicode=unicode, key_release=key_release)
         if compile:
             compile_kernels()
@@ -248,6 +250,10 @@ class Playtest:
         if not screen.key_release:
             events = [e for e in events if not isinstance(e, KeyRelease)]
         screen.poll_size()
+        before = None
+        if self.erase:  # (kept, for a frame() that quits: the terminal goes on showing the last frame drawn)
+            before = (screen.chars.copy(), screen.fg.copy(), screen.bg.copy(), screen.attrs.copy())
+            screen.erase()
         written = self.console.written
         self.frames += 1
         checking, checked = mesh_module.CHECK_EDITS, mesh_module.check_seconds
@@ -256,6 +262,8 @@ class Playtest:
         try:
             with warnings.catch_warnings(record=True) as caught:  # (the program's own filters still apply)
                 result = self.frame_fn(screen, self.dt, events)
+                if result is not False:
+                    screen.refresh()
         except Exception as e:
             path = self._save_picture(f"crash-frame-{self.frames}")
             raise PlaytestError(f"frame() raised {type(e).__name__} in frame {self.frames} ({self.now:.2f} s of "
@@ -270,6 +278,8 @@ class Playtest:
         self.bytes.append(self.console.written - written)
         screen.frame_time, screen.measured_fps = elapsed, 1.0 / self.dt if self.dt > 0 else None
         screen.frame_count += 1
+        if result is False and before is not None:
+            screen.chars[...], screen.fg[...], screen.bg[...], screen.attrs[...] = before
         if self._is_blank():
             self.blank.append(self.frames)
         if result is False:
@@ -457,9 +467,6 @@ class Playtest:
                          slowest_frame=int(rest.argmax()) + 2, mean_bytes=float(sent.mean()),
                          max_bytes=int(sent.max()))
         warned = sorted((frame, message) for message, frame in self.warnings.items())
-        if self.frames and not self.console.written and not self._is_blank():
-            warned.append((self.frames, "the screen was drawn but never sent: frame() must call screen.refresh() "
-                                        "(a terminal would show nothing)"))
         return Report(frames=self.frames, seconds=self.now, size=self.screen.size(), glyphs=self.screen.mode,
                       color=self.screen.color_mode, quit_at=self.quit_at,
                       first_ms=self.times[0] * 1000.0 if self.times else None, blank_frames=list(self.blank),
@@ -839,6 +846,7 @@ def main(argv=None):
     play.add_argument("--no-releases", action="store_true", help="a terminal that reports no key releases (most "
                       "do not): held keys are guessed from presses and repeats")
     play.add_argument("--key-release", action="store_true", help="pass KeyRelease events, as run(key_release=True)")
+    play.add_argument("--no-erase", action="store_true", help="keep the screen from frame to frame, as run(erase=False)")
     play.add_argument("--no-check-edits", action="store_true", help="don't check meshes for arrays edited in place "
                       "without invalidate() (checksums of the meshes' arrays each frame)")
     play.add_argument("--out", default="playtest", help="folder for the pictures (default: playtest)")
@@ -881,7 +889,7 @@ def main(argv=None):
         return 2
     test = Playtest(frame, size=args.size, glyphs=args.glyphs, color=args.color, dt=args.dt,
                     unicode=not args.no_unicode, releases=not args.no_releases, key_release=args.key_release,
-                    out=args.out, check_edits=not args.no_check_edits)
+                    erase=not args.no_erase, out=args.out, check_edits=not args.no_check_edits)
     status = 0
     try:
         run_script(test, script)

@@ -82,8 +82,10 @@ def walk(frames, rng, sizes):
         screen.held.update([ord(k) if isinstance(k, str) else k for k in
                             (HELD[j] for j in rng.integers(0, len(HELD), int(rng.integers(0, 3))))], 0.0)
         t = time.perf_counter()
-        try:
+        try:  # (as run() does: erased before the frame, sent after it)
+            screen.erase()
             demo.frame(screen, float(rng.uniform(0.01, 0.1)), events)
+            screen.refresh()
         except Exception:
             traceback.print_exc()
             sys.exit(f"walk: frame {i} at {cols}x{rows} cells, {screen.mode}, {screen.color_mode}, events {events}, "

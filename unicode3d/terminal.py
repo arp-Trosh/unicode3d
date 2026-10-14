@@ -15,6 +15,7 @@ Both are detected, and can be forced with arguments, the UNICODE3D_GLYPHS and
 UNICODE3D_COLOR environment variables, or the command-line flags that
 add_display_args() adds.
 """
+import collections
 import contextlib
 import faulthandler
 import math
@@ -41,8 +42,8 @@ from .pictures import cells_picture
 from .queries import Colliders
 from .scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Skin, union_bounds
 
-__all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "run", "compile_kernels", "add_display_args", "display_options",
-           "frame_to_text", "crash_log_path"]
+__all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "ScreenSize", "run", "compile_kernels",
+           "add_display_args", "display_options", "frame_to_text", "crash_log_path"]
 
 BOLD, DIM, REVERSE = 1, 2, 4
 MERGE_GAP = 4  # rewrite up to this many unchanged cells rather than move the cursor past them
@@ -55,6 +56,9 @@ CRASH_LOG_LIMIT = 1 << 20  # bytes: a longer crash log is cut down to its last q
 SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[0m\x1b[?2026l"  # synchronized output
 _CLEAR = np.frombuffer(b"\x1b[0m\x1b[2J", np.uint8)
 
+ScreenSize = collections.namedtuple("ScreenSize", "rows cols")
+ScreenSize.__doc__ = "The size of the terminal in cells: rows, then cols (Screen.size())."
+
 
 def _cell(value):
     """A row, column or count of cells as an int (fractions rounded down), or None for NaN or an infinity."""
@@ -62,6 +66,17 @@ def _cell(value):
         return int(value)
     value = float(value)
     return math.floor(value) if math.isfinite(value) else None
+
+
+def _fit_cells(size, room):
+    """Screen.draw's rows or cols as a count of cells: None for all the room there is, negative for that many
+    fewer; at least 1 (NaN or an infinity as None)."""
+    size = None if size is None else _cell(size)
+    if size is None:
+        size = room
+    elif size < 0:
+        size += room
+    return max(size, 1)
 
 
 _ANSI_CELLS = {}  # named Color: ansi_color(), for text()
@@ -280,8 +295,8 @@ class Screen:
         return self.glyphs.name
 
     def size(self):
-        """(rows, cols) of the terminal, as of the start of this frame."""
-        return self._rows, self._cols
+        """The size of the terminal as of the start of this frame: a ScreenSize, (rows, cols) with .rows and .cols."""
+        return ScreenSize(self._rows, self._cols)
 
     def picture(self, cell=(8, 16), fg=(204, 204, 204), bg=(12, 12, 16)):
         """What the terminal shows of the screen's cells as they are now (after draw_frame() and text()), as an
@@ -389,10 +404,10 @@ class Screen:
             packed = self._text_colors[key] = int(quantize(linear, self.color_mode, dither=False))
         return packed
 
-    def label(self, renderer, point, text, color=Color.WHITE, top=0, left=0, owner=None, clamp=False, hide=True,
+    def label(self, renderer, point, text, color=Color.WHITE, top=None, left=None, owner=None, clamp=False, hide=True,
               dy=0, bold=False, reverse=False, dim=False, bg=None):
-        """Write text at a point in the world, as the renderer's last frame (drawn at top, left) shows it: centred on
-        the cell the point lands on, dy rows lower (negative: higher). A name over a character, a number where a
+        """Write text at a point in the world, as the renderer's last frame (drawn at top, left: by default, where it
+        was drawn) shows it: centred on the cell the point lands on, dy rows lower (negative: higher). A name over a character, a number where a
         hit landed, a marker on a goal. color and bg as for text().
 
         Nothing is written for a point behind the camera or outside the frame, unless clamp is set, which puts
@@ -400,6 +415,8 @@ class Screen:
         for one behind something drawn (owner: the object, objects or Model the point belongs to, whose own
         surface doesn't count). Returns the Anchor (see Renderer.anchor), or None if nothing was written."""
         anchor = renderer.anchor(point, owner, clamp)
+        top = renderer.framebuffer.top if top is None else top
+        left = renderer.framebuffer.left if left is None else left
         top, left, dy = _cell(top), _cell(left), _cell(dy)
         if anchor is None or (hide and anchor.hidden) or None in (top, left, dy):
             return None
@@ -432,11 +449,30 @@ class Screen:
         rest = max(stop - max(start, full + len(tip)), 0)
         self.text(y, x + start + filled + len(tip), ("\u2591" if self.unicode else "-") * rest, empty, dim=True)
 
+    def draw(self, renderer, objects, camera, lights, top=0, left=0, rows=None, cols=None):
+        """Render a scene into a part of the screen, in one call: size the renderer to fit (as the terminal and the
+        glyph set change), render the objects and draw the frame with its top-left cell at row top, column left.
+        Returns the framebuffer.
+
+        rows, cols: the frame's size in cells; None (the default) reaches the screen's bottom or right edge, and a
+        negative number stops that many cells short of it (rows=-1 leaves the last row for a status line). The
+        frame is at least one cell each way. Renderer.pick, ray and Screen.label then know where the frame is."""
+        top, left = _cell(top) or 0, _cell(left) or 0  # (NaN or an infinity as 0)
+        rows = _fit_cells(rows, self._rows - top)
+        cols = _fit_cells(cols, self._cols - left)
+        renderer.resize(cols, rows, self.cell_pixels)
+        fb = renderer.render(objects, camera, lights)
+        self.draw_frame(fb, top, left)
+        return fb
+
     def draw_frame(self, fb, top=0, left=0):
-        """Draw a Renderer's framebuffer with its top-left cell at (top, left)."""
+        """Draw a Renderer's framebuffer with its top-left cell at row top, column left (see also draw(), which
+        sizes the renderer and renders too). The framebuffer notes where it went, for Renderer.pick and ray."""
         if fb.cell_pixels != self.cell_pixels:
             raise ValueError(f"framebuffer has {fb.cell_pixels} pixels per cell but the screen's glyphs need "
-                             f"{self.cell_pixels}: pass screen.cell_pixels to Renderer.resize")
+                             f"{self.cell_pixels}: draw with screen.draw(renderer, ...), which sizes the renderer, "
+                             f"or pass screen.cell_pixels to Renderer.resize")
+        fb.top, fb.left = top, left
         cells = match_cells(fb, self.glyphs, self.background)
         h, w = cells.chars.shape
         y0, x0 = max(top, 0), max(left, 0)
@@ -747,8 +783,12 @@ def _exit_on_sigterm():
             signal.signal(getattr(signal, name), signal.SIG_DFL if name == "SIGTERM" else signal.default_int_handler)
 
 
-def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False):
+def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False,
+        erase=True):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
+
+    Before each call the screen is erased (unless erase is False, for a program that keeps what it wrote from
+    frame to frame), and after it the screen is refreshed: what frame_fn drew is sent to the terminal.
 
     frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved. An fps of 0 draws
     frames as fast as it can.
@@ -795,8 +835,11 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
                     frames += 1
                     frame += 1
                     screen.poll_size()
+                    if erase:
+                        screen.erase()
                     if frame_fn(screen, dt, screen.keys()) is False:
                         return
+                    screen.refresh()
                     screen.frame_time = time.perf_counter() - start
                     screen.frame_count += 1
                     remaining = _frame_period(screen.fps) - screen.frame_time

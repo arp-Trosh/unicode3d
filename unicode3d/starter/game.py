@@ -5,7 +5,8 @@ Arrow keys or WASD move, Esc goes back to the title, q quits. Started from unico
 
 The game is three screens, Title, Play and GameOver. Each has a frame(screen, dt, events) that returns
 the screen to show next: itself to stay, another to change, None to quit. Game holds what they share
-and passes each frame on to the current one.
+and passes each frame on to the current one. run() erases the screen before each frame and sends what
+was drawn after it.
 """
 import argparse
 import math
@@ -35,7 +36,7 @@ class Game:
 
     def __init__(self, seed=None):
         self.random = random.Random(seed)       # a seed makes a round the same every time (tests)
-        self.renderer = Renderer(1, 1, background=Gradient())   # sized in draw(), once the terminal's size is known
+        self.renderer = Renderer(background=Gradient())   # screen.draw() sizes it to fit, every frame
         self.light = Light(direction=(0.3, -1.0, -0.5), shadows=True)
         self.box = make_box()
         stone = blob_mesh((0.3, 0.45, 0.3), rings=2, segments=6)        # a six-sided double pyramid
@@ -49,20 +50,14 @@ class Game:
         showing = self.current
         self.current = self.current.frame(screen, dt, events)
         if self.current is not None and self.current is not showing:
-            self.current = self.current.frame(screen, 0.0, [])   # a new screen draws at once, this frame
+            screen.erase()                      # a new screen draws at once, this frame, over a clean one
+            self.current = self.current.frame(screen, 0.0, [])
         return self.current is not None         # False stops run()
-
-    def draw(self, screen, objects, camera, rows_free=0):
-        """Erase the screen and draw the scene over all of it but the last rows_free rows."""
-        rows, cols = screen.size()
-        self.renderer.resize(cols, max(rows - rows_free, 1), screen.cell_pixels)   # every frame
-        screen.erase()
-        screen.draw_frame(self.renderer.render(objects, camera, self.light))
 
 
 def centred(screen, y, text, color=Color.WHITE, **style):
     """Write text in the middle of row y."""
-    screen.text(y, max((screen.size()[1] - len(text)) // 2, 0), text, color, **style)
+    screen.text(y, max((screen.size().cols - len(text)) // 2, 0), text, color, **style)
 
 
 class Title:
@@ -90,13 +85,12 @@ class Title:
         self.stone.rotation = quat_axis_angle(UP, self.angle)
 
         rows, cols = screen.size()
-        self.game.draw(screen, [self.stone], self.camera)
+        screen.draw(self.game.renderer, [self.stone], self.camera, self.game.light)
         centred(screen, 1, TITLE, Color.YELLOW, bold=True)
         centred(screen, 2, "take the gems before the time runs out")
         if self.game.best:
             centred(screen, 3, f"best {self.game.best}", Color.CYAN)
         self.panel.draw(screen, rows - 2, (cols - self.panel.width) // 2)
-        screen.refresh()
         return self.next
 
 
@@ -162,14 +156,14 @@ class Play:
         self.camera.position = (px, 7.0, pz + 7.0)
         self.camera.target = (px, 0.0, pz)
         rows, cols = screen.size()
-        self.game.draw(screen, [self.floor, self.player, *self.gems], self.camera, rows_free=1)
+        screen.draw(self.game.renderer, [self.floor, self.player, *self.gems], self.camera, self.game.light,
+                    rows=-1)                    # all but the last row
         for position, left in self.popups:
             rise = -1 - int(2 * (0.8 - left))   # rows above the spot: it floats up as it fades
             screen.label(self.game.renderer, position, "+1", Color.YELLOW, bold=True, dy=rise, hide=False)
         screen.text(rows - 1, 0, f"score {self.score}  time {math.ceil(self.time_left):2d} ", Color.WHITE)
         screen.bar(rows - 1, 18, 20, self.time_left / ROUND_TIME, Color.GREEN)
         screen.text(rows - 1, 40, "[arrows] move [esc] title [q] quit", Color.DEFAULT, dim=True)
-        screen.refresh()
         return self
 
 
@@ -195,13 +189,11 @@ class GameOver:
         if ord("q") in events or Key.ESC in events:
             return None
         rows, cols = screen.size()
-        screen.erase()
         centred(screen, rows // 2 - 2, "GAME OVER", Color.RED, bold=True)
         centred(screen, rows // 2, f"score {self.score}", Color.YELLOW)
         if self.best:
             centred(screen, rows // 2 + 1, "a new best!", Color.CYAN)
         self.panel.draw(screen, rows // 2 + 3, (cols - self.panel.width) // 2)
-        screen.refresh()
         return self.next
 
 

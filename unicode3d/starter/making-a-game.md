@@ -28,8 +28,9 @@ python -m unicode3d.new .
 python -m unittest                              # the starter's tests: they play it off-screen
 ```
 
-The first run compiles the renderer, about 10 seconds; later runs start at once. Use v0.24.0 or
-later: it has the playtest tool and the starter this guide relies on. `python -m unicode3d.new`
+The first run compiles the renderer, about 10 seconds; later runs start at once. Use v0.26.0 or
+later: it has the playtest tool, the starter and the one-call drawing (`screen.draw()`) this guide
+relies on. `python -m unicode3d.new`
 never overwrites a file, and writes:
 
 - `game.py`: a small working game to grow, with title, play and game-over screens, a camera that
@@ -65,7 +66,7 @@ TURN_SPEED = 2.0  # radians a second
 
 class Game:
     def __init__(self):
-        self.renderer = Renderer(1, 1)          # sized in frame(), once the terminal's size is known
+        self.renderer = Renderer()              # screen.draw() sizes it to fit, every frame
         self.camera = Camera(position=(0.0, 2.0, 4.0), target=(0.0, 0.0, 0.0))
         self.light = Light(direction=(0.4, -1.0, -0.6), shadows=True)
         self.floor = Object3D(make_box(), position=(0.0, -0.6, 0.0), scale=(6.0, 0.2, 6.0), color=(90, 90, 90))
@@ -88,12 +89,9 @@ class Game:
         self.box.rotation = quat_axis_angle(UP, self.heading)
 
         rows, cols = screen.size()
-        self.renderer.resize(cols, rows - 1, screen.cell_pixels)   # every frame: the terminal can change size
-        screen.erase()
-        screen.draw_frame(self.renderer.render([self.floor, self.box], self.camera, self.light))
+        screen.draw(self.renderer, [self.floor, self.box], self.camera, self.light, rows=-1)  # all but the last row
         screen.text(rows - 1, 0, f"heading {self.heading:+.2f}   [left/right] turn  [space] colour  [q] quit",
                     Color.YELLOW)
-        screen.refresh()
 
 
 def main():
@@ -116,15 +114,17 @@ What each part is for:
 - **`__init__` builds everything once:** the renderer, meshes, objects, lights, loaded models,
   widgets. Making meshes or loading models inside `frame()` costs time every frame.
 - **`frame()` does three things in order.** It reads the events, moves the game on by `dt` seconds,
-  then draws: `resize`, `erase`, `draw_frame`, text, and `refresh` last. Returning `False` quits;
-  returning anything else, or nothing, carries on.
+  then draws: the scene with `screen.draw()`, then text over it. Returning `False` quits; returning
+  anything else, or nothing, carries on.
 - **`events`** holds key presses (ints), `MouseEvent`s (only if `run()` was given `mouse=True`), and
   `KeyRelease`s (only with `key_release=True`). Use the events for things that happen once, such as
   menus, firing and toggles. Use `screen.held` for things that last while a key is down, such as
   walking and turning.
-- **The screen is a grid of cells that keeps what was written to it.** `erase()` clears it, and
-  `draw_frame()` puts the 3D picture on it (at `top`, `left` if given). `text()` writes over it, and
-  `refresh()` sends the changes to the terminal. Without `refresh()` the terminal shows nothing.
+- **The screen is a grid of cells.** `run()` erases it before each frame and sends the terminal
+  what changed after it. `screen.draw()` sizes the renderer to fit (the terminal can change size,
+  and so can the glyph set, with F2), renders the scene and puts the picture on the screen: all of
+  it, or a part (`top`, `left`, and `rows`, `cols`, where `-1` stops one short of the edge).
+  `text()` writes over it.
 - **`main()` runs only from the command line.** The `if __name__ == "__main__"` guard lets tests and
   the playtest import the file without starting the game.
 
@@ -180,7 +180,8 @@ Keys are a character (`a`, `A`, `+`) or a name: `enter`, `esc`, `space`, `tab`, 
 Options: `--size 120x40` (columns x rows; the default), `--glyphs sextant|quad|half|ascii`,
 `--color truecolor|256|16|mono`, `--dt 0.0333` (seconds per frame), `--no-unicode`,
 `--no-releases` (a terminal that reports no key releases, as many don't: held keys are then
-guessed from repeats), `--key-release`, `--no-check-edits` and `--out DIR`. The screen at the end is
+guessed from repeats), `--key-release`, `--no-erase` (as `run(erase=False)`), `--no-check-edits` and
+`--out DIR`. The screen at the end is
 always saved as `last.png` and `last.txt`.
 
 The report it prints at the end looks like this:
@@ -281,9 +282,9 @@ checks for mistakes that real runs can't afford to check: a mesh's arrays edited
 | meshes | a face's corners go **counter-clockwise seen from the side that shows**; `uvs` is `(F, 3, 2)`, a `(u, v)` for each corner of each face; `materials` `(F,)` picks each face's texture from `textures` |
 | textures | 0..1 arrays, `(H, W)` brightness or `(H, W, 3)` colour (`(H, W, 4)` with opacity); `v` runs from the image's bottom (0) to its top (1) |
 | time | `dt` is in seconds; speeds are units a second, turns radians a second |
-| screen size | `screen.size()` gives **(rows, cols)**; `renderer.resize(cols, rows, screen.cell_pixels)` takes columns first |
-| writing to the screen | `screen.text(y, x, ...)`, `screen.draw_frame(fb, top, left)` and `screen.bar(y, x, ...)` take the **row first** |
-| clicks and picking | `MouseEvent.x` is the column, `.y` the row; `renderer.pick(x, y)` and `renderer.ray(x, y)` take a cell relative to where the frame was drawn, so subtract `top` and `left` |
+| screen size | `screen.size()` gives **(rows, cols)**, also as `.rows` and `.cols` |
+| writing to the screen | `screen.text(y, x, ...)`, `screen.bar(y, x, ...)` and `screen.draw(..., top, left)` take the **row first** |
+| clicks and picking | `MouseEvent.x` is the column, `.y` the row; pass the event itself to `renderer.pick(ev)` and `renderer.ray(ev)`, which know where the frame was drawn |
 | playtest sizes | `Playtest(size=(rows, cols))` and `resize(rows, cols)` in Python; `--size COLSxROWS` and `resize COLSxROWS` in scripts and the command line; `click X Y` column first everywhere |
 
 ## A first-person level from a text map
@@ -349,7 +350,7 @@ def wall_mesh(level, height=1.0):
 
 class Crawl:
     def __init__(self):
-        self.renderer = Renderer(1, 1)
+        self.renderer = Renderer()
         rows, cols = len(LEVEL), len(LEVEL[0])
         self.walls = Object3D(wall_mesh(LEVEL), color=(210, 180, 150))
         self.floor = Object3D(make_box(), position=((cols - 1) / 2, -0.05, (rows - 1) / 2), scale=(cols, 0.1, rows),
@@ -382,12 +383,9 @@ class Crawl:
         self.lantern.position = eye + (0.0, 0.3, 0.0)
         self.lantern.diffuse = 0.8 + 0.1 * math.sin(self.time * 13.0) * math.sin(self.time * 7.0)  # a flicker
         rows, cols = screen.size()
-        self.renderer.resize(cols, rows - 1, screen.cell_pixels)
-        screen.erase()
-        screen.draw_frame(self.renderer.render([self.walls, self.floor, self.sword], self.camera, [self.lantern]))
+        screen.draw(self.renderer, [self.walls, self.floor, self.sword], self.camera, [self.lantern], rows=-1)
         screen.text(rows - 1, 0, f"at {self.x:.2f}, {self.z:.2f}   [WASD] walk  [left/right] turn  [q] quit",
                     Color.YELLOW)
-        screen.refresh()
 ```
 
 How it works, and what to keep when you change it:
@@ -422,21 +420,25 @@ Everything below imports from `unicode3d` unless another module is named. The [R
 has each in full.
 
 **Running.**
-`run(frame_fn, fps=30, mouse=False, key_release=False, title=None, glyphs=None, color=None)`.
-`frame_fn(screen, dt, events)` returns `False` to stop. Pass `mouse=True` for clicks and the wheel,
+`run(frame_fn, fps=30, mouse=False, key_release=False, title=None, glyphs=None, color=None, erase=True)`.
+`frame_fn(screen, dt, events)` returns `False` to stop. `run()` erases the screen before each frame
+(unless `erase=False`) and sends what was drawn after it. Pass `mouse=True` for clicks and the wheel,
 `"drag"` for moves while a button is held (sliders), and `"move"` for every move (hover);
 `key_release=True` for `KeyRelease` events.
 `add_display_args(parser)` and `display_options(args)` give the `--glyphs`, `--color` and `--ascii`
 flags.
 
 **Screen.**
-- `screen.size()` gives `(rows, cols)`, and `screen.cell_pixels` the pixels in a cell.
-- `screen.erase()` clears it; `screen.draw_frame(fb, top=0, left=0)` puts a picture on it.
+- `screen.size()` gives `(rows, cols)`, also as `.rows` and `.cols`.
+- `screen.draw(renderer, objects, camera, lights, top=0, left=0, rows=None, cols=None)` sizes the
+  renderer to fit, renders the scene and puts it on the screen at row `top`, column `left`. `rows`
+  and `cols` of `None` reach the edge, and negative ones stop that many short of it (`rows=-1`
+  leaves the last row for a status line). It returns the framebuffer.
 - `screen.text(y, x, s, color, bold=False, reverse=False, dim=False, bg=None)` writes text.
 - `screen.bar(y, x, width, fraction, color)` draws a meter.
 - `screen.label(renderer, point, text, color, top=0, left=0, owner=None, clamp=False)` writes text
   over a point in the scene.
-- `screen.refresh()` sends the changes. Call it last in every frame.
+- `screen.erase()` clears it, for a game that draws a new screen in the middle of a frame.
 - `screen.held` is the keys held down: `"w" in screen.held`, `Key.LEFT in screen.held`.
 - `screen.fps` is the target frame rate and `screen.measured_fps` the one achieved.
 
@@ -448,8 +450,7 @@ one of `MouseEvent.LEFT`, `MIDDLE`, `RIGHT`, `WHEEL_UP`, `WHEEL_DOWN` or `NONE`.
 comes with `run(key_release=True)`.
 
 **Scene.**
-- `Renderer(1, 1, background=None, fog=0.3)`; then `renderer.resize(cols, rows, screen.cell_pixels)`
-  and `fb = renderer.render(objects, camera, lights)` every frame.
+- `Renderer(background=None, fog=0.3)`, drawn with `screen.draw(renderer, ...)` every frame.
 - `Camera(position, target, up=(0, 1, 0), fov=50, near=0.1, far=100)`, or
   `projection="ortho", size=10` for isometric and top-down views.
 - `Light(direction, ambient=0.3, diffuse=0.7, shadows=False)` is the sun.
@@ -495,9 +496,11 @@ comes with `run(key_release=True)`.
 - `solid.overlap_sphere(centre, radius)`, `overlap_capsule(a, b, radius)` and
   `overlap_box(centre, size)` give contacts.
 - `solid.push_out(centre, radius)` is the move out of walls.
-- `renderer.pick(x, y)` tells what the last frame drew in a cell (`.object`, `.position`).
-- `renderer.ray(x, y)` gives a line of sight `(origin, direction)` for clicking the world:
-  `solid.raycast(*renderer.ray(ev.x, ev.y - top))`.
+- `renderer.pick(ev)` tells what the last frame drew under a `MouseEvent` (`.object`, `.position`),
+  wherever on the screen it was drawn.
+- `renderer.ray(ev)` gives a line of sight `(origin, direction)` for clicking the world:
+  `solid.raycast(*renderer.ray(ev))`. Both also take a cell of the frame, `(x, y)` from its
+  top-left corner.
 
 **Effects.**
 - `Particles(gravity, ground, face_camera, seed=None)` (`seed` an int, for the same particles each run) with `emit(point, count, velocity, speed, life, size,
@@ -546,43 +549,32 @@ animation track raises, the playtest warns of mesh edits it can't see), but thes
    `speed * dt` while `"w" in screen.held`. It is exact in terminals that report releases (kitty,
    foot, Ghostty, Alacritty, iTerm2, Windows); in the others it guesses, and a tap holds a key for
    up to half a second. Playtest with `--no-releases` to see that case.
-6. **Resize the renderer every frame:** `renderer.resize(cols, rows, screen.cell_pixels)`. The
-   terminal can change size, and `cell_pixels` changes with the glyph set (F2). Without the resize,
-   the picture stays the size the renderer was made (one cell, for `Renderer(1, 1)`); with the wrong
-   `cell_pixels`, `draw_frame` raises.
-7. **Erase or overwrite.** The screen keeps what was written to it, so text from an earlier frame
-   stays until something covers it. `screen.erase()` at the start of drawing is simplest.
-8. **Call `screen.refresh()`** at the end of every frame, or the terminal shows nothing (the
-   playtest's report says so).
-9. **Coordinates go in both orders.** `screen.text(y, x)` and `draw_frame(fb, top, left)` take the
-   row first, while `pick(x, y)`, `MouseEvent.x/.y` and `click X Y` take the column first.
-   `screen.size()` is `(rows, cols)` and `renderer.resize()` takes `(cols, rows)`. See
-   [Conventions](#conventions).
-10. **`pick()` and `ray()` take cells relative to the frame**, not the screen: subtract the
-    `top` and `left` you drew it at (`renderer.pick(ev.x - left, ev.y - top)`).
-11. **Rotations are quaternions, w first.** `rotation=(0, 45, 0)` is not 45 degrees about y: it is
-    refused with an error. Use `quat_axis_angle((0, 1, 0), np.radians(45))`.
-12. **A new object starts at the origin.** An `Object3D` made in the middle of play without a
-    position shows for a frame at (0, 0, 0) before your code moves it. Give it its position when you
-    make it, or make it with `visible=False` until it is placed.
-13. **Mesh arrays edited in place need `invalidate()`.** The renderer and `Colliders` keep packed
-    copies of meshes, so after changing `mesh.vertices`, `faces`, colours or a texture array in place,
-    call `renderer.invalidate()` (and `colliders.invalidate()`). The playtest warns of an edit made
-    without it. Moving objects needs nothing: change `obj.position`, `rotation` or `scale` freely.
-14. **Animation tracks can't be edited.** A track's keyframes are read-only once it is made (an edit
+6. **Coordinates go in both orders.** `screen.text(y, x)`, `screen.bar(y, x)` and `screen.draw(...,
+   top, left)` take the row first, while `MouseEvent.x/.y` and `click X Y` take the column first.
+   `screen.size()` is `(rows, cols)`. See [Conventions](#conventions).
+7. **Rotations are quaternions, w first.** `rotation=(0, 45, 0)` is not 45 degrees about y: it is
+   refused with an error. Use `quat_axis_angle((0, 1, 0), np.radians(45))`.
+8. **A new object starts at the origin.** An `Object3D` made in the middle of play without a
+   position shows for a frame at (0, 0, 0) before your code moves it. Give it its position when you
+   make it, or make it with `visible=False` until it is placed.
+9. **Mesh arrays edited in place need `invalidate()`.** The renderer and `Colliders` keep packed
+   copies of meshes, so after changing `mesh.vertices`, `faces`, colours or a texture array in place,
+   call `renderer.invalidate()` (and `colliders.invalidate()`). The playtest warns of an edit made
+   without it. Moving objects needs nothing: change `obj.position`, `rotation` or `scale` freely.
+10. **Animation tracks can't be edited.** A track's keyframes are read-only once it is made (an edit
     raises): give the animation a new `Track` instead. A `Clip`'s `loop` and `speed` can be changed.
-15. **`Colliders` don't see skinned poses.** A skinned character is seen by queries in its bind
+11. **`Colliders` don't see skinned poses.** A skinned character is seen by queries in its bind
     pose (a set holding one warns of it). Stand an invisible box or capsule in for it, moved with it,
     in the set instead.
-16. **`print()` while `run()` is going scribbles over the picture.** Put debugging output in a file,
+12. **`print()` while `run()` is going scribbles over the picture.** Put debugging output in a file,
     or look at it in a playtest, where `print()` is harmless.
-17. **Don't start the game from an agent's shell.** `run()` needs a terminal and raises without one;
+13. **Don't start the game from an agent's shell.** `run()` needs a terminal and raises without one;
     play it with the playtest. Keep `run()` inside `main()` behind
     `if __name__ == "__main__":` so the playtest and tests can import the file.
-18. **Build things once.** Make meshes, load models and textures, and build `Renderer`s and
+14. **Build things once.** Make meshes, load models and textures, and build `Renderer`s and
     `Colliders` in `__init__` (or when a level loads), not in `frame()`. A new `Camera` or light
     each frame is fine, and so is showing, hiding or moving objects.
-19. **Frozen programs and custom launchers.** The first run compiles in several processes at once.
+15. **Frozen programs and custom launchers.** The first run compiles in several processes at once.
     PyInstaller programs are handled; a launcher of your own that can't start Python processes should
     set `UNICODE3D_NO_PRECOMPILE=1`.
 

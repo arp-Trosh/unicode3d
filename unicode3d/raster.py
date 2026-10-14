@@ -22,10 +22,13 @@ class FrameBuffer:
     rgb and alpha are float32, half the memory of float64 (a big frame's passes are limited by memory traffic), and
     far finer than the 8 bits a colour ends up as.
     ids: which object owns the pixel, as its index in the render list plus one (0 is empty).
+    top, left: the screen cell its top-left corner was last drawn at (Screen.draw_frame), so that
+    Renderer.pick and ray can take mouse events, which count from the screen's corner.
     """
 
     def __init__(self, width, height, cell_pixels=(1, 2)):
         self.cell_pixels = tuple(cell_pixels)
+        self.top = self.left = 0
         self.resize(width, height)
 
     def resize(self, width, height):
@@ -44,6 +47,7 @@ class FrameBuffer:
     def copy(self):
         fb = FrameBuffer.__new__(FrameBuffer)
         fb.cell_pixels, fb.width, fb.height = self.cell_pixels, self.width, self.height
+        fb.top, fb.left = self.top, self.left
         fb.rgb, fb.alpha, fb.depth, fb.ids = self.rgb.copy(), self.alpha.copy(), self.depth.copy(), self.ids.copy()
         return fb
 

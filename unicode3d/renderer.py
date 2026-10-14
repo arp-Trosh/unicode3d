@@ -64,6 +64,12 @@ class Anchor:
 LABEL_MARGIN = 0.01  # how much nearer than a point (a fraction of its distance) a surface must be to hide it
 
 
+def _cell_index(value):
+    """A cell's coordinate as an int, or None for NaN or an infinity."""
+    value = float(value)
+    return int(np.floor(value)) if np.isfinite(value) else None
+
+
 def _objects_of(owner):
     """The ids of the objects in owner: an Object3D, a Model, or a list of either (None: none)."""
     if owner is None:
@@ -482,7 +488,8 @@ class Renderer(ShadowMaps, Mirrors):
 
     width and height are in terminal cells; cell_pixels is the (columns, rows)
     of pixels in a cell, which comes from the screen's glyph set
-    (Screen.cell_pixels). cell_aspect is a cell's width divided by its height
+    (Screen.cell_pixels). Screen.draw sets all three to fit the screen each frame, so a renderer drawn with it can
+    be made as Renderer(). cell_aspect is a cell's width divided by its height
     (terminal cells are roughly twice as tall as they are wide).
 
     samples: samples per pixel (1, 4, 8 or 16), averaged for smooth edges. Each
@@ -543,7 +550,7 @@ class Renderer(ShadowMaps, Mirrors):
     setting.
     """
 
-    def __init__(self, width, height, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
+    def __init__(self, width=1, height=1, cell_pixels=(1, 2), cell_aspect=0.5, samples=4, edge_samples=8,
                  fog=0.3, outline=0.55, lod_bias=-0.5, background=None, shadow_size=1024, point_shadow_size=256,
                  shadow_softness=1.5, shadow_fit="view", shadows=True, transparency_layers=4, reflections=True, mirror_bounces=1,
                  max_pixels=MAX_PIXELS, simplify=0.0, shading="cell"):
@@ -731,10 +738,21 @@ class Renderer(ShadowMaps, Mirrors):
                         hidden = id(drawn) not in _objects_of(owner)
         return Anchor(int(x), int(y), float(distance), bool(hidden), not inside)
 
-    def ray(self, x, y):
+    def _frame_cell(self, x, y, centre):
+        """pick() and ray()'s (x, y): as given, or a MouseEvent's cell (x alone), counted from the screen's corner,
+        made relative to where the frame was last drawn (Screen.draw_frame), plus centre."""
+        if y is not None:
+            return x, y
+        if not (hasattr(x, "x") and hasattr(x, "y")):
+            raise TypeError(f"pass a cell (x, y) of the frame, or a MouseEvent, not {x!r}")
+        return x.x - self.framebuffer.left + centre, x.y - self.framebuffer.top + centre
+
+    def ray(self, x, y=None):
         """(origin, unit direction) in the world of the line of sight through cell (x, y) as of the last
         render (cells count from the frame's top-left; fractions are fine, and x + 0.5, y + 0.5 is a
-        cell's centre); None before the first render."""
+        cell's centre); None before the first render. ray(event) takes a MouseEvent: the line through the centre of
+        the cell clicked, wherever on the screen the frame was drawn."""
+        x, y = self._frame_cell(x, y, 0.5)
         if self.view_proj is None or self.width < 1 or self.height < 1:
             return None
         nx, ny = x / self.width * 2.0 - 1.0, 1.0 - y / self.height * 2.0
@@ -745,12 +763,16 @@ class Renderer(ShadowMaps, Mirrors):
                 return self._camera_at + self._ortho * (nx * a[1] + ny * a[2]), forward
             return self._eye.copy(), normalize(a[0] + nx * a[1] + ny * a[2])
 
-    def pick(self, x, y):
+    def pick(self, x, y=None):
         """What the last render drew in cell (x, y) of its frame: a Pick (object, position in the world,
-        distance from the camera), taking the nearest surface among the cell's pixels; None if nothing."""
+        distance from the camera), taking the nearest surface among the cell's pixels; None if nothing.
+        pick(event) takes a MouseEvent: what is under the mouse, wherever on the screen the frame was drawn."""
+        x, y = self._frame_cell(x, y, 0)
         fb = self.framebuffer
         pw, ph = self.cell_pixels
-        x, y = int(x), int(y)
+        x, y = _cell_index(x), _cell_index(y)
+        if x is None or y is None:
+            return None
         if self.view_proj is None or not (0 <= x < self.width and 0 <= y < self.height):
             return None
         ids = fb.ids[y * ph:(y + 1) * ph, x * pw:(x + 1) * pw]

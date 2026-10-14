@@ -189,7 +189,7 @@ class Maze:
     def __init__(self, size, seed=None):
         self.rng = np.random.default_rng(seed)
         self.textures = [brick_texture(self.rng), floor_texture(self.rng), ceiling_texture()]
-        self.renderer = Renderer(1, 1, fog=0.45)
+        self.renderer = Renderer(fog=0.45)
         self.bar = StatusBar(self.renderer)
         self.size = Slider("Size", size, 3, 40, keys="[]", length=10, on_change=lambda v: self.new_maze())
         self.speed = Slider("Speed", 1.5, 0.5, 5.0, step=0.5, keys="-=", length=10, fmt=lambda v: f"{v:.1f}")
@@ -322,17 +322,13 @@ class Maze:
         self.renderer.fog = Fog(start=CELL, end=CELL * (3.0 + 24.0 * (1.0 - v) ** 2), color=haze) if v > 0 else 0.0
 
         rows, cols = screen.size()
-        self.renderer.resize(cols, max(rows - 2, 1), screen.cell_pixels)
         objects = [obj for obj, _, _ in self.pieces] + [self.start_marker, self.exit_marker]
-        fb = self.renderer.render(objects, camera, lights)
-        screen.erase()
-        screen.draw_frame(fb)
+        screen.draw(self.renderer, objects, camera, lights, rows=-2)
         if self.show_map.value:
             self.draw_map(screen, 1, cols - 2)
         self.panel.draw(screen, rows - 2, 1)
         self.bar.draw(screen, f"{self.size.value}x{self.size.value} maze, {len(self.visited)} cells walked"
                               f"{'  (paused)' if self.paused else ''}   [space] pause  [n] new maze  [tab] panel  [q] quit")
-        screen.refresh()
         return True
 
 
