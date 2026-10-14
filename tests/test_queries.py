@@ -137,6 +137,15 @@ class RayTests(unittest.TestCase):
         mesh.vertices = mesh.vertices * 2  # replaced: built afresh on the next update
         a.update()
         self.assertAlmostEqual(a.raycast((0, 0, 5), (0, 0, -1)).distance, 4.0)
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            mesh.vertices *= 2  # arrays a tree was built from are read-only: an edit in place would go unseen
+        v = mesh.edit("vertices")
+        v *= 1.5  # (a copy, now the mesh's own: seen at the next update())
+        a.update()
+        self.assertAlmostEqual(a.raycast((0, 0, 5), (0, 0, -1)).distance, 3.5)
+        mesh.vertices = mesh.vertices / 1.5
+        a.update()
+        mesh.vertices.flags.writeable = True  # (as an edit through a view's base gets past the lock)
         mesh.vertices *= 2  # edited in place: seen after invalidate()
         a.update()
         self.assertAlmostEqual(a.raycast((0, 0, 5), (0, 0, -1)).distance, 4.0)
@@ -146,6 +155,7 @@ class RayTests(unittest.TestCase):
         # call added a weakref.finalize, kept until the mesh was gone).
         watching = len(weakref.finalize._registry)
         for _ in range(100):
+            mesh.vertices.flags.writeable = True
             mesh.vertices *= 1.001
             a.invalidate()
         self.assertEqual(len(weakref.finalize._registry), watching)

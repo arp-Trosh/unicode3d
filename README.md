@@ -382,8 +382,15 @@ between frames (`screen.draw()` sets the first three to fit the screen every fra
 object (its index in the render list plus one) covers each pixel. `renderer.project(point)` gives
 the cell a world point landed on (see [Labels](#labels) for text placed there). An unchanged scene isn't drawn again:
 `render()` hands back the last frame, and `renderer.draws` counts only the renders that rasterized.
-After editing a mesh's arrays in place, call `renderer.invalidate()` (a playtest, `unicode3d.playtest`,
-warns of an edit made without it).
+A renderer keeps its own copies of the meshes it draws, so a mesh's arrays (and textures) are read-only
+once drawn: an edit in place, which it wouldn't see, raises instead. `v = mesh.edit("vertices")` gives a
+writable copy that the mesh uses from then on (`mesh.edit("textures", i)` for a texture), and only
+that mesh is worked out again: deforming a 64x64 grid each frame beside 50 textured boxes takes about
+12.6 ms a frame this way, against 17.6 ms editing in place and calling `renderer.invalidate()`, which
+works out every mesh again. Giving the mesh a new array (`mesh.vertices = ...`) works the same way.
+The lock covers the mesh's own arrays, not other arrays they are views of; after an edit through one
+of those, call `renderer.invalidate()` (a playtest, `unicode3d.playtest`, warns of an edit made
+without it).
 
 </details>
 
@@ -492,8 +499,10 @@ Objects can be added to or taken out of `colliders.objects` before an `update()`
 Each mesh gets a bounding volume hierarchy, a tree of boxes around its triangles, built the first
 time a set holding it updates (0.07 s for 140,000 triangles) and shared by every object and set
 that uses the mesh, so a big level is indexed once. A query then costs about 10 µs from Python,
-and `update()` about 7 µs an object. After editing a mesh's arrays in place, call
-`colliders.invalidate()` (a playtest warns of an edit made without it). An object with a pose that isn't finite, or scaled to nothing, is never
+and `update()` about 7 µs an object. A mesh's arrays are read-only once a tree is built from them;
+change them with `mesh.edit(name)` (see [Renderer](#renderer)), which the next `update()` sees. After
+an edit through other arrays they are views of, call `colliders.invalidate()` (a playtest warns of an
+edit made without it). An object with a pose that isn't finite, or scaled to nothing, is never
 hit, and faces with a corner at NaN, or with no area (their corners on a line, as triangle strips and
 polygon fans leave), are left out.
 
@@ -1208,11 +1217,14 @@ def frame(screen, dt, keys):
 <details>
 <summary><h3 id="screen-and-run">Screen and run()</h3></summary>
 
-`run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None,
-key_release=False, erase=True, max_dt=0.1)` takes over the terminal (naming its window `title`, if given) and restores it
+`run(game, fps=30, glyphs=None, color=None, mouse=None, background=None, title=None,
+key_release=None, erase=True, max_dt=0.1)` takes over the terminal (naming its window `title`, if given) and restores it
 however the loop ends (Ctrl-C raises `KeyboardInterrupt`; `kill`'s SIGTERM exits as `sys.exit()`
-would, unless the program handles that signal itself). `frame_fn(screen, dt, keys)` returns
-`False` to stop. `dt` is the seconds since the last frame, at most `max_dt` (after a pause, such as a
+would, unless the program handles that signal itself). `game` is an object with a
+`frame(screen, dt, keys)` method, or that frame function itself, which returns `False` to stop.
+`mouse` and `key_release` left as `None` come from the game's attributes of those names (`mouse =
+"drag"` on its class, else `False`), which the playtest reads too, so a game declares in one place
+what it wants from the mouse and keyboard (see [Input](#input)). `dt` is the seconds since the last frame, at most `max_dt` (after a pause, such as a
 dragged window or a stop in a debugger, the program goes on from where it was rather than jumping
 ahead; `None` passes the real time however long). `keys` holds key codes (a character's code, as a
 `KeyCode`, or a `Key` such as `Key.UP`, `Key.ENTER`, `Key.ESC`), `MouseEvent`s and, with
@@ -1289,10 +1301,12 @@ one-character string it types: `key == "q"`, `key in ("q", "e")` and `case "q":`
 find it (`{"q": ...}.get(key)` misses; look up `chr(key)`). Keys that aren't characters are `Key`
 values, which equal only ints: `Key.UP`, `Key.ENTER`, `Key.ESC`, `Key.F1` and so on.
 
-**Mouse.** `run(mouse=True)` reports clicks and the wheel as `MouseEvent(x, y, button, pressed,
+**Mouse.** `mouse = True` on the game's class (or `run(mouse=True)`) reports clicks and the wheel as `MouseEvent(x, y, button, pressed,
 moved)`; `mouse="drag"` adds moves while a button is held (`moved=True`, `pressed=True`), which
 dragging a slider needs; `mouse="move"` reports every move (with `button=MouseEvent.NONE` when no
-button is held), for hover effects.
+button is held), for hover effects. A playtest sends only the mouse events the game asked for: a
+click, drag or move `run()` wouldn't pass on stops it with an error, so its tests can't pass on clicks a
+terminal never delivers.
 
 **Holding keys.** Most terminals send only key presses, and a held key repeats: once, a pause of
 about half a second, then steadily. That is fine for menus but makes "walk while W is held" stutter.

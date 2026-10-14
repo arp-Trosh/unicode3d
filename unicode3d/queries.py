@@ -27,7 +27,7 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit, prange
 
-from .mesh import edited_in_place, warn_at_caller
+from .mesh import edited_in_place, lock_arrays, warn_at_caller
 from .threads import kernel_lock
 from .lines import Lines
 from .particles import Particles
@@ -261,16 +261,19 @@ def _forget(key):
 
 def mesh_tree(mesh):
     """The mesh's tree, built on first use and kept while the mesh lives (shared by every Colliders); built afresh
-    when mesh.vertices or mesh.faces are replaced, but not when they are edited in place (Colliders.invalidate)."""
+    when mesh.vertices or mesh.faces are replaced (Mesh.edit), but not when they are edited in place through arrays
+    they are views of (they are made read-only here; Colliders.invalidate)."""
     entry = _TREES.get(id(mesh), False)
     if entry and entry[0][0] is mesh.vertices and entry[0][1] is mesh.faces:
         if edited_in_place((mesh.vertices, mesh.faces), "colliders", id(entry[1])):
-            warn_at_caller("a Mesh's arrays were edited in place, which Colliders don't see: call "
-                           "colliders.invalidate() after editing them, or give the mesh new arrays (mesh.vertices = ...)")
+            warn_at_caller("a Mesh's arrays were edited in place (through arrays they are views of: they are read-only "
+                           "once used), which Colliders don't see: edit the copy mesh.edit(name) gives, give the mesh "
+                           "new arrays (mesh.vertices = ...), or call colliders.invalidate() after editing them")
         return entry[1]
     if entry is False:  # (once a mesh: invalidate() leaves None, so that calling it each frame adds nothing)
         weakref.finalize(mesh, _forget, id(mesh))
     tree = _Tree(mesh)
+    lock_arrays(mesh)  # (as a renderer does: see Mesh.edit)
     _TREES[id(mesh)] = ((mesh.vertices, mesh.faces), tree)
     edited_in_place((mesh.vertices, mesh.faces), "colliders", id(tree))  # (with CHECK_EDITS: what it was built from)
     return tree
@@ -791,7 +794,8 @@ class Colliders:
     The set reads where its objects are when made and on each update(): call that after moving them, once a frame
     for any number of queries. Objects can be added to or taken out of `objects` (a list) at any time, before an
     update(). A mesh's tree is built the first time a set holding it updates (a fraction of a second for a hundred
-    thousand triangles) and shared with every other set; after editing a mesh's arrays in place, call invalidate().
+    thousand triangles) and shared with every other set. The mesh's arrays are read-only from then on: change one
+    with mesh.edit(name), which the next update() sees.
 
     Each object counts with the pose it has in the world through its parents, whether or not it is visible. An
     object scaled to nothing in some direction, or with a pose that isn't finite, is never hit. A skinned object
@@ -807,7 +811,8 @@ class Colliders:
         self.update()
 
     def invalidate(self):
-        """Build the trees of the set's meshes afresh (after their arrays were edited in place), and update()."""
+        """Build the trees of the set's meshes afresh (after their arrays were edited in place through arrays they
+        are views of: see Mesh.edit), and update()."""
         for obj in _parts(self.objects):
             mesh = getattr(obj, "mesh", None)
             if mesh is not None and id(mesh) in _TREES:

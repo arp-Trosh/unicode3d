@@ -99,6 +99,8 @@ def collide(pos, vel, radii):
 
 
 class Balls:
+    mouse = "drag"  # clicks and drags (run() and the playtest read it)
+
     def __init__(self, count, seed=None):
         self.rng = np.random.default_rng(seed)
         # Levels of detail: balls small on screen get fewer triangles, which look the same at that size.
@@ -284,7 +286,7 @@ def main():
     args = parser.parse_args()
     demo = Balls(min(max(args.balls, 1), MAX_BALLS), args.seed)
     try:
-        run(demo.frame, args.fps, mouse="drag", title="unicode3d balls", **display_options(args))
+        run(demo, args.fps, title="unicode3d balls", **display_options(args))
     except KeyboardInterrupt:
         pass
 

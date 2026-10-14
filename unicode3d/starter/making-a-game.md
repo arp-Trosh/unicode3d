@@ -99,7 +99,7 @@ def main():
     add_display_args(parser)                    # --glyphs, --color, --ascii
     args = parser.parse_args()
     try:
-        run(Game().frame, args.fps, title="box", **display_options(args))
+        run(Game(), args.fps, title="box", **display_options(args))
     except KeyboardInterrupt:
         pass
 
@@ -115,8 +115,9 @@ What each part is for:
 - **`frame()` does three things in order.** It reads the events, moves the game on by `dt` seconds
   (the time since the last frame, at most 0.1 s, so a pause doesn't jump the game ahead), then draws: the scene with `screen.draw()`, then text over it. Returning `False` quits; returning
   anything else, or nothing, carries on.
-- **`events`** holds key presses (ints that equal their characters, and `Key` values), `MouseEvent`s (only if `run()` was given `mouse=True`), and
-  `KeyRelease`s (only with `key_release=True`). Use the events for things that happen once, such as
+- **`events`** holds key presses (ints that equal their characters, and `Key` values), `MouseEvent`s
+  (only if the game asks for them: `mouse = True` on its class), and `KeyRelease`s (only with
+  `key_release = True`). Use the events for things that happen once, such as
   menus, firing and toggles. Use `screen.held` for things that last while a key is down, such as
   walking and turning.
 - **The screen is a grid of cells.** `run()` erases it before each frame and sends the terminal
@@ -179,7 +180,8 @@ Keys are a character (`a`, `A`, `+`) or a name: `enter`, `esc`, `space`, `tab`, 
 Options: `--size 120x40` (columns x rows; the default), `--glyphs sextant|quad|half|ascii`,
 `--color truecolor|256|16|mono`, `--dt 0.0333` (seconds per frame), `--no-unicode`,
 `--no-releases` (a terminal that reports no key releases, as many don't: held keys are then
-guessed from repeats), `--key-release`, `--no-erase` (as `run(erase=False)`), `--no-check-edits` and
+guessed from repeats), `--mouse on|off|drag|move` and `--key-release` (in place of what the game
+declares), `--no-erase` (as `run(erase=False)`), `--no-check-edits` and
 `--out DIR`. The screen at the end is
 always saved as `last.png` and `last.txt`.
 
@@ -253,7 +255,7 @@ class GameTests(unittest.TestCase):
 ```
 
 `Playtest(game, size=(40, 120), glyphs="sextant", color="truecolor", dt=1/30, releases=True,
-key_release=False, out="playtest")` has the same commands as methods: `wait(n)`, `press(*keys)`,
+mouse=None, key_release=None, out="playtest")` has the same commands as methods: `wait(n)`, `press(*keys)`,
 `type(text)`, `hold(*keys, frames=n)`, `down`/`up`, `click(x, y)`, `click_text(text)`,
 `move(x, y)`, `resize(rows, cols)`, `step(events)` for events of your own, `shot(name)` and
 `sheet(name, frames, shots=6, columns=3)`. To look at the screen, it has `text(picture=False)`,
@@ -265,8 +267,11 @@ RGB array). `quit` says whether `frame()` returned `False`. `report()` gives a `
 
 A playtest is the same every time: `dt` is fixed, and so are the glyphs and colours. It plays
 every frame without waiting, so ten seconds of play take as long as drawing 300 frames. It also
-checks for mistakes that real runs can't afford to check: a mesh's arrays edited in place without
-`invalidate()` is reported as a warning.
+checks for mistakes that real runs can't afford to check: a mesh's arrays edited in place through
+other arrays they are views of (past the read-only lock), without `invalidate()`, is reported as a
+warning. It plays the game as `run()` would: a click, drag or move
+the game didn't ask for (its `mouse`) stops the playtest with an error, since `run()` would never
+pass it on.
 
 ## Conventions
 
@@ -418,13 +423,16 @@ Everything below imports from `unicode3d` unless another module is named. The [R
 has each in full.
 
 **Running.**
-`run(frame_fn, fps=30, mouse=False, key_release=False, title=None, glyphs=None, color=None, erase=True,
-max_dt=0.1)`. `frame_fn(screen, dt, events)` returns `False` to stop. `run()` erases the screen before
+`run(game, fps=30, mouse=None, key_release=None, title=None, glyphs=None, color=None, erase=True,
+max_dt=0.1)`. `game` is an object with `frame(screen, dt, events)`, or the frame function itself,
+which returns `False` to stop. `run()` erases the screen before
 each frame (unless `erase=False`) and sends what was drawn after it. `dt` is the seconds since the
 last frame, at most `max_dt` (`None`: no limit). What the game prints while `run()` goes is held
-back and printed when it ends. Pass `mouse=True` for clicks and the wheel,
-`"drag"` for moves while a button is held (sliders), and `"move"` for every move (hover);
-`key_release=True` for `KeyRelease` events.
+back and printed when it ends. What the game wants from the mouse and keyboard it declares on its
+class, where `run()` and the playtest both read it: `mouse = True` for clicks and the wheel,
+`"drag"` for moves while a button is held too (sliders), `"move"` for every move (hover);
+`key_release = True` for `KeyRelease` events. (`run(mouse=...)` and `Playtest(mouse=...)` override
+it.)
 `add_display_args(parser)` and `display_options(args)` give the `--glyphs`, `--color` and `--ascii`
 flags.
 
@@ -471,6 +479,9 @@ comes with `run(key_release=True)`.
 - `Mesh(vertices, faces, uvs=None, materials=None, textures=[], vertex_colors=None, face_colors=None)`;
   see [Conventions](#conventions) for the order of corners and `uvs`, and the
   [recipe](#a-first-person-level-from-a-text-map) for a mesh built from a map.
+- A mesh's arrays are read-only once drawn. To change one, `v = mesh.edit("vertices")` gives a
+  writable copy that the mesh uses from then on (`mesh.edit("textures", i)` for a texture), or give
+  it a new array (`mesh.vertices = ...`). Moving objects needs neither.
 - `load_image(path)`.
 
 **Models.**
@@ -519,7 +530,7 @@ comes with `run(key_release=True)`.
   `panel.draw(screen, y, x)` draws it.
 - `DisplayControls(renderer=renderer)` is the F2 to F8 display settings bar:
   `events = controls.handle(events, screen)` and `controls.draw(screen, y, x)`.
-- Run with `mouse="drag"` for sliders.
+- Sliders need `mouse = "drag"` on the game's class.
 
 **Starter.** `python -m unicode3d.new FOLDER` writes a starter game (see [Setting up](#setting-up));
 `--guide` refreshes the copy of this guide.
@@ -542,10 +553,12 @@ animation track raises, the playtest warns of mesh edits it can't see), but thes
 3. **`dt` is in seconds**, and under `run()` it is the real time since the last frame, at most
    0.1 s (`run(max_dt=...)`), so the game runs slower rather than skipping ahead when frames are
    slow. In a playtest it is fixed (1/30 by default).
-4. **Clicks need `run(mouse=True)`** (`"drag"` for sliders, `"move"` for hover), and `KeyRelease`
-   events need `run(key_release=True)` (`screen.held` doesn't: `run()` always asks for releases). The playtest sends clicks and releases to `frame()`
-   whatever `run()` is told, so a game can pass its playtests and get no clicks in a terminal.
-   Check what `main()` passes to `run()`.
+4. **Clicks need `mouse = True` on the game's class** (`"drag"` for sliders, `"move"` for hover),
+   and `KeyRelease` events need `key_release = True` (`screen.held` doesn't: `run()` always asks for
+   releases). `run(game)` and the playtest both read them; a playtest click the game didn't ask
+   for is an error. Pass the game itself (or `game.frame`) to `run()`: a plain function has no
+   class to declare them on, so it needs `run(frame, mouse=True)` and `Playtest(frame, mouse=True)`
+   alike.
 5. **Held keys need `screen.held`, not events.** A held key arrives as a press, a half-second
    pause, then repeats, so moving a player once per key event stutters. Move by
    `speed * dt` while `"w" in screen.held`. It is exact in terminals that report releases (kitty,
@@ -559,10 +572,13 @@ animation track raises, the playtest warns of mesh edits it can't see), but thes
 8. **A new object starts at the origin.** An `Object3D` made in the middle of play without a
    position shows for a frame at (0, 0, 0) before your code moves it. Give it its position when you
    make it, or make it with `visible=False` until it is placed.
-9. **Mesh arrays edited in place need `invalidate()`.** The renderer and `Colliders` keep packed
-   copies of meshes, so after changing `mesh.vertices`, `faces`, colours or a texture array in place,
-   call `renderer.invalidate()` (and `colliders.invalidate()`). The playtest warns of an edit made
-   without it. Moving objects needs nothing: change `obj.position`, `rotation` or `scale` freely.
+9. **A mesh's arrays are read-only once drawn.** The renderer and `Colliders` keep packed copies
+   of them, so an edit in place raises `ValueError: assignment destination is read-only` (or
+   `output array is read-only`) rather than going unseen. Edit the copy `mesh.edit("vertices")`
+   gives (`mesh.edit("textures", i)` for a texture) again each time, or give the mesh a new array.
+   The lock covers the mesh's own arrays, not other arrays they are views of: edits through those
+   still need `renderer.invalidate()`, and the playtest warns of them. Moving objects needs nothing:
+   change `obj.position`, `rotation` or `scale` freely.
 10. **Animation tracks can't be edited.** A track's keyframes are read-only once it is made (an edit
     raises): give the animation a new `Track` instead. A `Clip`'s `loop` and `speed` can be changed.
 11. **`Colliders` don't see skinned poses.** A skinned character is seen by queries in its bind

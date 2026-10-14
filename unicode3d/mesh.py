@@ -44,6 +44,15 @@ def mesh_arrays(mesh, textures=True):
     return [a for a in arrays if a is not None]
 
 
+def lock_arrays(mesh):
+    """Make a mesh's arrays (and its textures) read-only, as renderers and Colliders do with those they keep copies
+    of: an edit in place, which they wouldn't see, raises instead ("assignment destination is read-only").
+    Mesh.edit() gives a writable copy, which the mesh then has in place of the array."""
+    for a in mesh_arrays(mesh):
+        if isinstance(a, np.ndarray) and a.flags.writeable:
+            a.flags.writeable = False
+
+
 class _Sums:
     """An array's checksums, kept from one check to the next: of the whole array if it is small, else of one of
     `step` slices of its rows (every step-th row), a different slice each check."""
@@ -115,6 +124,32 @@ class Mesh:
                                              # is drawn; see skinning.py), before any skin poses it
     morph_normals: np.ndarray | None = None  # (K, V, 3) how far each turns each vertex's normal (None: normals
                                              # stay the mesh's own however it morphs)
+
+    def edit(self, name, index=None):
+        """A writable copy of one of the mesh's arrays (`name`: "vertices", "faces", "uvs", "materials",
+        "vertex_colors", "face_colors", "normals", "joints", "weights", "morph_targets" or "morph_normals"; or
+        "textures" with the texture's `index`), which the mesh has from now on in place of it: change it in place,
+        and renderers and Colliders see the change, as for any new array. A mesh's arrays are read-only once drawn
+        (or used by Colliders), since those keep copies of them and wouldn't see an edit:
+
+            v = mesh.edit("vertices")
+            v[:, 1] += 0.1
+
+        Call it again to edit the mesh again after it has been drawn. Returns the copy."""
+        if name == "textures":
+            if index is None:
+                raise TypeError('edit("textures", index): name the texture by its index in mesh.textures')
+            self.textures = list(self.textures)  # (a new list: keys compare the textures one by one anyway)
+            copy = self.textures[index] = np.array(self.textures[index])
+            return copy
+        if name not in _ARRAYS:
+            raise ValueError(f"edit() takes one of {', '.join(_ARRAYS)} or textures, not {name!r}")
+        current = getattr(self, name)
+        if current is None:
+            raise ValueError(f"the mesh has no {name} to edit")
+        copy = np.array(current)
+        setattr(self, name, copy)
+        return copy
 
     def vertex_normals(self):
         """The unit normal at each vertex (V, 3): `normals` where given, otherwise the area-weighted average of the

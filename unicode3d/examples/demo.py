@@ -36,6 +36,8 @@ CAMERA_DIR = normalize([0.0, 0.8, 0.6])  # from the table towards the camera
 
 
 class DiceDemo:
+    mouse = True  # clicks (run() and the playtest read it)
+
     def __init__(self, count, seed=None):
         self.rng = np.random.default_rng(seed)
         self.mesh = make_die()
@@ -124,7 +126,7 @@ def main():
     args = parser.parse_args()
     demo = DiceDemo(min(max(args.dice, 1), MAX_DICE), args.seed)
     try:
-        run(demo.frame, args.fps, mouse=True, title="unicode3d dice", **display_options(args))
+        run(demo, args.fps, title="unicode3d dice", **display_options(args))
     except KeyboardInterrupt:
         pass
 

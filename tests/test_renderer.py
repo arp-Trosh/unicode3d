@@ -298,7 +298,9 @@ class RenderTests(unittest.TestCase):
         for objects in ([a, plain], [a, plain, a2], [a, plain, a2, b], [c], [c, d], [a, b, c, d, plain], [a],
                         "edit", [plain, a2, c]):
             if objects == "edit":
-                a.mesh.vertices *= 1.2  # (edited in place: seen after invalidate())
+                a.mesh.vertices.flags.writeable = True  # (drawn meshes' arrays are read-only: an edit the lock
+                a.mesh.vertices *= 1.2                   # doesn't stop, such as one through a view's base, is
+                                                         # seen after invalidate())
                 renderer.invalidate()
                 objects = [a, plain, d]
             got = renderer.render(objects, camera, light)
@@ -669,7 +671,8 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(bool(np.isfinite(inst["pack"]["planes"][inst["mesh"][0], 0])), mirror)
         # Arrays edited in place, and invalidate(): levels made afresh.
         levels = detail_levels(ball)
-        ball.vertices *= 1.5
+        ball.vertices.flags.writeable = True  # (read-only once drawn: unlocked by hand, as an edit through a view's
+        ball.vertices *= 1.5                  # base would get past the lock)
         Renderer(10, 10).invalidate()
         self.assertIsNot(detail_levels(ball), levels)
 

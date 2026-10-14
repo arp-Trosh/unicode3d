@@ -102,18 +102,22 @@ class ColliderTests(unittest.TestCase):
 
 
 class Editor:
-    """A program editing a mesh in place in frame 3: with or without invalidate(), for a renderer or Colliders."""
+    """A program editing a mesh in place in frame 3: with or without invalidate(), for a renderer or Colliders.
+    A drawn mesh's arrays are read-only, so it edits them the way the lock doesn't stop: through the array they are
+    a view of."""
 
     def __init__(self, invalidate, colliders=False):
         self.renderer = Renderer(1, 1)
         self.box = Object3D(make_box())
+        self.base = self.box.mesh.vertices.copy()
+        self.box.mesh.vertices = self.base[:]
         self.solid = Colliders([self.box]) if colliders else None
         self.invalidate, self.count = invalidate, 0
 
     def frame(self, screen, dt, events):
         self.count += 1
         if self.count == 3:
-            self.box.mesh.vertices *= 2.0
+            self.base *= 2.0
             if self.invalidate:
                 self.renderer.invalidate()
                 if self.solid is not None:
@@ -133,7 +137,7 @@ class Painter(Editor):
     def __init__(self, paint_at):
         super().__init__(invalidate=False)
         self.picture = np.full((256, 256, 3), 0.5)
-        self.box = Object3D(make_box(1.0, [self.picture] * 6), color=(255, 255, 255))
+        self.box = Object3D(make_box(1.0, [self.picture[:]] * 6), color=(255, 255, 255))  # (a view, as in Editor)
         self.paint_at, self.count = paint_at, 10  # (past the frame Editor edits the vertices in)
 
     def frame(self, screen, dt, events):
@@ -156,8 +160,9 @@ class EditCheckTests(unittest.TestCase):
                 found = self.play(Editor(invalidate=False, colliders=colliders))
                 messages = [m for _, m in found if "edited in place" in m]
                 self.assertTrue(messages, found)
-                self.assertIn("colliders.invalidate()" if colliders else "renderer.invalidate()", messages[0])
-                self.assertIn("test_hazards.py", messages[0])  # (pointing at the program's line)
+                which = "colliders.invalidate()" if colliders else "renderer.invalidate()"
+                message = next(m for m in messages if which in m)
+                self.assertIn("test_hazards.py", message)  # (pointing at the program's line)
                 self.assertEqual(found[0][0], 3)
 
     def test_a_few_rows_of_a_big_texture(self):
@@ -186,7 +191,38 @@ class EditCheckTests(unittest.TestCase):
             warnings.simplefilter("error")
             for _ in range(3):
                 renderer.render([game.box], CAMERA, Light())
-                game.box.mesh.vertices *= 1.5
+                game.base *= 1.5
+
+    def test_drawn_arrays_are_read_only(self):
+        # An edit in place, which renderers and Colliders wouldn't see, raises; mesh.edit() gives a copy that the
+        # mesh then has, seen at once.
+        box = Object3D(make_box())
+        solid, renderer = Colliders([box]), Renderer(30, 15)
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            box.mesh.faces[0, 0] = 1  # (Colliders built a tree from it)
+        before = renderer.render([box], CAMERA, Light()).ids.copy()
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            box.mesh.vertices[0] = 0.0
+        texture = make_box(1.0, [np.full((4, 4, 3), 0.5)] * 6)
+        renderer.render([Object3D(texture)], CAMERA, Light())
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            texture.textures[0][0, 0] = 1.0
+        painted = texture.edit("textures", 0)
+        painted[:] = 1.0
+        self.assertIs(texture.textures[0], painted)
+        v = box.mesh.edit("vertices")
+        v *= 0.5
+        self.assertIs(box.mesh.vertices, v)
+        smaller = renderer.render([box], CAMERA, Light()).ids
+        self.assertLess((smaller > 0).sum(), (before > 0).sum())  # (0: nothing drawn there)
+        solid.update()
+        self.assertAlmostEqual(solid.raycast((0, 0, 5), (0, 0, -1)).distance, 4.75)
+        with self.assertRaisesRegex(ValueError, "read-only"):
+            v[0] = 0.0  # (drawn again: read-only again)
+        with self.assertRaises(ValueError):
+            box.mesh.edit("colour")
+        with self.assertRaises(ValueError):
+            box.mesh.edit("normals")  # (it has none)
 
 
 class NoTerminalTests(unittest.TestCase):

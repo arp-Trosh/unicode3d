@@ -1106,6 +1106,9 @@ class Statues:
 # ----- the show ------------------------------------------------------------------------------------------------
 
 class Show:
+    mouse = "drag"  # clicks and drags (run() and the playtest read it)
+    key_release = True
+
     def __init__(self):
         self.renderer = Renderer()
         self.renderer.background = Gradient((30, 22, 28), (8, 6, 10))
@@ -1293,7 +1296,7 @@ def main():
     add_display_args(parser)
     args = parser.parse_args()
     try:
-        run(Show().frame, args.fps, mouse="drag", key_release=True, title="unicode3d marionettes",
+        run(Show(), args.fps, title="unicode3d marionettes",
             **display_options(args))
     except KeyboardInterrupt:
         pass

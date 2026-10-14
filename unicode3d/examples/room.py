@@ -765,6 +765,9 @@ class DebugView:
 
 
 class Walk:
+    mouse = "drag"  # clicks and drags (run() and the playtest read it)
+    key_release = True
+
     def __init__(self, seed=None):
         self.court = Courtyard(seed)
         self.renderer = Renderer()
@@ -906,7 +909,7 @@ def main():
     add_display_args(parser)
     args = parser.parse_args()
     try:
-        run(Walk(args.seed).frame, args.fps, mouse="drag", key_release=True, title="unicode3d room",
+        run(Walk(args.seed), args.fps, title="unicode3d room",
             **display_options(args))
     except KeyboardInterrupt:
         pass

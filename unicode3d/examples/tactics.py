@@ -120,6 +120,8 @@ class Pawn:
 
 
 class Tactics:
+    mouse = "move"  # clicks and every move, for hovering (run() and the playtest read it)
+
     def __init__(self, seed=3):
         rng = np.random.default_rng(seed)
         self.levels = island(rng)
@@ -324,7 +326,7 @@ def main():
     add_display_args(parser)
     args = parser.parse_args()
     try:
-        run(Tactics(args.seed).frame, args.fps, mouse="move", title="unicode3d tactics", **display_options(args))
+        run(Tactics(args.seed), args.fps, title="unicode3d tactics", **display_options(args))
     except KeyboardInterrupt:
         pass
 

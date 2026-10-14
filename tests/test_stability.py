@@ -723,6 +723,22 @@ class RealTerminalTests(unittest.TestCase):
         self.assertEqual(code, 0, out[-2000:])
         self.assertIn(b"frame number 0", out)
 
+    def test_run_takes_a_game_and_its_mouse(self):
+        # run(game) calls game.frame, and asks the terminal for what the game's `mouse` attribute says.
+        program = ("from unicode3d.terminal import run\n"
+                   "class Game:\n"
+                   "    mouse = 'drag'\n"
+                   "    def frame(self, screen, dt, keys):\n"
+                   "        screen.text(0, 0, f'frame {screen.frame_count}')\n"
+                   "        return 'q' not in keys\n"
+                   "run(Game())\n")
+        with tempfile.TemporaryDirectory() as cache:
+            code, out = run_in_pty(["-c", program], 24, 80, [(3, lambda fd, *_: os.write(fd, b"q"))],
+                                   env={"XDG_CACHE_HOME": cache})
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertIn(b"\x1b[?1002h", out)  # drags asked for
+        self.assertIn(b"frame 0", out)
+
     def test_dt_is_limited_and_printing_waits_for_the_end(self):
         # A frame that stalls (a breakpoint, a dragged window) gives the next frame a dt of at most max_dt (0.1 s),
         # and what the program prints while run() goes comes out after the terminal is restored.

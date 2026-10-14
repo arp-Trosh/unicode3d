@@ -33,7 +33,7 @@ import numpy as np
 from numba import njit
 
 from .color import _RGB, COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
-from .console import detect_color_mode, detect_glyphs, open_console
+from .console import MOUSE_MODES, detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
 from .keys import HeldKeys, InputDecoder, Key, KeyCode, KeyRelease, MouseEvent, key_codes
 from .animation import Animation, Clip, RotationTrack, Track
@@ -873,9 +873,41 @@ def _holding_output():
         held.write_out()
 
 
-def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False,
+def _program_settings(program, mouse=None, key_release=None):
+    """(frame function, mouse, key_release) for running `program`, as run() and the playtest take them.
+
+    program is a frame function (screen, dt, events), or a game: an object with a frame() method. mouse and
+    key_release left as None come from the game's attributes of those names (`mouse = "drag"` on its class), read
+    from the object, or from the object a frame method passed on its own belongs to (run(Game().frame)); False
+    where it has none. Declared on the game, they reach run() in a terminal and the playtest alike."""
+    frame = getattr(program, "frame", program)
+    if not callable(frame):
+        raise TypeError(f"run a frame function (screen, dt, events) or an object with a frame() method, "
+                        f"not {program!r}")
+    game = program if frame is not program else getattr(frame, "__self__", None)
+    settings = {}
+    for name, given in (("mouse", mouse), ("key_release", key_release)):
+        value, declared = given, given is None and hasattr(game, name)
+        if given is None:
+            value = getattr(game, name, False) if game is not None else False
+        allowed = MOUSE_MODES if name == "mouse" else ()
+        if not (isinstance(value, bool) or isinstance(value, str) and value in allowed):
+            where = (f"{type(game).__name__}.{name} is {value!r}: run() and the playtest read a game's `{name}` as "
+                     f"its setting, so give a value of the game's own another name" if declared
+                     else f"{name} must be one of these, not {value!r}")
+            choices = "False, True, 'click', 'drag' or 'move'" if name == "mouse" else "False or True"
+            raise ValueError(f"{where} ({choices})")
+        settings[name] = value
+    return frame, settings["mouse"], settings["key_release"]
+
+
+def run(frame_fn, fps=30, glyphs=None, color=None, mouse=None, background=None, title=None, key_release=None,
         erase=True, max_dt=0.1):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
+
+    frame_fn may also be a game, an object with a frame() method. mouse and key_release left as None come from the
+    game's attributes of those names (`mouse = "drag"` on its class), as in the playtest, so the game declares in one
+    place what it wants from the mouse and keyboard; False if it doesn't say.
 
     Before each call the screen is erased (unless erase is False, for a program that keeps what it wrote from
     frame to frame), and after it the screen is refreshed: what frame_fn drew is sent to the terminal.
@@ -905,6 +937,7 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
     Python itself leaves a stack trace there (faulthandler), where the screen would lose it. SIGTERM ends the
     program as sys.exit() would, with the terminal restored (unless the program handles that signal itself).
     """
+    frame_fn, mouse, key_release = _program_settings(frame_fn, mouse, key_release)
     log, screen, frame, handler = _open_crash_log(), None, 0, faulthandler.is_enabled()
     if log is not None:
         faulthandler.enable(log)

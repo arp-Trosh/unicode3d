@@ -21,6 +21,7 @@ from unicode3d.scene import Camera, Light, Model, Node, Object3D, Renderer
 
 class Game:
     """A small program: a box in a frame, a score line, keys and clicks noted. q quits, x raises, w warns."""
+    mouse = "move"  # (every mouse event, as run(mouse="move") passes them)
 
     def __init__(self, draw=True):
         self.renderer = Renderer(1, 1)
@@ -240,6 +241,50 @@ class PlaytestTests(unittest.TestCase):
         self.assertIn("Score 2", test.text())
         run_script(test, "resize 50x12; wait")  # columns first in scripts, as on the command line
         self.assertEqual(test.screen.size(), (12, 50))
+
+    def test_the_mouse_the_game_asks_for(self):
+        # run() and the playtest read the game's own `mouse` and `key_release`, so what its playtests send is what
+        # it gets in a terminal; a mouse event run() wouldn't pass on is refused.
+        click, drag = MouseEvent(1, 2, MouseEvent.LEFT, True), MouseEvent(1, 2, MouseEvent.LEFT, True, True)
+        hover = MouseEvent(1, 2, MouseEvent.NONE, False, True)
+        for mode, allowed in [(False, []), (True, [click]), ("click", [click]), ("drag", [click, drag]),
+                              ("move", [click, drag, hover])]:
+            game = Game()
+            game.mouse = mode
+            test = self.play(game)
+            for e in (click, drag, hover):
+                if e in allowed:
+                    test.step([e])
+                    self.assertEqual(game.events[-1], [e])
+                else:
+                    with self.assertRaisesRegex(PlaytestError, "mouse = (True|\"drag\"|\"move\")"):
+                        test.step([e])
+        game = Game()
+        del Game.mouse  # (a game that declares nothing: no mouse, as under run())
+        try:
+            with self.assertRaisesRegex(PlaytestError, "the program's mouse is False"):
+                self.play(game).click(1, 1)
+            self.play(game, mouse=True).click(1, 1)  # (as run(mouse=True))
+            self.play(game, mouse="drag").step([drag])
+            self.assertEqual(game.events[-1], [drag])
+            frame = lambda screen, dt, events: None  # (a function has no game to ask: no mouse)
+            with self.assertRaises(PlaytestError):
+                Playtest(frame, size=(20, 60), out=self.out, compile=False).click(1, 1)
+        finally:
+            Game.mouse = "move"
+        game.key_release = True
+        test = self.play(game)
+        test.press("a").wait(1)
+        self.assertEqual(game.events[-1], [KeyRelease(ord("a"))])
+        self.assertEqual(self.play(game, key_release=False).press("a").wait(1).frames, 2)
+        self.assertEqual(game.events[-1], [])  # (given, the argument wins)
+        game.mouse = (3, 4)  # a value of the game's own under the name: said, not taken as a setting
+        with self.assertRaisesRegex(ValueError, "Game.mouse is \\(3, 4\\).*another name"):
+            self.play(game)
+        with self.assertRaisesRegex(ValueError, "key_release must be"):
+            self.play(Game(), key_release="yes")
+        with self.assertRaises(TypeError):
+            Playtest(object(), compile=False)
 
     def test_scripts(self):
         test = self.play()

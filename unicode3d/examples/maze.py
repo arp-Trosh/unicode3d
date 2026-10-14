@@ -186,6 +186,8 @@ def smooth(t):
 # ----- the screensaver ---------------------------------------------------------------------
 
 class Maze:
+    mouse = "drag"  # clicks and drags (run() and the playtest read it)
+
     def __init__(self, size, seed=None):
         self.rng = np.random.default_rng(seed)
         self.textures = [brick_texture(self.rng), floor_texture(self.rng), ceiling_texture()]
@@ -340,7 +342,7 @@ def main():
     args = parser.parse_args()
     demo = Maze(min(max(args.size, 3), 40), args.seed)
     try:
-        run(demo.frame, args.fps, mouse="drag", title="unicode3d maze", **display_options(args))
+        run(demo, args.fps, title="unicode3d maze", **display_options(args))
     except KeyboardInterrupt:
         pass
 

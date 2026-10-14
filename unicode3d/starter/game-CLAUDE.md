@@ -53,15 +53,15 @@ on screen, or a check of the game's state.
 - **Every frame:** draw the scene with `screen.draw(renderer, objects, camera, lights)` (`rows=-1` leaves
   the last row for a status line), then write text over it. `run()` erases the screen before each frame and
   sends what was drawn after it.
-- **The mouse:** `run()` in `main()` must have `mouse=True` (or `"drag"` / `"move"`) for clicks to arrive
-  in a real terminal. Playtests send clicks either way.
+- **The mouse:** the `Game` class declares `mouse = True` (or `"drag"` / `"move"`), which `run(Game())` and
+  the playtests both read; a playtest click the game didn't ask for is an error.
 - **Build once:** make meshes, models, renderers and `Colliders` in `__init__` or when a level loads,
   never in `frame()`.
 - **Coordinates:** `screen.text(y, x)` takes the row first; clicks take the column first. Pass the click
   itself to `renderer.pick(ev)` and `renderer.ray(ev)`, which know where the frame was drawn.
   Rotations are quaternions, w first (`quat_axis_angle(axis, radians)`).
-- **Mesh edits:** after editing a mesh's arrays in place, call `renderer.invalidate()` (and
-  `colliders.invalidate()`).
+- **Mesh edits:** a mesh's arrays are read-only once drawn; change one through `mesh.edit("vertices")`
+  (a writable copy the mesh then uses), or give the mesh a new array.
 - **Engine bugs and gaps:** don't edit or monkey-patch unicode3d from here. Work around the problem in the
   game if you must, and write it down in `ENGINE-NOTES.md`: what you were doing, what went wrong or what
   was missing, and what you did instead.

@@ -46,7 +46,7 @@ from . import mesh as mesh_module
 from .glyphs import GLYPH_MODES, GLYPH_SETS
 from .keys import Key, KeyRelease, MouseEvent, key_codes
 from .color import COLOR_MODES
-from .terminal import Screen, compile_kernels
+from .terminal import Screen, _program_settings, compile_kernels
 
 __all__ = ["Playtest", "PlaytestError", "Report", "Found", "parse_key", "contact_sheet", "preview", "parse_script", "run_script", "load_target",
            "SCRIPT_HELP"]
@@ -165,6 +165,10 @@ class Playtest:
     """Drives frame(screen, dt, events), the function run() would call, off-screen.
 
     frame: the program's frame function, or an object with a frame() method (a game).
+    mouse, key_release: as run()'s; left as None, they come from the game's attributes of those names (`mouse = True`
+    on its class), as under run(), else False. Mouse events the program didn't ask for raise PlaytestError (a click
+    without mouse, a drag without "drag" or "move", a move with no button without "move"): run() would never pass
+    them on, so a playtest sending them would pass where the game gets no clicks in a terminal.
     size: (rows, cols) of the pretend terminal, as Screen(size=...) takes it (scripts and the command line give
     sizes as COLSxROWS); glyphs, color: its glyph set and colour mode (fixed, so pictures are the same on every
     machine); dt: the seconds each frame is told have passed (fixed: a playtest plays the same every time).
@@ -174,8 +178,8 @@ class Playtest:
     Keys: a pressed key is let go in the next frame, and a held one (hold(), down()) repeats as a terminal repeats
     it, REPEAT_RATE times a second after REPEAT_DELAY. releases: the terminal reports releases (as with the kitty
     keyboard protocol), so screen.held knows exactly which keys are down; with releases=False, as in most
-    terminals, only presses and repeats arrive, and screen.held guesses (see HeldKeys). key_release: as run()'s,
-    pass the releases to frame() as KeyRelease events (where the terminal reports them). erase: as run()'s, erase
+    terminals, only presses and repeats arrive, and screen.held guesses (see HeldKeys). With key_release, the
+    releases are passed to frame() as KeyRelease events (where the terminal reports them). erase: as run()'s, erase
     the screen before each frame.
 
     Each frame erases and refreshes the screen as run() does (a playtest counts the bytes instead of writing them).
@@ -186,17 +190,16 @@ class Playtest:
     the program's other threads are not.
 
     check_edits: check, each frame, that no mesh drawn (or in a Colliders set) had its arrays edited in place without
-    invalidate(), which renderers and Colliders don't see; one that was is a warning in the report. It takes
+    invalidate(), which renderers and Colliders don't see (they make the arrays read-only, so this catches edits
+    through arrays they are views of); one that was is a warning in the report. It takes
     checksums of the meshes' arrays each frame (of a big one, such as a texture, a slice of its rows at a time, so
     an edit to a few rows shows some frames later: see mesh.CHECK_BYTES), which frame times leave out.
     """
 
     def __init__(self, frame, size=(40, 120), glyphs="sextant", color="truecolor", dt=1 / 30, unicode=True,
-                 releases=True, key_release=False, out="playtest", compile=True, check_edits=True, erase=True):
-        frame = getattr(frame, "frame", frame)
-        if not callable(frame):
-            raise TypeError(f"frame must be the program's frame function (screen, dt, events) or an object with a "
-                            f"frame() method, not {frame!r}")
+                 releases=True, key_release=None, out="playtest", compile=True, check_edits=True, erase=True,
+                 mouse=None):
+        frame, self.mouse, key_release = _program_settings(frame, mouse, key_release)
         if glyphs not in GLYPH_MODES:
             raise ValueError(f"glyphs must be one of {GLYPH_MODES}, not {glyphs!r}")
         self.frame_fn = frame
@@ -239,6 +242,9 @@ class Playtest:
         repeats them. Returns what frame() returned."""
         self._playing()
         events, self._queued = self._queued + list(events), []
+        for e in events:
+            if isinstance(e, MouseEvent):
+                self._check_mouse(e)
         if self.frames:
             for key, since in self._held.items():  # a terminal's auto-repeat, at its own rate whatever the frame's
                 n = self._repeats(since, self.now) - self._repeats(since, self.now - self.dt)
@@ -285,6 +291,22 @@ class Playtest:
         if result is False:
             self.quit, self.quit_at = True, self.frames
         return result
+
+    def _check_mouse(self, e):
+        """Raise PlaytestError for a mouse event run() wouldn't pass on with the program's mouse setting."""
+        mode, move = self.mouse, e.moved and e.button == MouseEvent.NONE
+        if not mode:
+            need = '"move"' if move else '"drag"' if e.moved else "True"
+        elif move and mode != "move":
+            need = '"move"'
+        elif e.moved and mode in (True, "click"):
+            need = '"drag"'
+        else:
+            return
+        flag = {"True": "on", '"drag"': "drag", '"move"': "move"}[need]
+        raise PlaytestError(f"the program's mouse is {mode!r}, so run() would never pass it this {e}: give the game "
+                            f"`mouse = {need}` (a class attribute, which run() and the playtest both read), or pass "
+                            f"mouse={need} to run() and Playtest alike (on the command line, --mouse {flag})")
 
     def _playing(self):
         if self.quit:
@@ -845,7 +867,10 @@ def main(argv=None):
     play.add_argument("--no-unicode", action="store_true", help="a terminal without Unicode")
     play.add_argument("--no-releases", action="store_true", help="a terminal that reports no key releases (most "
                       "do not): held keys are guessed from presses and repeats")
-    play.add_argument("--key-release", action="store_true", help="pass KeyRelease events, as run(key_release=True)")
+    play.add_argument("--key-release", action="store_true", default=None,
+                      help="pass KeyRelease events, as run(key_release=True) (default: the game's key_release)")
+    play.add_argument("--mouse", choices=["off", "on", "drag", "move"], help="what the program gets from the mouse, as "
+                      "run(mouse=...) (default: the game's mouse attribute)")
     play.add_argument("--no-erase", action="store_true", help="keep the screen from frame to frame, as run(erase=False)")
     play.add_argument("--no-check-edits", action="store_true", help="don't check meshes for arrays edited in place "
                       "without invalidate() (checksums of the meshes' arrays each frame)")
@@ -889,6 +914,7 @@ def main(argv=None):
         return 2
     test = Playtest(frame, size=args.size, glyphs=args.glyphs, color=args.color, dt=args.dt,
                     unicode=not args.no_unicode, releases=not args.no_releases, key_release=args.key_release,
+                    mouse={None: None, "off": False, "on": True}.get(args.mouse, args.mouse),
                     erase=not args.no_erase, out=args.out, check_edits=not args.no_check_edits)
     status = 0
     try:

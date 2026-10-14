@@ -33,6 +33,7 @@ MOVES = {           # held keys and the way each moves the player (x, z)
 
 class Game:
     """What the screens share (the renderer, the light, meshes, the best score) and the current screen."""
+    mouse = True                                # clicks, for the buttons: run() and the playtest both read it
 
     def __init__(self, seed=None):
         self.random = random.Random(seed)       # a seed makes a round the same every time (tests)
@@ -202,7 +203,7 @@ def main():
     add_display_args(parser)                    # --glyphs, --color, --ascii
     args = parser.parse_args()
     try:
-        run(Game().frame, args.fps, mouse=True, title=TITLE, **display_options(args))   # mouse: the buttons
+        run(Game(), args.fps, title=TITLE, **display_options(args))
     except KeyboardInterrupt:
         pass
 

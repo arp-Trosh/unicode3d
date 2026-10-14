@@ -69,6 +69,8 @@ def shapes():
 
 
 class Workshop:
+    mouse = "drag"  # clicks and drags (run() and the playtest read it)
+
     def __init__(self):
         self.shapes = shapes()
         self.renderer = Renderer()
@@ -212,7 +214,7 @@ def main():
     add_display_args(parser)
     args = parser.parse_args()
     try:
-        run(Workshop().frame, args.fps, mouse="drag", title="unicode3d workshop", **display_options(args))
+        run(Workshop(), args.fps, title="unicode3d workshop", **display_options(args))
     except KeyboardInterrupt:
         pass
 

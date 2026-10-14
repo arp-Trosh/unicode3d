@@ -24,6 +24,8 @@ from ..transforms import UP, quat_axis_angle, quat_mul
 
 
 class Viewer:
+    mouse = True  # clicks (run() and the playtest read it)
+
     def __init__(self, model):
         self.model = model
         self.reflectivity = [obj.reflectivity for obj in model]
@@ -121,7 +123,7 @@ def main():
         viewer = Viewer(model)
         if args.still:
             viewer.spin = 0.0
-        run(viewer.frame, args.fps, mouse=True, title="unicode3d viewer",
+        run(viewer, args.fps, title="unicode3d viewer",
             **display_options(args))
     except KeyboardInterrupt:
         pass

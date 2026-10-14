@@ -16,7 +16,7 @@ import numpy as np
 from .background import SKYBOX_FACES, background_args, fill_background, fog_args
 from .color import cached_linear_rgb
 from . import mesh as mesh_module
-from .mesh import edited_in_place, mesh_arrays, warn_at_caller
+from .mesh import edited_in_place, lock_arrays, mesh_arrays, warn_at_caller
 from .lights import LIGHT_COLUMNS, PointLight, as_lights, light_rows
 from .mirrors import Mirrors
 from .lines import STRIPS, Lines
@@ -192,8 +192,9 @@ def _check_edits(objects):
     meshes = {id(m): m for m in (getattr(obj, "mesh", None) for obj in objects) if m is not None}
     arrays = {id(a): a for mesh in meshes.values() for a in mesh_arrays(mesh)}  # (each once: meshes share textures)
     if edited_in_place(arrays.values(), "renderer", _edits):
-        warn_at_caller("a Mesh's arrays were edited in place, which renderers don't see: call "
-                       "renderer.invalidate() after editing them, or give the mesh new arrays (mesh.vertices = ...)")
+        warn_at_caller("a Mesh's arrays were edited in place (through arrays they are views of: they are read-only "
+                       "once drawn), which renderers don't see: edit the copy mesh.edit(name) gives, give the mesh "
+                       "new arrays (mesh.vertices = ...), or call renderer.invalidate() after editing them")
 
 
 def _mesh_piece(mesh, key):
@@ -208,6 +209,7 @@ def _mesh_piece(mesh, key):
 def _piece(mesh):
     """A mesh's _Piece. Raises ValueError if its arrays don't fit together (Mesh.check)."""
     mesh.check()  # (the kernels index these arrays by each other's sizes without checking)
+    lock_arrays(mesh)  # (an edit in place from now on would go unseen: it raises instead; see Mesh.edit)
     vertices = np.array(mesh.vertices, dtype=np.float64)
     faces = np.array(mesh.faces, dtype=np.int64).reshape(-1, 3)
     n_faces = len(faces)
@@ -791,7 +793,9 @@ class Renderer(ShadowMaps, Mirrors):
             return Pick(obj, origin + direction * distance, distance)
 
     def invalidate(self):
-        """Make the next render draw afresh, e.g. after editing a mesh's arrays in place."""
+        """Make the next render draw afresh, working out every mesh again: after editing a mesh's arrays in place
+        where the lock on them doesn't reach (arrays a renderer has drawn are read-only, but not other arrays they
+        are views of). To change a mesh, mesh.edit(name) is quicker: only that mesh is worked out again."""
         global _edits
         _edits += 1  # (every mesh's _Piece: which meshes were edited isn't known)
         self._last = None
@@ -1144,8 +1148,9 @@ class Renderer(ShadowMaps, Mirrors):
     def _scene_state(self, inst, camera):
         """Everything a render depends on: (values compared by equality, objects compared by identity).
 
-        Meshes, their arrays and textures count as changed when replaced, as in Mesh's own caches;
-        edits made inside them are not seen (call invalidate() after those).
+        Meshes, their arrays and textures count as changed when replaced (Mesh.edit), as in Mesh's own caches;
+        arrays drawn are read-only, and edits through arrays they are views of are not seen (call invalidate()
+        after those).
         """
         fog = fog_args(self.fog)
         values = [self.width, self.height, self.cell_pixels, self.max_pixels, self.cell_aspect, self.samples,
