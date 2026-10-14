@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2026 arp-Trosh
-"""The code in docs/making-a-game.md, as written: its example game played, and its example tests run."""
+"""The code in the guide (unicode3d/starter/making-a-game.md), as written: its example game played, and its example tests run."""
 import os
 import re
 import subprocess
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GUIDE = os.path.join(ROOT, "docs", "making-a-game.md")
+GUIDE = os.path.join(ROOT, "unicode3d", "starter", "making-a-game.md")
 
 
 class GuideTests(unittest.TestCase):

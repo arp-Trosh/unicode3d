@@ -29,6 +29,14 @@ jobs:
       - name: Unit tests
         run: python -m unittest -v
 
+      - name: A new game from the installed package (the starter is package data)
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m unicode3d.new mygame
+          cd mygame
+          python -m unittest -v
+
   bounds:
     # The same tests with every kernel checking its indices: a read or write outside an array fails the run instead
     # of quietly corrupting memory. In a cache of its own, as Numba's cache key leaves the flag out.

@@ -1,0 +1,1 @@
+unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v{{version}}

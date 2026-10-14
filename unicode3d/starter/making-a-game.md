@@ -3,7 +3,7 @@
 This is the guide for building a game on unicode3d, written for AI agents first and people second. It
 covers the shape of a program, the loop for checking your work without a terminal, the conventions
 that are easy to get backwards, an API cheat sheet and a list of gotchas. The
-[README](../README.md) has the full reference for each part.
+[README](../../README.md) has the full reference for each part.
 
 unicode3d is a graphics engine with terminal input and a few UI widgets. It draws 3D scenes and text
 in a terminal, and reads keys and the mouse. It has no game logic: rules, turns, physics, scoring,
@@ -17,31 +17,33 @@ does take a string.) The [gotchas](#gotchas) list the rest.
 
 ## Setting up
 
-Python 3.10 or later. In the game's folder:
+Python 3.10 or later. Install unicode3d in a virtual environment in the game's folder, then let it
+write a starter game there:
 
 ```sh
+mkdir mygame && cd mygame
 python -m venv .venv && . .venv/bin/activate    # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install "unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.24.0"
+python -m unicode3d.new .
+python -m unittest                              # the starter's tests: they play it off-screen
 ```
 
-with the engine pinned to a released tag in `requirements.txt` (v0.24.0 or later has the playtest
-tool this guide relies on):
+The first run compiles the renderer, about 10 seconds; later runs start at once. Use v0.24.0 or
+later: it has the playtest tool and the starter this guide relies on. `python -m unicode3d.new`
+never overwrites a file, and writes:
 
-```text
-unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.24.0
-```
-
-The first run compiles the renderer, about 10 seconds; later runs start at once. The game's
-`.gitignore` should leave out the playtests' pictures as well as Python's own files:
-
-```text
-.venv/
-__pycache__/
-playtest/
-```
-
-For a game repository worked on by an agent, copy [game-CLAUDE.md](game-CLAUDE.md) into it as
-`CLAUDE.md`: it tells the agent how to run, check and test the game.
+- `game.py`: a small working game to grow, with title, play and game-over screens, a camera that
+  follows the player, held keys, buttons, a label in the scene and a status line. Adapting it is
+  quicker and safer than starting from nothing.
+- `tests/test_game.py`: tests that play it with the playtest, one for each feature.
+- `CLAUDE.md`: for an agent working on the game: how to run, check and test it, and the rules that
+  matter most. ([game-CLAUDE.md](game-CLAUDE.md) is its template.)
+- `docs/making-a-game.md`: this guide, for the installed version. After upgrading unicode3d,
+  `python -m unicode3d.new --guide .` replaces it.
+- `requirements.txt`, with unicode3d pinned to its release tag
+  (`unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.24.0`), for `pip install -r
+  requirements.txt` on another machine.
+- `.gitignore`, leaving out `.venv/`, `__pycache__/` and `playtest/` (the playtests' pictures).
 
 ## The shape of a game
 
@@ -127,7 +129,8 @@ What each part is for:
   the playtest import the file without starting the game.
 
 Bigger games split this up as you would any program: a class per screen (title, play, game over)
-with its own `frame()`, and the game's `frame()` passing on to the current one. The demos in
+with its own `frame()`, and the game's `frame()` passing on to the current one. The starter's
+`game.py` is built that way. The demos in
 `unicode3d/examples/` are games of this shape. `workshop.py` and `tactics.py` are good ones to read.
 
 ## The playtest loop: change, playtest, look, fix
@@ -276,7 +279,7 @@ checks for mistakes that real runs can't afford to check: a mesh's arrays edited
 
 ## API cheat sheet
 
-Everything below imports from `unicode3d` unless another module is named. The [README](../README.md)
+Everything below imports from `unicode3d` unless another module is named. The [README](../../README.md)
 has each in full.
 
 **Running.**
@@ -372,6 +375,9 @@ comes with `run(key_release=True)`.
   `events = controls.handle(events, screen)` and `controls.draw(screen, y, x)`.
 - Run with `mouse="drag"` for sliders.
 
+**Starter.** `python -m unicode3d.new FOLDER` writes a starter game (see [Setting up](#setting-up));
+`--guide` refreshes the copy of this guide.
+
 **Playtest.** `python -m unicode3d.playtest play file.py:Name "SCRIPT"` and `preview MODEL`;
 `unicode3d.playtest.Playtest` from Python (see above). `python -m unicode3d.playtest play --help`
 lists every command.
@@ -440,12 +446,13 @@ animation track raises, the playtest warns of mesh edits it can't see), but thes
 
 ## Where to look next
 
-- The [README](../README.md): the reference for every part (each section is collapsed; the headings
+- The [README](../../README.md): the reference for every part (each section is collapsed; the headings
   open them).
+- The starter's `game.py` (`python -m unicode3d.new`), a game of the shape above with several screens.
 - The demos, which are games of the shape above (`python -m unicode3d.examples.NAME`, the source in
   `unicode3d/examples/`): `workshop` (a panel of widgets, materials and animation), `tactics` (an
   orthographic board, clicking tiles with ray queries, labels), `room` (walking with collisions,
   held keys, particles, sprites, picking), `balls` (many objects, sliders), `maze` (animation
   tracks, fog), `viewer` (loading models and playing their animations) and `skinned` (skinned
   characters).
-- [How unicode3d works](how-it-works.md), for what happens inside.
+- [How unicode3d works](../../docs/how-it-works.md), for what happens inside.

@@ -29,3 +29,7 @@ version = { attr = "unicode3d.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["unicode3d*"]
+
+[tool.setuptools.package-data]
+# The starter that python -m unicode3d.new writes into a new game (its .py files are found as modules).
+"unicode3d.starter" = ["*.md", "*.txt", "gitignore"]
