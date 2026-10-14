@@ -194,6 +194,12 @@ saved playtest/start.png
 ...
 ```
 
+**What frame times to expect.** On a recent desktop, the example game below takes about 2 ms a frame
+at 80x24, and a first-person level with a lantern (the [recipe](#a-first-person-level-from-a-text-map))
+about 2.5 ms at 160x48. Point lights casting shadows cost the most: a few milliseconds each. A laptop
+takes two to three times as long. Under about 30 ms a frame plays smoothly; if the report's mean is
+far above that, find out what costs it before adding more.
+
 Lines starting `BLANK SCREEN` or `WARNING` are problems to fix. A warning names the line in your
 game that caused it. If `frame()` raises, the playtest stops, prints the traceback and saves the
 screen as it was (`crash-frame-N.png`). The exit status is 0 if the script finished, 1 if the game
@@ -250,10 +256,12 @@ class GameTests(unittest.TestCase):
 key_release=False, out="playtest")` has the same commands as methods: `wait(n)`, `press(*keys)`,
 `type(text)`, `hold(*keys, frames=n)`, `down`/`up`, `click(x, y)`, `click_text(text)`,
 `move(x, y)`, `resize(rows, cols)`, `step(events)` for events of your own, `shot(name)` and
-`sheet(name, frames)`. To look at the screen, it has `text(picture=False)`, `find(text)` (a
-`Found(row, col)` or `None`), `expect(text)`, `expect_not(text)` and `picture()` (an RGB array).
-`report()` gives frame times, warnings and blank frames, and `quit` says whether `frame()`
-returned `False`. Keep the `Game()` you passed in, and a test can check its state too.
+`sheet(name, frames, shots=6, columns=3)`. To look at the screen, it has `text(picture=False)`,
+`find(text)` (a `Found(row, col)` or `None`), `expect(text)`, `expect_not(text)` and `picture()` (an
+RGB array). `quit` says whether `frame()` returned `False`. `report()` gives a `Report` with
+`frames`, `seconds`, `mean_ms`, `p95_ms`, `max_ms`, `first_ms`, `slowest_frame`, `mean_bytes`,
+`max_bytes`, `blank_frames` (a list of frame numbers), `warnings` (a list of `(frame, message)`),
+`shots` and `quit_at`; `print(report)` shows it as the command line does. Keep the `Game()` you passed in, and a test can check its state too.
 
 A playtest is the same every time: `dt` is fixed, and so are the glyphs and colours. It plays
 every frame without waiting, so ten seconds of play take as long as drawing 300 frames. It also
@@ -269,13 +277,144 @@ checks for mistakes that real runs can't afford to check: a mesh's arrays edited
 | rotations | quaternions, **w first**: `(w, x, y, z)`. Make them with `quat_axis_angle(axis, radians)`; combine with `quat_mul(a, b)` (b first, then a); blend with `quat_slerp(a, b, t)`. Never three angles. |
 | angles | radians (`Camera.fov` is the exception: degrees) |
 | `Light(direction=...)` | the way the light travels, so a sun overhead is `(0, -1, 0)` |
-| colours | a named `Color` or `(r, g, b)`, 0..255 ints or 0..1 floats |
+| colours | a named `Color` (`WHITE`, `RED`, `GREEN`, `YELLOW`, `BLUE`, `MAGENTA`, `CYAN`; `DEFAULT` for text in the terminal's own colour) or `(r, g, b)`, 0..255 ints or 0..1 floats |
+| meshes | a face's corners go **counter-clockwise seen from the side that shows**; `uvs` is `(F, 3, 2)`, a `(u, v)` for each corner of each face; `materials` `(F,)` picks each face's texture from `textures` |
 | textures | 0..1 arrays, `(H, W)` brightness or `(H, W, 3)` colour (`(H, W, 4)` with opacity); `v` runs from the image's bottom (0) to its top (1) |
 | time | `dt` is in seconds; speeds are units a second, turns radians a second |
 | screen size | `screen.size()` gives **(rows, cols)**; `renderer.resize(cols, rows, screen.cell_pixels)` takes columns first |
 | writing to the screen | `screen.text(y, x, ...)`, `screen.draw_frame(fb, top, left)` and `screen.bar(y, x, ...)` take the **row first** |
 | clicks and picking | `MouseEvent.x` is the column, `.y` the row; `renderer.pick(x, y)` and `renderer.ray(x, y)` take a cell relative to where the frame was drawn, so subtract `top` and `left` |
 | playtest sizes | `Playtest(size=(rows, cols))` and `resize(rows, cols)` in Python; `--size COLSxROWS` and `resize COLSxROWS` in scripts and the command line; `click X Y` column first everywhere |
+
+## A first-person level from a text map
+
+Dungeon crawlers, mazes and shooters start the same way: a level drawn as text, walls you can't walk
+through, and a camera at eye height. This is a whole one to start from (`python -m unicode3d.playtest
+play crawl.py:Crawl "hold w 30; shot ahead"`):
+
+```python
+"""A first-person walk through a level made from a text map: W/S walk, A/D step aside, left/right turn, q quits."""
+import math
+
+import numpy as np
+
+from unicode3d import Camera, Colliders, Color, Key, Mesh, Object3D, PointLight, Renderer, make_box
+
+LEVEL = [
+    "##########",
+    "#....#...#",
+    "#.##.#.#.#",
+    "#.#....#.#",
+    "#.#.####.#",
+    "#.......@#",
+    "##########",
+]
+WALK, TURN = 2.5, 2.0       # units a second, radians a second
+RADIUS, EYE = 0.4, 0.5      # the player's width (for walls) and eye height; a cell is 1 across, walls 1 high
+
+
+def bricks(size=32):
+    """A brick pattern as a brightness texture, 0..1, row 0 at the top."""
+    y, x = np.mgrid[0:size, 0:size]
+    mortar = (y % 8 == 0) | ((x + 8 * (y // 8 % 2)) % 16 == 0)
+    return np.where(mortar, 0.45, 1.0)
+
+
+def wall_mesh(level, height=1.0):
+    """The walls of a text map as one mesh. Cell (row r, column c) is the square around x = c, z = r. Only the
+    sides of '#' cells that face open floor are made: one mesh with nothing hidden draws fastest."""
+    def solid(r, c):
+        return not (0 <= r < len(level) and 0 <= c < len(level[r])) or level[r][c] == "#"
+
+    up = np.array([0.0, height, 0.0])
+    vertices, uvs = [], []
+    for r, row in enumerate(level):
+        for c, cell in enumerate(row):
+            if cell != "#":
+                continue
+            for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                if solid(r + dr, c + dc):
+                    continue
+                out = np.array([dc, 0.0, dr])                     # from the wall towards the floor
+                half = np.cross(-out, (0.0, 1.0, 0.0)) / 2        # half a cell to the right, seen from the floor
+                left, right = np.array([c, 0.0, r]) + out / 2 - half, np.array([c, 0.0, r]) + out / 2 + half
+                # Two triangles, counter-clockwise seen from the floor (the side that shows); each corner's
+                # (u, v) runs left to right and bottom (0) to top (1) of the texture.
+                vertices += [left, right, right + up, left, right + up, left + up]
+                uvs += [[(0, 0), (1, 0), (1, 1)], [(0, 0), (1, 1), (0, 1)]]
+    faces = np.arange(len(vertices)).reshape(-1, 3)
+    return Mesh(np.array(vertices), faces, uvs=np.array(uvs, dtype=float), materials=np.zeros(len(faces), int),
+                textures=[bricks()])
+
+
+class Crawl:
+    def __init__(self):
+        self.renderer = Renderer(1, 1)
+        rows, cols = len(LEVEL), len(LEVEL[0])
+        self.walls = Object3D(wall_mesh(LEVEL), color=(210, 180, 150))
+        self.floor = Object3D(make_box(), position=((cols - 1) / 2, -0.05, (rows - 1) / 2), scale=(cols, 0.1, rows),
+                              color=(90, 80, 70))
+        self.solid = Colliders([self.walls])                  # the same mesh, for walking into
+        self.z, self.x = next((r, row.index("@")) for r, row in enumerate(LEVEL) if "@" in row)
+        self.yaw = 0.0                                        # 0 looks along -z, the map's top
+        self.camera = Camera(near=0.05)
+        # Held in the camera's own space (x right, y up, -z ahead), so it moves and turns with the view.
+        self.sword = Object3D(make_box(), position=(0.18, -0.13, -0.28), scale=(0.03, 0.03, 0.25),
+                              color=(200, 200, 215), parent=self.camera)
+        self.lantern = PointLight(color=(255, 190, 120), range=5.0, ambient=0.15)
+        self.time = 0.0
+
+    def frame(self, screen, dt, events):
+        dt = min(dt, 0.1)
+        self.time += dt
+        if any(ev in (ord("q"), Key.ESC) for ev in events):
+            return False
+        held = screen.held
+        self.yaw += TURN * dt * ((Key.LEFT in held) - (Key.RIGHT in held))
+        ahead = np.array([-math.sin(self.yaw), 0.0, -math.cos(self.yaw)])
+        right = np.array([-ahead[2], 0.0, ahead[0]])
+        step = ahead * (("w" in held) - ("s" in held)) + right * (("d" in held) - ("a" in held))
+        eye = np.array([self.x, EYE, self.z]) + step * WALK * dt
+        eye += self.solid.push_out(eye, RADIUS)               # out of any wall walked into: it slides along
+        self.x, self.z = eye[0], eye[2]
+
+        self.camera.position, self.camera.target = eye, eye + ahead
+        self.lantern.position = eye + (0.0, 0.3, 0.0)
+        self.lantern.diffuse = 0.8 + 0.1 * math.sin(self.time * 13.0) * math.sin(self.time * 7.0)  # a flicker
+        rows, cols = screen.size()
+        self.renderer.resize(cols, rows - 1, screen.cell_pixels)
+        screen.erase()
+        screen.draw_frame(self.renderer.render([self.walls, self.floor, self.sword], self.camera, [self.lantern]))
+        screen.text(rows - 1, 0, f"at {self.x:.2f}, {self.z:.2f}   [WASD] walk  [left/right] turn  [q] quit",
+                    Color.YELLOW)
+        screen.refresh()
+```
+
+How it works, and what to keep when you change it:
+
+- **One mesh for all the walls.** Each object costs time every frame, so a level of hundreds of
+  wall boxes is slow; one mesh of only the sides that face the floor draws in a fraction of that.
+  Doors, pickups and enemies, which move or vanish, are objects of their own.
+- **Faces show from one side.** Corners go counter-clockwise seen from the side that shows (here,
+  from the floor). A wall that comes out invisible has its corners the other way round.
+- **Textures:** `uvs` gives each corner of each face its `(u, v)`: `u` 0 to 1 left to right across
+  the image, `v` 0 to 1 from its **bottom** to its top. `materials` gives each face's index in
+  `textures`. Brightness textures (2D arrays) tint with the object's colour.
+- **Walls block by the same mesh:** `Colliders([walls])` and `push_out(eye, RADIUS)` each frame
+  after moving. Pushing out of the wall you walked into, rather than refusing the move, is what lets
+  the player slide along it.
+- **Held things go on the camera:** an object whose `parent` is the camera stays put in the view
+  (x right, y up, -z ahead), as the sword does.
+- **Light:** in the dark, a `PointLight` carried with the player (its `ambient` lights whatever
+  faces away from it) and the renderer's fog (`Renderer(fog=...)`, 0.3 by default) give depth.
+  Torches are more `PointLight`s on the walls; with `shadows=True` each costs a few milliseconds a
+  frame, so let only the nearest one or two cast shadows. Change a light's fields (`position`,
+  `diffuse`) every frame to make it flicker.
+- **Facing:** `yaw` 0 looks along -z, and turning left adds to it. The step ahead is
+  `(-sin(yaw), 0, -cos(yaw))` and to the right `(cos(yaw), 0, -sin(yaw))`.
+
+Line of sight (an enemy seeing the player) is `solid.raycast(enemy_eye, player_eye - enemy_eye,
+np.linalg.norm(player_eye - enemy_eye))`: `None` (no wall in between) means it can see them.
 
 ## API cheat sheet
 
@@ -285,7 +424,8 @@ has each in full.
 **Running.**
 `run(frame_fn, fps=30, mouse=False, key_release=False, title=None, glyphs=None, color=None)`.
 `frame_fn(screen, dt, events)` returns `False` to stop. Pass `mouse=True` for clicks and the wheel,
-`"drag"` for moves while a button is held (sliders), and `"move"` for every move (hover).
+`"drag"` for moves while a button is held (sliders), and `"move"` for every move (hover);
+`key_release=True` for `KeyRelease` events.
 `add_display_args(parser)` and `display_options(args)` give the `--glyphs`, `--color` and `--ascii`
 flags.
 
@@ -317,7 +457,8 @@ comes with `run(key_release=True)`.
 - `Object3D(mesh, position, rotation, scale, color, visible=True, parent=None)`. It also takes
   `emissive`, `opacity`, `reflectivity`, `specular`, `shininess`, `cast_shadows`, `billboard`,
   `outline` and `simplify`.
-- `Node(position, rotation, scale, parent)` groups objects, which move with their parent.
+- `Node(position, rotation, scale, parent)` groups objects, which move with their parent. A
+  `Camera` can be a parent too: its children stay in place in the view (a held weapon, a cockpit).
 - `obj.world_bounds()` gives the corners `(low, high)`; `union_bounds(objects)`.
 
 **Meshes.**
@@ -325,8 +466,9 @@ comes with `run(key_release=True)`.
 - `unicode3d.shapes` has `blob_mesh(radii)` (a sphere or an ellipsoid), `block_mesh(center, size)`,
   `text_mesh(text)` (returns `(mesh, width)`), `pillow_mesh(shape)` and
   `merge_meshes(meshes, colors)`.
-- `Mesh(vertices, faces)` takes per-face or per-vertex colours in `mesh.face_colors` and
-  `mesh.vertex_colors`.
+- `Mesh(vertices, faces, uvs=None, materials=None, textures=[], vertex_colors=None, face_colors=None)`;
+  see [Conventions](#conventions) for the order of corners and `uvs`, and the
+  [recipe](#a-first-person-level-from-a-text-map) for a mesh built from a map.
 - `load_image(path)`.
 
 **Models.**
@@ -338,13 +480,13 @@ comes with `run(key_release=True)`.
 
 **Animation.**
 - `Track([(time, value), ...], easing, loop="once"|"loop"|"pingpong")` and `RotationTrack` (for
-  quaternions).
+  quaternions). `easing` is a function or its name: `"linear"` (the default), `"ease_in"`,
+  `"ease_out"`, `"ease_in_out"`, `"ease_out_back"`, `"ease_out_bounce"` or `"step"`.
 - `Animation(obj, position=track, rotation=track, scale=track)`; call `anim.update(dt)` every frame.
 - `Clip([animations], loop=...)` plays several on one clock: `clip.update(dt)`,
   `clip.start(fade=0.2)`, `clip.done()`.
-- `unicode3d.animation` has the easings: `ease_in_out`, `ease_out_back`, `ease_out_bounce`,
-  `step`, ...
-- `unicode3d.transforms` has `lerp` and `quat_slerp`.
+- The easing functions (`ease_in_out(t)`, ...) and `lerp(a, b, t)` import from `unicode3d`;
+  `unicode3d.transforms` has `quat_slerp`.
 
 **Queries.**
 - `solid = Colliders(objects)`. Call `solid.update()` once a frame after moving things.
@@ -358,7 +500,7 @@ comes with `run(key_release=True)`.
   `solid.raycast(*renderer.ray(ev.x, ev.y - top))`.
 
 **Effects.**
-- `Particles(gravity, ground, face_camera)` with `emit(point, count, velocity, speed, life, size,
+- `Particles(gravity, ground, face_camera, seed=None)` (`seed` an int, for the same particles each run) with `emit(point, count, velocity, speed, life, size,
   color, ...)` and `update(dt)`, put in the render list.
 - `Lines(starts, ends, color, width)`.
 - `SpriteSheet(picture, columns, animations={...})` and `Sprite(sheet, position)`, with

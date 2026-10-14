@@ -587,7 +587,7 @@ renderer.render(objects + [sparks, smoke], camera, lights)
   is 1 across), `color` and `opacity` go to `size_end`, `color_end` and `opacity_end` over a
   particle's life. `spin` turns it (radians a second). Any of `speed`, `radius`, `life`, `size`,
   `size_end` and `spin` can be `(low, high)`, each particle drawing its own between them. `seed=`
-  on the `Particles` makes the same calls give the same particles.
+  (a whole number) on the `Particles` makes the same calls give the same particles.
 - **update(dt)** moves them on: `gravity`, `drag` (the share of speed lost a second), and `ground`
   (a height they bounce on, `bounce` and `friction` saying how much speed they keep, and come to
   rest on, their undersides on it); particles whose life is over are dropped.
@@ -1163,7 +1163,8 @@ colour fades surfaces into it.
   `lerp(a, b, t)` blends numbers or arrays.
 - Easing curves map 0..1 onto 0..1 to shape a move: `linear`, `ease_in`, `ease_out`, `ease_in_out`,
   `ease_out_back` (overshoots and settles, like a door against its stop), `ease_out_bounce` (lands
-  and bounces), `step` (holds, then jumps at the next keyframe); `EASINGS` has them by name.
+  and bounces), `step` (holds, then jumps at the next keyframe); `EASINGS` has them by name, and a
+  track takes either. `lerp` and the `ease_*` curves also import from `unicode3d` itself.
 - `Track(keys, easing=linear, loop="once")` holds keyframes `(time, value)`, values numbers or arrays
   (a position, a scale, a colour), and `track.at(t)` blends between them. A keyframe given as `(time,
   value, easing)` eases the stretch leading up to it. `loop` is `"once"` (hold the ends), `"loop"` or
