@@ -1281,8 +1281,8 @@ def frame(screen, dt, keys):
         player.walk(speed * dt)
 ```
 
-With `run(key_release=True)` the engine asks the terminal to report releases too, and passes them
-on as `KeyRelease(key)` events:
+`run()` asks the terminal to report releases too, so `screen.held` is exact wherever it can be; with
+`run(key_release=True)` it also passes them on as `KeyRelease(key)` events:
 
 | terminal | held keys |
 |----------|-----------|

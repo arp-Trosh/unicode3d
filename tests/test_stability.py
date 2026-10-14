@@ -728,6 +728,33 @@ class RealTerminalTests(unittest.TestCase):
         self.assertIn(b"\x1b[?1049l", out[-200:])  # the alternate screen left
         self.assertNotIn("crashed", log)
 
+    def test_held_keys_are_exact_without_asking_for_releases(self):
+        # run() asks the terminal for releases even without key_release=True, so a tap of a held key doesn't walk
+        # a player on for half a second (the starter's game, and the first one an agent built, never asked); the
+        # releases themselves still reach frame() only with key_release=True.
+        program = ("from unicode3d.terminal import run\n"
+                   "held, released = [], []\n"
+                   "def frame(screen, dt, keys):\n"
+                   "    held.append(screen.held.exact and 'w' in screen.held)\n"
+                   "    released.extend(type(k).__name__ for k in keys if type(k).__name__ == 'KeyRelease')\n"
+                   "    screen.text(0, 0, str(screen.frame_count)); screen.refresh()\n"
+                   "    return ord('q') not in keys\n"
+                   "run(frame)\n"
+                   "print('HELD', any(held), 'LAST', held[-1], 'RELEASES', len(released))\n")
+
+        def typed(text):
+            return lambda fd, *_: os.write(fd, text)
+
+        with tempfile.TemporaryDirectory() as cache:
+            code, out = run_in_pty(["-c", program], 24, 80, [
+                (5, typed(b"\x1b[119u")),      # W pressed, as the kitty keyboard protocol sends it
+                (10, typed(b"\x1b[119;1:3u")),  # and let go
+                (15, typed(b"\x1b[113u"))],     # q
+                env={"XDG_CACHE_HOME": cache})
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertIn(b"\x1b[>27u", out)  # releases asked for
+        self.assertIn(b"HELD True LAST False RELEASES 0", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -719,9 +719,10 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
 
     mouse: False, True (clicks and wheel), "drag" (also moves while a button is
     held, for sliders) or "move" (every move, for hover effects).
-    key_release: ask the terminal to report key releases, and pass them to
-    frame_fn as KeyRelease events. screen.held tells which keys are down either
-    way, exactly where releases are reported and by estimate elsewhere.
+    key_release: pass key releases to frame_fn as KeyRelease events. The terminal
+    is asked to report releases either way, so screen.held tells exactly which
+    keys are down where it can (the kitty keyboard protocol, Windows), and
+    estimates it elsewhere.
     title sets the terminal window's title while the app runs. The terminal is
     restored however the loop ends. Ctrl-C raises KeyboardInterrupt as usual.
 
@@ -734,8 +735,12 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
     if log is not None:
         faulthandler.enable(log)
     try:
-        with _exit_on_sigterm(), open_console(mouse=mouse, title=title, key_release=key_release) as console:
+        # Releases are always asked for, so that screen.held is exact wherever the terminal can tell: a game that
+        # walks while a key is held, and never asked for releases, would otherwise move on for half a second after
+        # each tap. Only key_release passes them on as events.
+        with _exit_on_sigterm(), open_console(mouse=mouse, title=title, key_release=True) as console:
             screen = Screen(console, glyphs=glyphs, color=color, background=background)
+            screen.key_release = key_release
             screen.fps = fps
             if log is not None:
                 log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} started {_describe(screen)}\n")

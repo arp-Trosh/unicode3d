@@ -179,7 +179,7 @@ Keys are a character (`a`, `A`, `+`) or a name: `enter`, `esc`, `space`, `tab`, 
 
 Options: `--size 120x40` (columns x rows; the default), `--glyphs sextant|quad|half|ascii`,
 `--color truecolor|256|16|mono`, `--dt 0.0333` (seconds per frame), `--no-unicode`,
-`--no-releases` (a terminal that reports no key releases, as most don't: held keys are then
+`--no-releases` (a terminal that reports no key releases, as many don't: held keys are then
 guessed from repeats), `--key-release`, `--no-check-edits` and `--out DIR`. The screen at the end is
 always saved as `last.png` and `last.txt`.
 
@@ -396,14 +396,14 @@ animation track raises, the playtest warns of mesh edits it can't see), but thes
    (the window dragged, a breakpoint) it can be large, so clamp it (`dt = min(dt, 0.1)`) before
    moving things by it. In a playtest it is fixed (1/30 by default).
 4. **Clicks need `run(mouse=True)`** (`"drag"` for sliders, `"move"` for hover), and `KeyRelease`
-   events need `run(key_release=True)`. The playtest sends clicks and releases to `frame()`
+   events need `run(key_release=True)` (`screen.held` doesn't: `run()` always asks for releases). The playtest sends clicks and releases to `frame()`
    whatever `run()` is told, so a game can pass its playtests and get no clicks in a terminal.
    Check what `main()` passes to `run()`.
 5. **Held keys need `screen.held`, not events.** A held key arrives as a press, a half-second
    pause, then repeats, so moving a player once per key event stutters. Move by
-   `speed * dt` while `"w" in screen.held`. Most terminals report no releases, so `screen.held`
-   then guesses, and a tap holds a key for up to half a second. Playtest with `--no-releases` to
-   see that case.
+   `speed * dt` while `"w" in screen.held`. It is exact in terminals that report releases (kitty,
+   foot, Ghostty, Alacritty, iTerm2, Windows); in the others it guesses, and a tap holds a key for
+   up to half a second. Playtest with `--no-releases` to see that case.
 6. **Resize the renderer every frame:** `renderer.resize(cols, rows, screen.cell_pixels)`. The
    terminal can change size, and `cell_pixels` changes with the glyph set (F2). Without the resize,
    the picture stays the size the renderer was made (one cell, for `Renderer(1, 1)`); with the wrong
