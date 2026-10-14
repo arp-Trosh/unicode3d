@@ -43,11 +43,13 @@ on screen, or a check of the game's state.
 
 ## Rules
 
-- **Keys are ints.** Use `ord("q")` and `Key.UP`, never `"q"`. Use `screen.held` (`"w" in screen.held`) for
-  keys held down, such as walking or turning; use the events for presses, such as menus or firing.
+- **Keys** equal their characters (`ev == "q"`, `ev in ("q", Key.ESC)`), but not as set members or dict
+  keys: look up `chr(ev)` in a dict of strings. Use `screen.held` (`"w" in screen.held`) for keys held down,
+  such as walking or turning; use the events for presses, such as menus or firing.
 - **Quitting:** `run()` stops when `Game.frame()` returns `False` (which it does when a screen's `frame()`
   returns `None`), and only then.
-- **Time:** `dt` is seconds; clamp it (`min(dt, 0.1)`) and move things by `speed * dt`.
+- **Time:** `dt` is seconds (at most 0.1 under `run()`); move things by `speed * dt`.
+- **`print()`** output shows only after the game ends; in a playtest it shows at once.
 - **Every frame:** draw the scene with `screen.draw(renderer, objects, camera, lights)` (`rows=-1` leaves
   the last row for a status line), then write text over it. `run()` erases the screen before each frame and
   sends what was drawn after it.

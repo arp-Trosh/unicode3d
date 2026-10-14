@@ -288,7 +288,6 @@ class Maze:
         screen.text(2 * cz + 1 + top, 2 * cx + 1 + left, "^>v<"[self.heading], Color.CYAN, bold=True)
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)
         events = self.panel.handle(self.bar.handle(events, screen))
         for ev in events:
             if ev in (ord("q"), Key.ESC):

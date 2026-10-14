@@ -1259,7 +1259,6 @@ class Show:
 
     def frame(self, screen, dt, events):
         start = time.perf_counter()
-        dt = min(dt, 0.1)
         if not self.handle(events, screen):
             return False
         self.advance(dt, screen.held)

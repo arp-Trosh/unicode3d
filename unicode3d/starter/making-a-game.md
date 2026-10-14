@@ -10,10 +10,10 @@ in a terminal, and reads keys and the mouse. It has no game logic: rules, turns,
 saving and sound are up to your game. It does give you ray and overlap queries (`Colliders`) for
 walls, the ground and clicking the world, and animation tracks for moving things smoothly.
 
-**Read this first.** Keys reach your game as **ints**, never strings. `ord("q")` is the q key and
-`Key.UP` the up arrow, so `if key == "q"` is never true, and nothing says so. Write
-`if key == ord("q")`, or `if ev in (ord("q"), Key.ESC)`. (`"w" in screen.held`, for held keys,
-does take a string.) The [gotchas](#gotchas) list the rest.
+**Read this first.** A key reaches your game as an int that also equals its character:
+`key == "q"`, `key == ord("q")`, `ev in ("q", Key.ESC)` and `case "q":` all work. Sets and dict
+keys of strings don't: `{"w": ...}.get(key)` finds nothing, and nothing says so. Look up `chr(key)`
+there. The [gotchas](#gotchas) list the rest.
 
 ## Setting up
 
@@ -75,11 +75,10 @@ class Game:
         self.colour = 0
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)                       # a pause (a dragged window) mustn't jump the game ahead
         for ev in events:
-            if ev in (ord("q"), Key.ESC):       # keys are ints: ord("q"), never "q"
+            if ev in ("q", Key.ESC):            # a key equals its character, or a Key for the others
                 return False                    # stops run()
-            if ev == ord(" "):
+            if ev == " ":
                 self.colour = (self.colour + 1) % len(COLOURS)
                 self.box.color = COLOURS[self.colour]
         if Key.LEFT in screen.held:             # held keys: smooth turning, not the terminal's key repeat
@@ -113,10 +112,10 @@ What each part is for:
 
 - **`__init__` builds everything once:** the renderer, meshes, objects, lights, loaded models,
   widgets. Making meshes or loading models inside `frame()` costs time every frame.
-- **`frame()` does three things in order.** It reads the events, moves the game on by `dt` seconds,
-  then draws: the scene with `screen.draw()`, then text over it. Returning `False` quits; returning
+- **`frame()` does three things in order.** It reads the events, moves the game on by `dt` seconds
+  (the time since the last frame, at most 0.1 s, so a pause doesn't jump the game ahead), then draws: the scene with `screen.draw()`, then text over it. Returning `False` quits; returning
   anything else, or nothing, carries on.
-- **`events`** holds key presses (ints), `MouseEvent`s (only if `run()` was given `mouse=True`), and
+- **`events`** holds key presses (ints that equal their characters, and `Key` values), `MouseEvent`s (only if `run()` was given `mouse=True`), and
   `KeyRelease`s (only with `key_release=True`). Use the events for things that happen once, such as
   menus, firing and toggles. Use `screen.held` for things that last while a key is down, such as
   walking and turning.
@@ -366,9 +365,8 @@ class Crawl:
         self.time = 0.0
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)
         self.time += dt
-        if any(ev in (ord("q"), Key.ESC) for ev in events):
+        if any(ev in ("q", Key.ESC) for ev in events):
             return False
         held = screen.held
         self.yaw += TURN * dt * ((Key.LEFT in held) - (Key.RIGHT in held))
@@ -420,9 +418,11 @@ Everything below imports from `unicode3d` unless another module is named. The [R
 has each in full.
 
 **Running.**
-`run(frame_fn, fps=30, mouse=False, key_release=False, title=None, glyphs=None, color=None, erase=True)`.
-`frame_fn(screen, dt, events)` returns `False` to stop. `run()` erases the screen before each frame
-(unless `erase=False`) and sends what was drawn after it. Pass `mouse=True` for clicks and the wheel,
+`run(frame_fn, fps=30, mouse=False, key_release=False, title=None, glyphs=None, color=None, erase=True,
+max_dt=0.1)`. `frame_fn(screen, dt, events)` returns `False` to stop. `run()` erases the screen before
+each frame (unless `erase=False`) and sends what was drawn after it. `dt` is the seconds since the
+last frame, at most `max_dt` (`None`: no limit). What the game prints while `run()` goes is held
+back and printed when it ends. Pass `mouse=True` for clicks and the wheel,
 `"drag"` for moves while a button is held (sliders), and `"move"` for every move (hover);
 `key_release=True` for `KeyRelease` events.
 `add_display_args(parser)` and `display_options(args)` give the `--glyphs`, `--color` and `--ascii`
@@ -442,10 +442,11 @@ flags.
 - `screen.held` is the keys held down: `"w" in screen.held`, `Key.LEFT in screen.held`.
 - `screen.fps` is the target frame rate and `screen.measured_fps` the one achieved.
 
-**Input.** Key presses are ints: `ord("a")` and `Key.ENTER`, `Key.ESC`, `Key.TAB`, `Key.BACK_TAB`,
+**Input.** A key press is a `KeyCode`, an int that equals both `ord("a")` and `"a"`, or one of
+`Key.ENTER`, `Key.ESC`, `Key.TAB`, `Key.BACK_TAB`,
 `Key.BACKSPACE`, `Key.UP`, `Key.DOWN`, `Key.LEFT`, `Key.RIGHT`, `Key.HOME`, `Key.END`,
 `Key.PAGE_UP`, `Key.PAGE_DOWN`, `Key.DELETE`, `Key.INSERT`, `Key.F1` to `Key.F12`. Shifted letters
-come as capitals (`ord("Q")`). A click is `MouseEvent(x, y, button, pressed, moved)`, with `button`
+come as capitals (`"Q"`). A click is `MouseEvent(x, y, button, pressed, moved)`, with `button`
 one of `MouseEvent.LEFT`, `MIDDLE`, `RIGHT`, `WHEEL_UP`, `WHEEL_DOWN` or `NONE`. `KeyRelease(key)`
 comes with `run(key_release=True)`.
 
@@ -533,13 +534,14 @@ Mistakes that look right and fail quietly, or fail far from their cause. The eng
 its own mistakes loud (a wrong-shaped position, rotation or colour is a clear `ValueError`, an edited
 animation track raises, the playtest warns of mesh edits it can't see), but these it can't:
 
-1. **Keys are ints.** `key == "q"` is never true; write `key == ord("q")`. Only `screen.held` takes
-   strings.
+1. **Keys equal their characters, except as set members and dict keys.** `key == "q"` and
+   `key in ("q", "e")` work, but `key in {"q", "e"}` and `MOVES.get(key)` with string keys miss
+   (a key hashes as the int it is). Look up `chr(key)`, or use a tuple.
 2. **`frame()` returning `False` quits**, and only `False`: returning `None` or `0` carries on.
    Don't return `False` by accident from a helper whose result you pass on.
-3. **`dt` is in seconds**, and under `run()` it is the real time since the last frame. After a pause
-   (the window dragged, a breakpoint) it can be large, so clamp it (`dt = min(dt, 0.1)`) before
-   moving things by it. In a playtest it is fixed (1/30 by default).
+3. **`dt` is in seconds**, and under `run()` it is the real time since the last frame, at most
+   0.1 s (`run(max_dt=...)`), so the game runs slower rather than skipping ahead when frames are
+   slow. In a playtest it is fixed (1/30 by default).
 4. **Clicks need `run(mouse=True)`** (`"drag"` for sliders, `"move"` for hover), and `KeyRelease`
    events need `run(key_release=True)` (`screen.held` doesn't: `run()` always asks for releases). The playtest sends clicks and releases to `frame()`
    whatever `run()` is told, so a game can pass its playtests and get no clicks in a terminal.
@@ -566,8 +568,9 @@ animation track raises, the playtest warns of mesh edits it can't see), but thes
 11. **`Colliders` don't see skinned poses.** A skinned character is seen by queries in its bind
     pose (a set holding one warns of it). Stand an invisible box or capsule in for it, moved with it,
     in the set instead.
-12. **`print()` while `run()` is going scribbles over the picture.** Put debugging output in a file,
-    or look at it in a playtest, where `print()` is harmless.
+12. **`print()` output shows only once the game ends.** `run()` holds it back while it goes (it
+    would scribble over the picture), so watch a value live on the status line, or print it in a
+    playtest.
 13. **Don't start the game from an agent's shell.** `run()` needs a terminal and raises without one;
     play it with the playtest. Keep `run()` inside `main()` behind
     `if __name__ == "__main__":` so the playtest and tests can import the file.

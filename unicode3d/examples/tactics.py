@@ -239,7 +239,6 @@ class Tactics:
     # ----- a frame -------------------------------------------------------------------------------------------
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)
         right, away = self.ground_axes()
         for ev in self.bar.handle(events, screen):
             if ev in (Key.ESC, 3):

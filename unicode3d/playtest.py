@@ -44,7 +44,7 @@ import numpy as np
 
 from . import mesh as mesh_module
 from .glyphs import GLYPH_MODES, GLYPH_SETS
-from .keys import Key, KeyRelease, MouseEvent
+from .keys import Key, KeyRelease, MouseEvent, key_codes
 from .color import COLOR_MODES
 from .terminal import Screen, compile_kernels
 
@@ -261,7 +261,7 @@ class Playtest:
         start = time.perf_counter()
         try:
             with warnings.catch_warnings(record=True) as caught:  # (the program's own filters still apply)
-                result = self.frame_fn(screen, self.dt, events)
+                result = self.frame_fn(screen, self.dt, key_codes(events))
                 if result is not False:
                     screen.refresh()
         except Exception as e:

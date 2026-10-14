@@ -26,7 +26,7 @@ from unicode3d.color import (Color, encode_index, encode_rgb, linear_to_srgb, lu
                              sgr_color, srgb_to_linear, to_linear_rgb, xterm_rgb)
 from unicode3d.console import WindowsInput, detect_color_mode, detect_glyphs
 from unicode3d.glyphs import GLYPH_SETS, frame_to_text, match_cells
-from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
+from unicode3d.keys import HeldKeys, InputDecoder, Key, KeyCode, KeyRelease, MouseEvent
 from unicode3d.raster import FrameBuffer
 from unicode3d.scene import Camera, Light, Lines, Model, Node, Object3D, Particles, PointLight, Renderer, union_bounds
 from unicode3d.shapes import blob_mesh, block_mesh, merge_meshes, text_bitmap, text_mesh
@@ -2222,6 +2222,35 @@ class InputTests(unittest.TestCase):
         con.down = set()
         self.assertEqual(screen.keys(), [])  # not asked for: releases only update screen.held
         self.assertNotIn("w", screen.held)
+
+    def test_keys_equal_their_characters(self):
+        class FakeConsole:
+            unicode, key_release, reports_releases = True, True, False
+            text = "q\x1b[A\x1b[119;1:3u"  # q, Up, and a kitty release of w
+            def size(self):
+                return 10, 4
+            def read(self):
+                text, self.text = self.text, ""
+                return text
+        screen = Screen(FakeConsole(), glyphs="quad", color="truecolor")
+        q, up, release = screen.keys()
+        self.assertIsInstance(q, KeyCode)
+        self.assertTrue(q == "q" and "q" == q and q == ord("q") and q != "w" and q != "qq" and not q != "q")
+        self.assertIn("q", [up, q])
+        self.assertIn(q, ("e", "q"))
+        self.assertNotIn(q, {"q"})  # (the hash is the int's: a set or dict of strings misses it)
+        self.assertIn(q, {ord("q")})
+        match q:
+            case "q":
+                pass
+            case _:
+                self.fail("case 'q' missed")
+        self.assertEqual((str(q), f"{q}", chr(q), repr(q)), ("113", "113", "q", "KeyCode('q')"))
+        self.assertIs(up, Key.UP)
+        self.assertNotEqual(up, "A")
+        self.assertEqual(release, KeyRelease(ord("w")))
+        self.assertEqual(release.key, "w")
+        self.assertIsInstance(release.key, KeyCode)
 
     def test_windows_records_translate_to_vt(self):
         from types import SimpleNamespace as NS

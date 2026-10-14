@@ -17,7 +17,7 @@ from .animation import (Animation, Clip, RotationTrack, SplineTrack, Track, ease
                         ease_out_back, ease_out_bounce, lerp)
 from .background import Fog, Gradient, Sky, SkyBox
 from .color import Color
-from .keys import HeldKeys, Key, KeyRelease, MouseEvent
+from .keys import HeldKeys, Key, KeyCode, KeyRelease, MouseEvent
 from .mesh import Mesh, make_box
 from .gltf import load_gltf
 from .models import Material, load_model, load_mtl, load_obj

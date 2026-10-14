@@ -797,7 +797,6 @@ class Walk:
         self.drawn = []  # what the last frame drew
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)
         events = self.panel.handle(self.bar.handle(events, screen))
         rows, cols = screen.size()
         view_rows = max(rows - 2, 1)

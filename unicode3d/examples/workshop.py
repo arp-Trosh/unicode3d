@@ -171,7 +171,6 @@ class Workshop:
             screen.text(y + 1 + GRAPH_H, x + 2 + i, "^")
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)
         for ev in self.panel.handle(self.bar.handle(events, screen)):
             if ev in (ord("q"), Key.ESC):
                 return False

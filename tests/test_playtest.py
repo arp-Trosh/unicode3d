@@ -76,6 +76,8 @@ class PlaytestTests(unittest.TestCase):
         test.wait(2).press("enter").press("a", "b").type("hi")
         self.assertEqual(self.game.events, [[], [], [Key.ENTER], [ord("a"), ord("b")], [ord("h")], [ord("i")]])
         self.assertEqual(self.game.dts, [0.05] * 6)
+        self.assertEqual(self.game.events[3], ["a", "b"])  # keys equal their characters, as from screen.keys()
+        self.assertEqual(repr(self.game.events[4]), "[KeyCode('h')]")
         self.assertEqual(test.frames, 6)
         self.assertAlmostEqual(test.now, 0.3)
         self.assertIn("Score 6", test.text())

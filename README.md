@@ -282,7 +282,7 @@ cube = Object3D(make_box(), color=Color.CYAN)   # or color=(r, g, b)
 renderer, camera, light = Renderer(), Camera(), Light()
 
 def frame(screen, dt, keys):
-    if ord("q") in keys or Key.ESC in keys:
+    if "q" in keys or Key.ESC in keys:                   # a key equals its character, or is a Key
         return False                                     # stops run()
     rows, cols = screen.size()
     screen.draw(renderer, [cube], camera, light, rows=-1)  # all but the last row
@@ -1209,15 +1209,21 @@ def frame(screen, dt, keys):
 <summary><h3 id="screen-and-run">Screen and run()</h3></summary>
 
 `run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None,
-key_release=False, erase=True)` takes over the terminal (naming its window `title`, if given) and restores it
+key_release=False, erase=True, max_dt=0.1)` takes over the terminal (naming its window `title`, if given) and restores it
 however the loop ends (Ctrl-C raises `KeyboardInterrupt`; `kill`'s SIGTERM exits as `sys.exit()`
 would, unless the program handles that signal itself). `frame_fn(screen, dt, keys)` returns
-`False` to stop. `keys` holds ints (a character's code, or a `Key` such as `Key.UP`, `Key.ENTER`,
-`Key.ESC`), `MouseEvent`s and, with `key_release=True`, `KeyRelease`s (see [Input](#input)).
+`False` to stop. `dt` is the seconds since the last frame, at most `max_dt` (after a pause, such as a
+dragged window or a stop in a debugger, the program goes on from where it was rather than jumping
+ahead; `None` passes the real time however long). `keys` holds key codes (a character's code, as a
+`KeyCode`, or a `Key` such as `Key.UP`, `Key.ENTER`, `Key.ESC`), `MouseEvent`s and, with
+`key_release=True`, `KeyRelease`s (see [Input](#input)).
 Without a terminal (stdin redirected, or a program started by a tool such as an agent's shell) it raises
 `OSError` saying so: play the program with the playtest instead (see [Making a game](unicode3d/starter/making-a-game.md)).
 Before each call the screen is erased, and after it what was drawn is sent to the terminal
-(`screen.refresh()`); `erase=False` keeps what was written from frame to frame instead.
+(`screen.refresh()`); `erase=False` keeps what was written from frame to frame instead. What the
+program prints while the loop runs (to stdout or stderr, where they are the terminal) is held back
+and printed once the terminal is restored: written at once, it would scribble over the picture and
+vanish with it.
 
 - `screen.size()` is the terminal's size in cells, `(rows, cols)`, also as `.rows` and `.cols`.
 - `screen.draw(renderer, objects, camera, lights, top=0, left=0, rows=None, cols=None)` renders a
@@ -1276,6 +1282,12 @@ When reporting a crash, include that file.
 
 <details>
 <summary><h3 id="input">Input</h3></summary>
+
+**Keys.** A key press is a `KeyCode`, an int (the character's code, `ord("q")`) that also equals the
+one-character string it types: `key == "q"`, `key in ("q", "e")` and `case "q":` all work, as do
+`key == ord("q")` and `chr(key)`. It hashes as the int it is, so a set or dict of strings doesn't
+find it (`{"q": ...}.get(key)` misses; look up `chr(key)`). Keys that aren't characters are `Key`
+values, which equal only ints: `Key.UP`, `Key.ENTER`, `Key.ESC`, `Key.F1` and so on.
 
 **Mouse.** `run(mouse=True)` reports clicks and the wheel as `MouseEvent(x, y, button, pressed,
 moved)`; `mouse="drag"` adds moves while a button is held (`moved=True`, `pressed=True`), which

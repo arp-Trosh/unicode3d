@@ -8,7 +8,8 @@ InputDecoder turns that text into key codes, KeyReleases and MouseEvents.
 
 Keys come out as ints: the character's code for ordinary keys (so `ord("q")`,
 13 for Enter, 9 for Tab, 27 for Esc, 127 or 8 for Backspace) and Key values for
-the rest. A held key repeats: the terminal sends it again and again after a
+the rest. Screen.keys() hands the character codes out as KeyCodes, which also
+equal the character they type (`key == "q"`). A held key repeats: the terminal sends it again and again after a
 short pause.
 
 Most terminals send only presses. Terminals that speak the kitty keyboard
@@ -57,6 +58,41 @@ class Key(IntEnum):
     PAGE_UP = 339
     BACK_TAB = 353
     END = 360
+
+
+class KeyCode(int):
+    """A character's key code, as screen.keys() gives it: an int (`ord("q")`) that also equals the one-character
+    string it types, so `key == "q"`, `key in ("q", "e")` and `case "q":` all work, as do `key == ord("q")` and
+    `chr(key)`. Its hash is the int's, so a set or dict of strings doesn't find it (`{"q": ...}.get(key)` misses;
+    look up `chr(key)` there). Keys that aren't characters come as Key values, which equal only ints."""
+    __slots__ = ()
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return len(other) == 1 and int(self) == ord(other)
+        return int.__eq__(self, other)
+
+    def __ne__(self, other):
+        equal = self.__eq__(other)
+        return equal if equal is NotImplemented else not equal
+
+    __hash__ = int.__hash__
+    __str__ = int.__repr__  # (str() and f-strings give the number, as for any int)
+
+    def __repr__(self):
+        return f"KeyCode({chr(self)!r})" if 0 <= self < 0x110000 else f"KeyCode({int(self)})"
+
+
+def key_codes(events):
+    """events with each character's code (a plain int, in a press or a KeyRelease) made a KeyCode."""
+    out = []
+    for e in events:
+        if type(e) is int:
+            e = KeyCode(e)
+        elif isinstance(e, KeyRelease) and type(e.key) is int:
+            e = KeyRelease(KeyCode(e.key))
+        out.append(e)
+    return out
 
 
 @dataclass(frozen=True)

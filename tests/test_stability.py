@@ -723,6 +723,30 @@ class RealTerminalTests(unittest.TestCase):
         self.assertEqual(code, 0, out[-2000:])
         self.assertIn(b"frame number 0", out)
 
+    def test_dt_is_limited_and_printing_waits_for_the_end(self):
+        # A frame that stalls (a breakpoint, a dragged window) gives the next frame a dt of at most max_dt (0.1 s),
+        # and what the program prints while run() goes comes out after the terminal is restored.
+        program = ("import sys, time\n"
+                   "from unicode3d.terminal import run\n"
+                   "dts = []\n"
+                   "def frame(screen, dt, keys):\n"
+                   "    dts.append(dt)\n"
+                   "    if screen.frame_count == 2: print('printed while running'); time.sleep(0.4)\n"
+                   "    if screen.frame_count == 3: print('and to stderr', file=sys.stderr)\n"
+                   "    screen.text(0, 0, f'frame {screen.frame_count}')\n"
+                   "    return 'q' not in keys\n"
+                   "run(frame)\n"
+                   "print('LONGEST', max(dts) <= 0.1 + 1e-9)\n")
+        with tempfile.TemporaryDirectory() as cache:
+            code, out = run_in_pty(["-c", program], 24, 80, [(6, lambda fd, *_: os.write(fd, b"q"))],
+                                   env={"XDG_CACHE_HOME": cache})
+        self.assertEqual(code, 0, out[-2000:])
+        text = out.decode("utf-8", "replace")
+        restored = text.rfind("\x1b[?1049l")
+        self.assertLess(restored, text.find("printed while running"))
+        self.assertLess(text.find("printed while running"), text.find("and to stderr"))
+        self.assertIn("LONGEST True", text)
+
     def test_sigterm_restores_the_terminal(self):
         # kill (SIGTERM) ends the program as sys.exit() would, so the terminal leaves raw mode and the alternate
         # screen; by default the signal ends Python at once, leaving both. (And fps=0 runs as fast as it can.)

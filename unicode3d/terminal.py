@@ -18,6 +18,7 @@ add_display_args() adds.
 import collections
 import contextlib
 import faulthandler
+import io
 import math
 import os
 import platform
@@ -34,7 +35,7 @@ from numba import njit
 from .color import _RGB, COLOR_MODES, DEFAULT, Color, ansi_color, put_int, put_sgr_color, quantize, to_linear_rgb
 from .console import detect_color_mode, detect_glyphs, open_console
 from .glyphs import GLYPH_MODES, GLYPH_SETS, frame_to_text, match_cells
-from .keys import HeldKeys, InputDecoder, Key, KeyRelease, MouseEvent
+from .keys import HeldKeys, InputDecoder, Key, KeyCode, KeyRelease, MouseEvent, key_codes
 from .animation import Animation, Clip, RotationTrack, Track
 from .background import Sky
 from .mesh import Mesh, make_box
@@ -42,7 +43,7 @@ from .pictures import cells_picture
 from .queries import Colliders
 from .scene import Camera, Light, Lines, Node, Object3D, Particles, PointLight, Renderer, Skin, union_bounds
 
-__all__ = ["Color", "Key", "KeyRelease", "MouseEvent", "Screen", "ScreenSize", "run", "compile_kernels",
+__all__ = ["Color", "Key", "KeyCode", "KeyRelease", "MouseEvent", "Screen", "ScreenSize", "run", "compile_kernels",
            "add_display_args", "display_options", "frame_to_text", "crash_log_path"]
 
 BOLD, DIM, REVERSE = 1, 2, 4
@@ -52,6 +53,7 @@ SETTLE_FRAMES = 30  # refreshes a cell may stay within Screen.color_tolerance of
 BACKGROUND_OUTPUT = True  # run() sends each frame to the terminal while drawing the next (see _Writer)
 COMPILE_MESSAGE = "First run compile, please wait..."
 COMPILE_NOTICE_DELAY = 0.5  # seconds: loading compiled kernels from Numba's cache takes less, compiling them more
+HELD_OUTPUT_LIMIT = 1 << 20  # characters of print() output run() keeps to show after it ends (the latest ones)
 CRASH_LOG_LIMIT = 1 << 20  # bytes: a longer crash log is cut down to its last quarter when run() opens it
 SYNC_BEGIN, SYNC_END = b"\x1b[?2026h", b"\x1b[0m\x1b[?2026l"  # synchronized output
 _CLEAR = np.frombuffer(b"\x1b[0m\x1b[2J", np.uint8)
@@ -326,8 +328,8 @@ class Screen:
     # ----- input ---------------------------------------------------------------------------
 
     def keys(self):
-        """Keys pressed and mouse events since the last call: ints (see keys.Key) and MouseEvents,
-        plus KeyReleases if the console was opened with key_release (run(key_release=True)).
+        """Keys pressed and mouse events since the last call: key codes (KeyCodes, which equal their character as
+        an int and as a string, and Key values) and MouseEvents, plus KeyReleases if the console was opened with key_release (run(key_release=True)).
 
         Also brings `held` up to date. Where releases are reported, Ctrl-C arrives
         as a key rather than a signal, and raises KeyboardInterrupt here as usual.
@@ -349,7 +351,7 @@ class Screen:
         self.held.update(events, now)
         if not self.key_release:
             events = [e for e in events if not isinstance(e, KeyRelease)]
-        return events
+        return key_codes(events)
 
     # ----- drawing -------------------------------------------------------------------------
 
@@ -783,8 +785,96 @@ def _exit_on_sigterm():
             signal.signal(getattr(signal, name), signal.SIG_DFL if name == "SIGTERM" else signal.default_int_handler)
 
 
+class _HeldOutput:
+    """Keeps what is written to sys.stdout and sys.stderr while run() goes (print(), warnings), to write it out once
+    the terminal is restored: written at once, it would scribble over the picture and be wiped with the alternate
+    screen. Keeps the latest HELD_OUTPUT_LIMIT characters."""
+
+    def __init__(self, streams):
+        self._streams = streams  # name -> the stream it stands in for
+        self._parts = collections.deque()  # (name, text), in the order written
+        self._size = self._dropped = 0
+        self._lock = threading.Lock()
+
+    def _write(self, name, text):
+        if not isinstance(text, str):
+            raise TypeError(f"write() argument must be str, not {type(text).__name__}")
+        with self._lock:
+            self._parts.append((name, text))
+            self._size += len(text)
+            while self._size > HELD_OUTPUT_LIMIT and len(self._parts) > 1:
+                self._size -= len(self._parts[0][1])
+                self._dropped += len(self._parts.popleft()[1])
+        return len(text)
+
+    def write_out(self):
+        """Write what was kept to the streams it was meant for."""
+        with self._lock:
+            parts, self._parts, dropped, self._dropped = list(self._parts), collections.deque(), self._dropped, 0
+        if dropped:
+            parts.insert(0, ("stderr", f"unicode3d: {dropped} earlier characters of output while running were "
+                                       f"dropped; the latest follow\n"))
+        for name, text in parts:
+            try:
+                self._streams[name].write(text)
+            except (OSError, ValueError):
+                pass
+        for stream in self._streams.values():
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+
+
+class _HeldStream(io.TextIOBase):
+    """What sys.stdout or sys.stderr is while run() holds output back: writes go to a _HeldOutput."""
+
+    def __init__(self, held, name, stream):
+        super().__init__()
+        self._held, self._name = held, name
+        self._encoding = getattr(stream, "encoding", None) or "utf-8"
+
+    @property
+    def encoding(self):
+        return self._encoding
+
+    def writable(self):
+        return True
+
+    def write(self, text):
+        return self._held._write(self._name, text)
+
+
+def _is_terminal(stream):
+    try:
+        return os.isatty(stream.fileno())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+@contextlib.contextmanager
+def _holding_output():
+    """While the block runs, keep what is written to sys.stdout and sys.stderr where they are the terminal (see
+    _HeldOutput), and write it out at the end."""
+    streams = {name: getattr(sys, name) for name in ("stdout", "stderr") if _is_terminal(getattr(sys, name))}
+    if not streams:
+        yield
+        return
+    held = _HeldOutput(streams)
+    ours = {name: _HeldStream(held, name, stream) for name, stream in streams.items()}
+    for name, stream in ours.items():
+        setattr(sys, name, stream)
+    try:
+        yield
+    finally:
+        for name, stream in ours.items():
+            if getattr(sys, name) is stream:  # (unless the program put a stream of its own there meanwhile)
+                setattr(sys, name, streams[name])
+        held.write_out()
+
+
 def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None, title=None, key_release=False,
-        erase=True):
+        erase=True, max_dt=0.1):
     """Take over the terminal and call frame_fn(screen, dt, keys) up to `fps` times a second until it returns False.
 
     Before each call the screen is erased (unless erase is False, for a program that keeps what it wrote from
@@ -792,6 +882,14 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
 
     frame_fn may change screen.fps (the target) as it runs; screen.measured_fps is the rate achieved. An fps of 0 draws
     frames as fast as it can.
+
+    dt is the time since the last frame in seconds, at most max_dt (after a pause, such as a window being dragged or
+    a stop in a debugger, the game goes on from where it was rather than jumping ahead); max_dt=None passes the
+    real time however long.
+
+    What the program prints (to sys.stdout or sys.stderr, where they are the terminal) while the loop runs is held
+    back and written out once the terminal is restored, so that it neither scribbles over the picture nor is lost
+    with it.
 
     mouse: False, True (clicks and wheel), "drag" (also moves while a button is
     held, for sliders) or "move" (every move, for hover effects).
@@ -814,7 +912,8 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
         # Releases are always asked for, so that screen.held is exact wherever the terminal can tell: a game that
         # walks while a key is held, and never asked for releases, would otherwise move on for half a second after
         # each tap. Only key_release passes them on as events.
-        with _exit_on_sigterm(), open_console(mouse=mouse, title=title, key_release=True) as console:
+        console = open_console(mouse=mouse, title=title, key_release=True)
+        with _exit_on_sigterm(), _holding_output(), console:
             screen = Screen(console, glyphs=glyphs, color=color, background=background)
             screen.key_release = key_release
             screen.fps = fps
@@ -830,6 +929,8 @@ def run(frame_fn, fps=30, glyphs=None, color=None, mouse=False, background=None,
                 while True:
                     start = time.perf_counter()
                     dt, last = start - last, start
+                    if max_dt is not None and 0 < max_dt < dt:  # (None, 0 or NaN: no limit)
+                        dt = max_dt
                     if start - second >= 1.0:
                         screen.measured_fps, second, frames = frames / (start - second), start, 0
                     frames += 1

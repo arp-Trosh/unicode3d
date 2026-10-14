@@ -46,7 +46,6 @@ class Game:
         self.current = Title(self)
 
     def frame(self, screen, dt, events):
-        dt = min(dt, 0.1)                       # a pause (a dragged window) mustn't jump the game ahead
         showing = self.current
         self.current = self.current.frame(screen, dt, events)
         if self.current is not None and self.current is not showing:
@@ -119,7 +118,7 @@ class Play:
 
     def frame(self, screen, dt, events):
         for ev in events:
-            if ev == ord("q"):
+            if ev == "q":                       # a key equals its character (or a Key: Key.ESC, Key.UP, ...)
                 return None
             if ev == Key.ESC:
                 return Title(self.game)
@@ -186,7 +185,7 @@ class GameOver:
 
     def frame(self, screen, dt, events):
         events = self.panel.handle(events)
-        if ord("q") in events or Key.ESC in events:
+        if "q" in events or Key.ESC in events:
             return None
         rows, cols = screen.size()
         centred(screen, rows // 2 - 2, "GAME OVER", Color.RED, bold=True)
