@@ -309,6 +309,8 @@ class TargetTests(unittest.TestCase):
                 load_target(f"{path}:Game(level=open('x'))")
             with self.assertRaisesRegex(ValueError, "file.py:Name"):
                 load_target(path)
+            with self.assertRaisesRegex(ValueError, "file.py:Name"):   # not a module "C" (Windows' drive colon)
+                load_target(r"C:\games\mygame.py")
             shadow = os.path.join(d, "random.py")
             with open(shadow, "w") as f:
                 f.write("def frame(screen, dt, events):\n    pass\n")

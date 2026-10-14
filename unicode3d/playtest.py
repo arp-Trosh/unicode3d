@@ -33,6 +33,7 @@ import importlib
 import importlib.util
 import inspect
 import os
+import re
 import shlex
 import sys
 import time
@@ -768,7 +769,8 @@ def load_target(target):
             raise ValueError(f"the arguments in {target}({rest} must be Python literals (numbers, strings, "
                              f"lists, ...): {e}") from None
     where, sep, name = target.rpartition(":")
-    if not sep or not where or not name:
+    dotted = r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*"
+    if not sep or not where or not re.fullmatch(dotted, name):   # (C:\game.py splits at the drive's colon)
         raise ValueError(f"name the program as file.py:Name or package.module:Name, not {target!r}")
     if where.endswith(".py") or os.sep in where or "/" in where:
         path = os.path.abspath(where)
