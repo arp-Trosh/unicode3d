@@ -23,7 +23,7 @@ write a starter game there:
 ```sh
 mkdir mygame && cd mygame
 python -m venv .venv && . .venv/bin/activate    # Windows: .venv\Scripts\activate
-pip install "unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.25.1"
+pip install "unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.26.0"
 python -m unicode3d.new .
 python -m unittest                              # the starter's tests: they play it off-screen
 ```
@@ -42,7 +42,7 @@ never overwrites a file, and writes:
 - `docs/making-a-game.md`: this guide, for the installed version. After upgrading unicode3d,
   `python -m unicode3d.new --guide .` replaces it.
 - `requirements.txt`, with unicode3d pinned to its release tag
-  (`unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.25.1`), for `pip install -r
+  (`unicode3d @ git+https://github.com/arp-Trosh/unicode3d@v0.26.0`), for `pip install -r
   requirements.txt` on another machine.
 - `.gitignore`, leaving out `.venv/`, `__pycache__/` and `playtest/` (the playtests' pictures).
 
